@@ -1826,12 +1826,98 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Why each dependency-free plan row did or did not dispatch last tick (#592). archived_closed/archived_merged rows are held by an archived slice; release a closed hold with `march legate requeue <heldBy> --profile <p>`; a merged hold also needs `--release-merged`, and only when the merged PR did not do this row's work (see `march legate queue`).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "rows",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 131,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (decision) (march_legate_dispatch_items{profile=~\"$profile\", conductor=~\"$conductor\"})",
+          "legendFormat": "{{decision}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Ready rows by dispatch decision",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 91
       },
       "id": 111,
       "panels": [],
@@ -1935,7 +2021,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 84
+        "y": 92
       },
       "id": 112,
       "options": {
@@ -1976,7 +2062,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 92
+        "y": 100
       },
       "id": 113,
       "panels": [],
@@ -2080,7 +2166,7 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 93
+        "y": 101
       },
       "id": 114,
       "options": {
@@ -2170,7 +2256,7 @@
         "h": 8,
         "w": 4,
         "x": 16,
-        "y": 93
+        "y": 101
       },
       "id": 115,
       "options": {
@@ -2237,7 +2323,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 93
+        "y": 101
       },
       "id": 116,
       "options": {
@@ -2277,7 +2363,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 101
+        "y": 109
       },
       "id": 117,
       "panels": [],
@@ -2381,7 +2467,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 102
+        "y": 110
       },
       "id": 118,
       "options": {
@@ -2513,7 +2599,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 102
+        "y": 110
       },
       "id": 119,
       "options": {
@@ -2645,7 +2731,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 102
+        "y": 110
       },
       "id": 120,
       "options": {
@@ -2686,7 +2772,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 118
       },
       "id": 121,
       "panels": [],
@@ -2744,7 +2830,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 111
+        "y": 119
       },
       "id": 122,
       "options": {
@@ -2830,7 +2916,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 111
+        "y": 119
       },
       "id": 123,
       "options": {
@@ -2916,7 +3002,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 111
+        "y": 119
       },
       "id": 124,
       "options": {
@@ -3002,7 +3088,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 119
+        "y": 127
       },
       "id": 125,
       "options": {
@@ -3043,7 +3129,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 127
+        "y": 135
       },
       "id": 126,
       "panels": [],
@@ -3132,7 +3218,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 136
       },
       "id": 127,
       "options": {
@@ -3172,7 +3258,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 136
+        "y": 144
       },
       "id": 128,
       "panels": [],
@@ -3261,7 +3347,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 137
+        "y": 145
       },
       "id": 129,
       "options": {
@@ -3323,7 +3409,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 153
       },
       "id": 130,
       "options": {

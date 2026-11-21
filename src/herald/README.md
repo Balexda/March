@@ -55,7 +55,7 @@ metrics label).
 
 - **Observation events** (Herald-written): `slice.pr.changed`,
   `slice.output.changed`, `session.changed`, `workers.changed`,
-  `smithy.queue.changed`, `heartbeat`. (`state.error` / `state.ok` are retired as
+  `smithy.queue.changed`, `repo.sync.changed` (#592, on change only), `heartbeat`. (`state.error` / `state.ok` are retired as
   of #176 — they signalled a `state.json` read failure — but the reducer still
   folds them for replay of older logs.)
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,

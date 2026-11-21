@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { bearerMatches } from "../../shared/bearer.js";
 import { threadCommentIds } from "./handlers/babysit.js";
 import type { LoopSnapshot } from "./runtime.js";
+import { releasableArchive } from "./pure/slice.js";
 
 /**
  * HTTP API for the profile-agnostic Legate service, built on Fastify. The
@@ -130,6 +131,9 @@ export interface RequeueInput {
   sliceId: string;
   /** Close the slice's open PR as part of the requeue (refused without it). */
   closePr?: boolean;
+  /** Release an ARCHIVED slice whose PR merged (#592). An archived CLOSED slice
+   *  is released without it; a merged one is refused unless this is set. */
+  releaseMerged?: boolean;
   /** Who asked (attribution in the event log). */
   operator?: string;
   /** Why (attribution; also the PR-close comment). */
@@ -145,6 +149,8 @@ export interface RequeueResult {
   requested?: boolean;
   /** The requeue will close this open PR. */
   closesPr?: number | null;
+  /** The target is an archived slice; the requeue releases its hold on the plan row (#592). */
+  releasesArchive?: "MERGED" | "CLOSED";
   /** HTTP status hint for a refusal (404 unknown, 409 conflict). */
   status?: number;
   error?: string;
@@ -256,6 +262,40 @@ export function statusForRecord(
   };
 }
 
+/** One profile's `/queue` body from its latest dispatch snapshot (pure; testable). */
+export function queueForEntry(entry: { lastHeartbeat: any; lastDispatch?: any } | undefined): Record<string, unknown> {
+  const r = entry?.lastHeartbeat;
+  const d = entry?.lastDispatch;
+  return {
+    last_tick_at: d?.at ?? r?.ts ?? null,
+    smithy_ok: d ? d.smithyOk : null,
+    queue: {
+      dispatchable: r?.dispatchable_count ?? 0,
+      blocked: r?.blocked_count ?? 0,
+      total: r?.pending_total ?? 0,
+    },
+    items: d?.items ?? [],
+    checkout: d?.checkout ?? null,
+  };
+}
+
+/**
+ * Build the `/queue` payload (#592): why each ready plan item did or did not
+ * dispatch on the profile's last tick. With `profile`, that profile (or null for
+ * an unknown one); else every profile under `by_profile`.
+ */
+export function buildQueue(ctx: LoopHttpContext, profile?: string): Record<string, unknown> | null {
+  const snap = ctx.getSnapshot();
+  if (profile) {
+    const entry = Object.hasOwn(snap.byProfile, profile) ? snap.byProfile[profile] : undefined;
+    if (!entry) return null;
+    return { ok: true, profile, ...queueForEntry(entry) };
+  }
+  const byProfile: Record<string, unknown> = {};
+  for (const p of snap.profiles) byProfile[p] = queueForEntry(snap.byProfile[p]);
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+}
+
 /** Build the /status payload. With `profile`, that profile's status; else all. */
 export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
   const snap = ctx.getSnapshot();
@@ -263,11 +303,11 @@ export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<stri
   if (profile) {
     const entry = snap.byProfile[profile];
     if (!entry) return { ok: false, error: `unknown profile "${profile}".`, profiles: snap.profiles };
-    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick) };
+    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick), checkout: entry.lastDispatch?.checkout ?? null };
   }
   const byProfile: Record<string, unknown> = {};
   for (const p of snap.profiles) {
-    byProfile[p] = statusForRecord(snap.byProfile[p].lastHeartbeat, tick);
+    byProfile[p] = { ...statusForRecord(snap.byProfile[p].lastHeartbeat, tick), checkout: snap.byProfile[p].lastDispatch?.checkout ?? null };
   }
   return { ok: true, profiles: snap.profiles, by_profile: byProfile };
 }
@@ -348,8 +388,9 @@ export function resolveRespondTarget(workingState: any, sliceId: string): Respon
 
 /** The outcome of resolving a requeue target from a profile's working state (pure). */
 export type RequeueTarget =
-  | { ok: true; openPr: number | null }
+  | { ok: true; openPr: number | null; archived?: "MERGED" | "CLOSED" }
   | { ok: false; status: 404 | 409; error: string };
+
 
 /**
  * Resolve (and validate) the slice a requeue call targets (#588/#593). Pure +
@@ -359,13 +400,21 @@ export type RequeueTarget =
  * slice, a merged PR, and an open PR unless the caller opts into closing it.
  * `observedPr` is the fold's PR observation (fresher than the warm record).
  */
-export function resolveRequeueTarget(workingState: any, sliceId: string, closePr: boolean, observedPr?: any): RequeueTarget {
+export function resolveRequeueTarget(
+  workingState: any,
+  sliceId: string,
+  closePr: boolean,
+  observedPr?: any,
+  releaseMerged = false,
+): RequeueTarget {
   const slice = workingState?.slices?.[sliceId];
   if (!slice || typeof slice !== "object") {
     const archived = workingState?.archived_slices?.[sliceId];
-    return archived
-      ? { ok: false, status: 409, error: `slice "${sliceId}" is archived (${archived.terminal_state ?? "done"}) — nothing to requeue.` }
-      : { ok: false, status: 404, error: `unknown slice "${sliceId}".` };
+    if (!archived) return { ok: false, status: 404, error: `unknown slice "${sliceId}".` };
+    const release = releasableArchive(archived, releaseMerged);
+    return release.ok
+      ? { ok: true, openPr: null, archived: release.terminal }
+      : { ok: false, status: 409, error: `slice "${sliceId}" ${release.error}.` };
   }
   if (slice.recovered) return { ok: false, status: 409, error: `slice "${sliceId}" was already recovered — it re-dispatches on its own.` };
   if (slice.stage === "hatchery-pending") {
@@ -495,6 +544,18 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     return buildStatus(ctx, profile);
   });
 
+  // Per-item dispatch decisions (#592): why each ready plan item did or did not
+  // dispatch last tick, the slice that holds it, and the checkout sync status.
+  app.get("/queue", async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const body = buildQueue(ctx, profile);
+    if (body) return body;
+    reply.code(404);
+    return { ok: false, error: `unknown profile "${profile}".`, profiles: ctx.getSnapshot().profiles };
+  });
+
   // Interrogation endpoint: list escalated tasks (what the task is, the PR, the
   // escalation details) for a profile — the operator's view of work that needs
   // manual resolution (e.g. steward_stuck) now that the legate-agent path isn't
@@ -589,9 +650,11 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
       reply.code(400);
       return { ok: false, error: "sliceId path param is required." };
     }
-    if (body.closePr !== undefined && typeof body.closePr !== "boolean") {
-      reply.code(400);
-      return { ok: false, error: "closePr must be a boolean." };
+    for (const field of ["closePr", "releaseMerged"] as const) {
+      if (body[field] !== undefined && typeof body[field] !== "boolean") {
+        reply.code(400);
+        return { ok: false, error: `${field} must be a boolean.` };
+      }
     }
     const attribution = readOperatorFields(body);
     if (!attribution.ok) {
@@ -606,6 +669,7 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
       profile,
       sliceId,
       closePr: body.closePr === true,
+      ...(body.releaseMerged === true ? { releaseMerged: true } : {}),
       ...attribution.fields,
     });
     reply.code(leverStatus(result));

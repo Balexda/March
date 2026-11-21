@@ -100,6 +100,7 @@ grouping.
 | `legate.review.request` | Legate loop | A configured reviewer request was made, deferred or refused. The slice child span records the reviewer, verb, reason and outcome. Failures, cap exhaustion and unavailable identity mark it errored |
 | `legate.operator.<action>` | Legate loop | An operator lever on the Legate API (#593): `recover`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`. Carries `march.operator` and `march.operator.action`. A child of the slice trace for slice levers, a root for the profile levers. Errored on refusal. Respond and requeue keep `legate.respond` / `legate.requeue.request` and add `march.operator` |
 | `legate.operator-merge` | Legate loop | The tick's execution of an accepted merge-now request (#593): the squash-merge, or a refusal/failed merge (errored, with `march.error`). `legate.operator.merge` records only the API's acceptance |
+| `legate.pr-label` | Legate loop | Owned PR label reconciliation (`march:opened` / `march:needs-human`, `pr-label-added` / `pr-label-removed`). Nested on the slice's trace when the PR is slice-linked, else a per-loop trace; errored on `pr-label-failed`. Kill switch `MARCH_LEGATE_PR_LABELS=0` |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
@@ -308,6 +309,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks the loop would dispatch this tick (ready − in-flight; #219) |
 | `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
 | `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
+| `march.legate.dispatch.items` (gauge) | `march_legate_dispatch_items` | dependency-free plan items by dispatch `decision` (#592): `dispatch`, `spawn_cap`, `in_flight`, `recovery_due`, `recovery_backoff`, `archived_merged`, `archived_closed`, `archived_other`; the per-item rows are on the legate's `GET /queue` |
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
 | `march.legate.slices` (gauge) | `march_legate_slices` | non-archived slices by lifecycle `stage` (#220) |
 | `march.legate.slices.ready_to_merge` (gauge) | `march_legate_slices_ready_to_merge` | `pr-open` slices clean+mergeable, no threads owed (#220) |
@@ -319,6 +321,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.review.rate_limited` (counter) | `march_legate_review_rate_limited_total` | Observed rate-limit hits by `reviewer` |
 | `march.legate.operator.actions` (counter) | `march_legate_operator_actions_total` | Operator levers requested through the Legate API (#593), by `action` (`recover`, `respond`, `requeue`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`) and `outcome` (`accepted` / `refused`). Who asked is in the event envelope and span, never a label |
 | `march.legate.dispatch.paused` (gauge) | `march_legate_dispatch_paused` | `1` while an operator has paused fresh dispatch for the profile (#593) |
+| `march.legate.pr_labels` (counter) | `march_legate_pr_labels_total` | Owned PR label reconciliations by `label` (`march:opened`, `march:needs-human`, `other`), `op` (`add`, `remove`, `unknown`) and `outcome` (`ok`, `failed`); labelled with `processor` |
 
 > Gauges carry no `unit`: the OTel→Prometheus bridge exports a `unit: "1"`
 > instrument with a `_ratio` suffix (e.g. `march_legate_loop_up_ratio`), which

@@ -4,6 +4,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { apply, assess, MAX_REQUEUE_ATTEMPTS, type RequeueDeps } from "./requeue.js";
 import type { HandlerContext, LoopState, RequeueRequest } from "../state/types.js";
+import { classifyReady } from "../pure/slice.js";
+import { dispatchSliceId } from "../pure/dispatch-id.js";
 
 function loopState(over: Partial<LoopState> & { raw?: any } = {}): LoopState {
   const raw = { slices: {}, archived_slices: {}, transient_retry_counts: {}, ...((over as any).raw || {}) };
@@ -211,5 +213,67 @@ describe("requeue apply", () => {
     const res = await apply(assess(state), c, state, deps());
     expect(c.broodTeardown).not.toHaveBeenCalled();
     expect(res.actions[0]).toMatchObject({ action: "requeue-done" });
+  });
+});
+
+describe("requeue of an archived hold (#592)", () => {
+  const archivedState = (terminal_state: string, request: RequeueRequest) =>
+    loopState({
+      raw: { archived_slices: { s: { command: "smithy.forge", branch: "smithy/forge/s", pr_number: 333, terminal_state } } },
+      requeueRequests: [request],
+    });
+
+  it("releases an archived CLOSED slice: no teardown, deletes the leftover branch, tombstones", async () => {
+    const state = archivedState("CLOSED", req("s"));
+    const c = ctx();
+    const d = deps({ deleteRemoteBranch: vi.fn().mockResolvedValue(true) });
+    const decisions = assess(state);
+    expect(decisions).toEqual([expect.objectContaining({ sliceId: "s", action: "release-archived", terminal: "CLOSED" })]);
+    const res = await apply(decisions, c, state, d);
+    expect(c.broodTeardown).not.toHaveBeenCalled();
+    expect(d.closePr).not.toHaveBeenCalled();
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/forge/s", "s");
+    expect(emitted(c)).toEqual([{ type: "slice.recovery.requested", sliceId: "s", rung: 3 }]);
+    expect(state.raw.archived_slices.s).toBeUndefined();
+    expect(res.actions[0]).toMatchObject({ action: "requeue-done", archived: true, terminal: "CLOSED" });
+  });
+
+  it("refuses an archived MERGED slice without releaseMerged, and releases it with it", async () => {
+    const refused = archivedState("MERGED", req("s"));
+    expect(assess(refused)).toEqual([expect.objectContaining({ action: "refuse", reason: expect.stringMatching(/releaseMerged/) })]);
+
+    const state = archivedState("MERGED", req("s", { releaseMerged: true }));
+    const c = ctx();
+    const d = deps();
+    await apply(assess(state), c, state, d);
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/forge/s", "s");
+    expect(emitted(c)).toEqual([{ type: "slice.recovery.requested", sliceId: "s", rung: 3 }]);
+  });
+
+  it("reads the fold's PR state when the archive lacks a terminal outcome", () => {
+    const state = loopState({
+      raw: { archived_slices: { s: { command: "smithy.forge", branch: "b" } } },
+      perSlice: { s: { pr: { number: 9, state: "CLOSED" } } },
+      requeueRequests: [req("s")],
+    });
+    expect(assess(state)).toEqual([expect.objectContaining({ action: "release-archived", terminal: "CLOSED" })]);
+  });
+});
+
+describe("releasing an archived hold frees the plan row (#592 end to end)", () => {
+  it("a row held as archived_closed dispatches once its archive is requeued", async () => {
+    const item = { path: "docs/x.tasks.md", next_action: { command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"] } };
+    const sid = dispatchSliceId(item);
+    const state = loopState({
+      raw: {
+        archived_slices: {
+          [sid]: { command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"], artifact_path: "docs/x.tasks.md", terminal_state: "CLOSED", pr_number: 333 },
+        },
+      },
+      requeueRequests: [req(sid)],
+    });
+    expect(classifyReady(state.raw, [item])[0]).toMatchObject({ decision: "archived_closed", heldBy: { sliceId: sid, prNumber: 333 } });
+    await apply(assess(state), ctx(), state, deps());
+    expect(classifyReady(state.raw, [item])[0].decision).toBe("dispatch");
   });
 });

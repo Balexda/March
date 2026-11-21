@@ -105,6 +105,32 @@ path on the host and in any spawn container that mounts it — no path translati
 no broken `git apply` cwd. (Whether sessions should instead run fully in-container
 is the deferred decision in #161.)
 
+### Session compaction and prompt-cache tuning
+
+Stewards idle for long stretches (CI, review) and then resume. A resume after the
+prompt cache has expired re-writes the whole conversation uncached, so the cost
+of a gap grows with the context. No Claude Code hook can start a compaction, so
+March tunes Claude Code's own idle and automatic compaction through an `env`
+block in the settings files it generates: the steward `settings.json` (written at
+`march castra serve` start, loaded via `claude --settings`) and the legate
+conductor's `.claude/settings.json` (written by `march init`).
+
+| Claude Code variable | Default | March override |
+|---|---|---|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `1h` | `MARCH_SESSION_CACHE_TTL` (`5m` or `1h`) |
+| `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` | `100000` | `MARCH_SESSION_IDLE_COMPACT_MIN_TOKENS` |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `200000` | `MARCH_SESSION_AUTO_COMPACT_WINDOW` |
+
+Set `MARCH_SESSION_COMPACTION=0` to write no `env` block at all. Invalid
+overrides fall back to the default; token counts are clamped to Claude Code's
+documented ranges. The values are read where the file is written — Castra's
+environment for stewards (the compose file passes all four through), the shell
+running `march init` for the conductor — and apply to sessions launched after
+that. Idle compaction needs Claude Code v2.1.290+ on the host. The one-hour TTL
+is what idle compaction requires; on API-key billing it trades a higher
+cache-write price for surviving gaps longer than five minutes. Source:
+`src/shared/claude-session-env.ts`.
+
 ## Security
 
 Even on the `march` network, any peer that joins could otherwise drive

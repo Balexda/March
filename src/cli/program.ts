@@ -29,7 +29,7 @@ import type { MergePolicy, MergeRequirements } from "../herald/profiles/merge-po
 import { editVerbPolicy, showMergePolicy, type VerbPolicyEdits } from "./merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
-import { legatePost, resolveOperator } from "./legate-client.js";
+import { legatePost, legateServiceBase, resolveOperator } from "./legate-client.js";
 import {
   HatcheryClientError,
   runSpawnViaService,
@@ -1361,21 +1361,33 @@ leverOptions(
     .description(
       "Discard a slice's current attempt and put its work back in the queue: tear down the steward session, worktree and branch, then let the legate re-dispatch the smithy item fresh. Works for any in-flight slice — including a steward that asked a question and then died, or one that went off the rails. Refuses a slice with an open PR unless --close-pr. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
     )
-    .option("--close-pr", "Also close the slice's open PR (required when it has one)."),
+    .option("--close-pr", "Also close the slice's open PR (required when it has one).")
+    .option(
+      "--release-merged",
+      "Release an archived slice whose PR MERGED, so its plan row dispatches again. Use only when the merged PR did not do this row's work (an id collision).",
+    ),
   "Why — recorded with the request and used as the PR-close comment.",
-).action(async (sliceId: string, opts: LeverOpts & { closePr?: boolean }) => {
+).action(async (sliceId: string, opts: LeverOpts & { closePr?: boolean; releaseMerged?: boolean }) => {
   commandHandled = true;
   const id = requireSliceId(sliceId, "requeue");
   if (!id) return;
   try {
     const profileName = await resolveSliceProfile(opts.profile, "requeue");
     if (!profileName) return;
-    const body = { profile: profileName, closePr: opts.closePr === true, ...leverAttribution(opts) };
-    const result = await postLever<{ closesPr?: number | null }>(`/slices/${encodeURIComponent(id)}/requeue`, body, "requeue");
+    const body = {
+      profile: profileName,
+      closePr: opts.closePr === true,
+      ...(opts.releaseMerged === true ? { releaseMerged: true } : {}),
+      ...leverAttribution(opts),
+    };
+    const result = await postLever<{ closesPr?: number | null; releasesArchive?: string }>(`/slices/${encodeURIComponent(id)}/requeue`, body, "requeue");
     if (!result) return;
     console.log(
-      `Requeue requested for ${id} (profile=${profileName})${result.closesPr ? `, closing PR #${result.closesPr}` : ""}. ` +
-        "On its next tick the legate tears down the steward, worktree and branch, then re-dispatches the work fresh.",
+      result.releasesArchive
+        ? `Release requested for archived ${result.releasesArchive} slice ${id} (profile=${profileName}). ` +
+            "On its next tick the legate drops the archive's hold, and the plan row dispatches fresh."
+        : `Requeue requested for ${id} (profile=${profileName})${result.closesPr ? `, closing PR #${result.closesPr}` : ""}. ` +
+            "On its next tick the legate tears down the steward, worktree and branch, then re-dispatches the work fresh.",
     );
     process.exitCode = SUCCESS;
   } catch (err) {
@@ -1512,6 +1524,47 @@ profileLeverOptions(
   commandHandled = true;
   await runProfileLever("/dispatch/resume", "resume", opts, (targets) => `Dispatch resumed for: ${targets}.`);
 });
+
+legate
+  .command("queue")
+  .description(
+    "Show why each dependency-free plan row did or did not dispatch on the legate's last tick (dispatch, spawn_cap, in_flight, recovery_*, archived_*), the slice holding it back, and the plan checkout's sync status. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+  )
+  .option("--profile <profile>", "Show one profile. When omitted, every registered profile is shown.")
+  .option("--json", "Print the raw GET /queue body.")
+  .action(async (opts: { profile?: string; json?: boolean }) => {
+    commandHandled = true;
+    const base = legateServiceBase();
+    const named = opts.profile?.trim();
+    const url = `${base}/queue${named ? `?profile=${encodeURIComponent(named)}` : ""}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    } catch (err) {
+      const error =
+        `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
+        "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.";
+      if (opts.json) console.log(JSON.stringify({ ok: false, error }, null, 2));
+      else process.stderr.write(error + "\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    const body = (await res.json().catch(() => ({}))) as any;
+    if (!res.ok || !body?.ok) {
+      const error = body?.error ?? `legate queue failed (HTTP ${res.status}).`;
+      if (opts.json) console.log(JSON.stringify({ ...body, ok: false, error, status: res.status }, null, 2));
+      else process.stderr.write(error + "\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(body, null, 2));
+    } else {
+      const { formatQueue } = await import("./legate-queue.js");
+      console.log(formatQueue(body));
+    }
+    process.exitCode = SUCCESS;
+  });
 
 // Profile registry — Herald is the source of truth for which profiles the single
 // march-legate service drives. `march legate init` registers automatically; these

@@ -10,7 +10,8 @@ import {
   recordHeraldObserveError,
   startHeraldHeartbeat,
 } from "../../observability/herald-metrics.js";
-import { createSenseIo } from "../../observe/sense-io.js";
+import { createSenseIo, type CheckoutStatus, type SyncResult } from "../../observe/sense-io.js";
+import type { RepoSyncStatus } from "../events.js";
 import { loadMeta, resolveIntervalSeconds, type LoopMeta } from "../../legate/loop/meta.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import { resolveHeraldPort } from "../config.js";
@@ -105,7 +106,9 @@ function resolveMetaPath(
  *  Herald-owned default-branch sync (#300). */
 export interface ObserveDeps {
   readonly senseDeps: SenseDeps;
-  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<void>;
+  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<SyncResult>;
+  /** No-fetch checkout read for the failed-sync status (#592). */
+  readonly checkoutStatus: (repoPath: string, knownDefault?: string) => Promise<CheckoutStatus>;
 }
 
 /**
@@ -125,22 +128,27 @@ export function buildObserveDeps(meta: LoopMeta, app: FastifyInstance, tessera: 
   });
   return {
     senseDeps: io.toSenseDeps(),
-    syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
-      await io.syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
-    },
+    syncDefaultBranch: (repoPath: string, knownDefault?: string) =>
+      io.syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } }),
+    checkoutStatus: (repoPath: string, knownDefault?: string) =>
+      io.checkoutStatus({ repo: { path: repoPath, default_branch: knownDefault } }),
   };
 }
 
 export async function observeProfiles(
   app: FastifyInstance, store: EventStore, profiles: readonly ProfileRecord[], tessera: TesseraClient,
+  onSync?: (profile: string, sync: RepoSyncStatus) => void,
 ) {
   let appendedTotal = 0;
   let maxDurationMs = 0;
   const eventsByType: Record<string, number> = {};
   for (const rec of profiles) {
     try {
-      const { senseDeps, syncDefaultBranch } = buildObserveDeps(metaForProfile(rec), app, tessera);
-      const result = await runObservation({ store, senseDeps, profile: rec.profile, syncDefaultBranch });
+      const { senseDeps, syncDefaultBranch, checkoutStatus } = buildObserveDeps(metaForProfile(rec), app, tessera);
+      const result = await runObservation({
+        store, senseDeps, profile: rec.profile, syncDefaultBranch, checkoutStatus,
+        onSync: onSync ? (sync) => onSync(rec.profile, sync) : undefined,
+      });
       maxDurationMs = Math.max(maxDurationMs, result.durationMs);
       for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
       appendedTotal += result.appended.length;
@@ -182,9 +190,21 @@ export async function startServer(
   const meta = metaPath ? loadMeta(metaPath) : null;
   const intervalMs = (options.intervalSeconds ?? resolveIntervalSeconds()) * 1000;
 
-  const status: { lastObserveAtMs: number | null; lastObserveDurationMs: number | null } = {
+  const status: {
+    lastObserveAtMs: number | null;
+    lastObserveDurationMs: number | null;
+    syncByProfile: Record<string, { lastFetchAt: string | null; lastSuccessAt: string | null }>;
+  } = {
     lastObserveAtMs: null,
     lastObserveDurationMs: null,
+    syncByProfile: {},
+  };
+  // #592: per-profile sync attempt / success times, in memory (the fold only
+  // records a change, so it can't say when the last fetch happened).
+  const recordSync = (profile: string, sync: RepoSyncStatus) => {
+    const entry = (status.syncByProfile[profile] ??= { lastFetchAt: null, lastSuccessAt: null });
+    entry.lastFetchAt = sync.at;
+    if (sync.ok) entry.lastSuccessAt = sync.at;
   };
 
   const { app, store, profileStore } = await buildServer({
@@ -217,7 +237,7 @@ export async function startServer(
       // its own try/catch so one bad repo (gh outage, missing path) can't stall
       // the others or abort the interval.
       const profiles = profileStore.list();
-      const { appendedTotal, maxDurationMs, eventsByType } = await observeProfiles(app, store, profiles, tessera);
+      const { appendedTotal, maxDurationMs, eventsByType } = await observeProfiles(app, store, profiles, tessera, recordSync);
       status.lastObserveAtMs = Date.now();
       status.lastObserveDurationMs = maxDurationMs;
       recordHeraldObserve({ durationSeconds: maxDurationMs / 1000, eventsByType });

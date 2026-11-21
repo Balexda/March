@@ -263,6 +263,25 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect(status.last_observe_duration_ms).toBe(42);
   });
 
+  it("#592: repo.sync.changed is validated, folded, and served per profile on /status", async () => {
+    const at = "2026-11-19T00:00:00.000Z";
+    const { app, store } = await buildApp(() => ({
+      lastObserveAtMs: Date.now(),
+      lastObserveDurationMs: 1,
+      syncByProfile: { p: { lastFetchAt: at, lastSuccessAt: at } },
+    }));
+    close = async () => { await app.close(); store.close(); };
+    const sync = { ok: true, defaultBranch: "main", head: "aaa", originHead: "aaa", behind: 0, ahead: 0, at };
+    const ok = await app.inject({ method: "POST", url: "/events", payload: { source: "herald", profile: "p", type: "repo.sync.changed", sync } });
+    expect(ok.statusCode).toBe(201);
+    const bad = await app.inject({
+      method: "POST", url: "/events", payload: { source: "herald", profile: "p", type: "repo.sync.changed", sync: { ...sync, behind: -1 } },
+    });
+    expect(bad.statusCode).toBe(400);
+    const status = (await app.inject({ method: "GET", url: "/status" })).json();
+    expect(status.by_profile.p.sync).toMatchObject({ ok: true, head: "aaa", behind: 0, last_fetch_at: at, last_success_at: at });
+  });
+
   it("GET /readyz reports tool availability", async () => {
     const { app, store } = await buildApp();
     close = async () => { await app.close(); store.close(); };

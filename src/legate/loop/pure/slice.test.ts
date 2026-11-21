@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   alreadyArchivedSlice,
   blockingMergedArchive,
+  classifyReady,
+  findArchiveBlocker,
+  findLiveBlocker,
   createSpawnBudget,
   DISPATCH_RECOVERY_LIMIT,
   dispatchableReady,
@@ -509,5 +512,90 @@ describe("dispatch-recovery self-heal state (#460)", () => {
     const cold: any = {};
     decreaseDispatchRecoveryRate(cold);
     expect(cold[DISPATCH_RECOVERY_RATE_FIELD] ?? 1).toBe(1);
+  });
+});
+
+describe("classifyReady (#592 per-item dispatch decisions)", () => {
+  const SID = dispatchSliceId(item);
+  const action = { command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"], artifact_path: "docs/x.tasks.md" };
+  const one = (state: any, nowMs = NaN) => classifyReady(state, [item], nowMs)[0];
+
+  it("a ready item with no blocker dispatches", () => {
+    expect(one({ slices: {}, archived_slices: {} })).toMatchObject({
+      decision: "dispatch",
+      sliceId: SID,
+      path: "docs/x.tasks.md",
+      command: "smithy.forge",
+      arguments: ["docs/x.tasks.md", "1"],
+    });
+  });
+
+  it("an archived CLOSED slice with the same id holds the item as archived_closed", () => {
+    const state = { slices: {}, archived_slices: { [SID]: { ...action, terminal_state: "CLOSED", pr_number: 333 } } };
+    expect(one(state)).toMatchObject({
+      decision: "archived_closed",
+      heldBy: { sliceId: SID, matchedOn: "id", terminal: "CLOSED", prNumber: 333 },
+    });
+  });
+
+  it("an archived MERGED slice under ANOTHER id but the same action key is archived_merged, held by that id", () => {
+    const state = { slices: {}, archived_slices: { "other-forge": { ...action, terminal_state: "MERGED", pr_number: 513 } } };
+    expect(one(state)).toMatchObject({
+      decision: "archived_merged",
+      heldBy: { sliceId: "other-forge", matchedOn: "action_key", terminal: "MERGED", prNumber: 513 },
+    });
+  });
+
+  it("an archive matched only by branch, with no terminal PR, is archived_other", () => {
+    const branch = classifyReady({}, [item])[0].branch;
+    const state = { slices: {}, archived_slices: { old: { command: "smithy.cut", branch, terminal_state: null } } };
+    expect(one(state)).toMatchObject({ decision: "archived_other", heldBy: { sliceId: "old", matchedOn: "branch", terminal: null } });
+  });
+
+  it("a stub archive at the item's id does not hold it", () => {
+    expect(one({ slices: {}, archived_slices: { [SID]: {} } }).decision).toBe("dispatch");
+  });
+
+  it("a live slice is in_flight; a merged live slice with another id releases the artifact", () => {
+    expect(one({ slices: { [SID]: { stage: "pr-open" } }, archived_slices: {} })).toMatchObject({
+      decision: "in_flight",
+      heldBy: { sliceId: SID, matchedOn: "id", stage: "pr-open" },
+    });
+    expect(one({ slices: { other: { ...action, stage: "merged" } }, archived_slices: {} }).decision).toBe("dispatch");
+    expect(one({ slices: { other: { ...action, stage: "implementing" } }, archived_slices: {} })).toMatchObject({
+      decision: "in_flight",
+      heldBy: { sliceId: "other", matchedOn: "action_key" },
+    });
+  });
+
+  it("a recoverable escalation is recovery_due, or recovery_backoff with retryAt while cooling down", () => {
+    const escalated = { ...action, stage: "escalated", escalated_reason: "hatchery_dispatch_failed" };
+    expect(one({ slices: { [SID]: escalated }, archived_slices: {} }).decision).toBe("recovery_due");
+    const until = Date.parse("2026-11-19T12:00:00.000Z");
+    const cooling = { slices: { [SID]: escalated }, archived_slices: {},
+      transient_retry_counts: { [recoveryAttemptKey(SID)]: 1 },
+      [DISPATCH_RECOVERY_BACKOFF_FIELD]: { [SID]: until },
+    };
+    expect(one(cooling, until - 1000)).toMatchObject({ decision: "recovery_backoff", retryAt: "2026-11-19T12:00:00.000Z" });
+  });
+
+  it("a non-recoverable escalation stays in_flight", () => {
+    const state = { slices: { [SID]: { ...action, stage: "escalated", escalated_reason: "steward_awaiting_input" } }, archived_slices: {} };
+    expect(one(state)).toMatchObject({ decision: "in_flight", heldBy: { escalatedReason: "steward_awaiting_input" } });
+  });
+
+  it("agrees with dispatchableReady on which items dispatch", () => {
+    const other = { path: "docs/y.tasks.md", next_action: { command: "smithy.forge", arguments: ["docs/y.tasks.md", "1"] } };
+    const state = { slices: {}, archived_slices: { [SID]: { ...action, terminal_state: "CLOSED" } } };
+    const dispatching = classifyReady(state, [item, other]).filter((r) => r.decision === "dispatch").map((r) => r.sliceId);
+    expect(dispatching).toEqual(dispatchableReady(state, [item, other]).map((i) => dispatchSliceId(i)));
+  });
+
+  it("the finders back the boolean matchers", () => {
+    const state = { slices: { [SID]: { stage: "implementing" } }, archived_slices: {} };
+    expect(findLiveBlocker(state, item, SID)).not.toBeNull();
+    expect(inFlightSliceMatches(state, item, SID)).toBe(true);
+    expect(findArchiveBlocker(state, item, SID)).toBeNull();
+    expect(alreadyArchivedSlice(state, item, SID)).toBe(false);
   });
 });

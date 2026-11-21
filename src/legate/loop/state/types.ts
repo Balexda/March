@@ -6,7 +6,8 @@ import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
 import type { MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import type { SpawnBudget } from "../pure/slice.js";
+import type { RepoSyncStatus } from "../../../herald/events.js";
+import type { DispatchDecisionRow, SpawnBudget } from "../pure/slice.js";
 
 /**
  * Two-stage loop contracts.
@@ -66,6 +67,9 @@ export interface LoopState {
   sessionsById: Map<string, any>;
   workers: WorkerSummary | { error: string };
   smithy: SmithyView;
+  /** The plan checkout's last-known default-branch sync status from Herald's
+   *  fold (#592), or null before Herald has synced this profile. */
+  checkout?: RepoSyncStatus | null;
   perSlice: Record<string, SliceExternalState>;
   /**
    * Slice ids whose operator recovery (`slice.recovery.requested`, #238) was
@@ -107,6 +111,8 @@ export interface RequeueRequest {
   /** Seq of the `slice.requeue.requested` event (dedup across ticks). */
   seq: number;
   closePr: boolean;
+  /** Allow releasing an archived MERGED slice (#592); CLOSED needs no flag. */
+  releaseMerged?: boolean;
   operator?: string;
   reason?: string;
 }
@@ -171,6 +177,11 @@ export interface HandlerResult {
    * circuit-breaker (spawn-breaker.ts). Absent ⇒ 0.
    */
   hardDownFailures?: number;
+  /**
+   * Per-item dispatch decisions for this tick's ready items (#592). Set only by
+   * the dispatch handler; absent when smithy could not be read.
+   */
+  dispatchDecisions?: DispatchDecisionRow[];
 }
 
 export function emptyHandlerResult(): HandlerResult {
@@ -251,4 +262,10 @@ export interface TickResult {
   /** Fresh dispatchable items deferred this tick because the cap was reached
    *  (global running tally; they stay dispatchable for a later tick). */
   spawnsDeferred?: number;
+  /** Why each ready plan item did or did not dispatch this tick (#592), or null
+   *  when smithy could not be read. Served by `GET /queue`; kept in memory only. */
+  dispatchDecisions?: DispatchDecisionRow[] | null;
+  /** {@link dispatchDecisions} counted by decision, every bounded decision present
+   *  (zeros included) so the gauge drops to 0; absent when smithy was unreadable. */
+  dispatchDecisionCounts?: Record<string, number>;
 }

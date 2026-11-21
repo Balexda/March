@@ -308,3 +308,29 @@ it.each([
   if (outcome === "backoff") expect(rateLimit).toHaveBeenCalledWith("copilot");
   else expect(rateLimit).not.toHaveBeenCalled();
 });
+
+describe("pr-label telemetry", () => {
+  it("nests on the slice trace when linked, per-loop trace otherwise, errored on failure", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "pr_label", action: "pr-label-added", slice_id: "s", pr_number: 5, detail: "march:opened" }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ name: "legate.pr-label", traceKey: "s", root: false, error: false }));
+    emitActionEventSpan({ kind: "pr_label_failure", action: "pr-label-failed", processor: "march-loop", pr_number: 6, detail: "march:opened: boom" }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ traceKey: "march-loop-pr-labels", root: false, error: true }));
+  });
+
+  it("counts label, op and outcome", () => {
+    const record = vi.fn();
+    const rr = vi.fn();
+    const label = vi.fn();
+    recordActionEventMetrics({ kind: "pr_label", processor: "p", action: "pr-label-added", detail: "march:opened" }, record, rr, vi.fn(), label);
+    recordActionEventMetrics({ kind: "pr_label", action: "pr-label-removed", detail: "march:needs-human" }, record, rr, vi.fn(), label);
+    recordActionEventMetrics({ kind: "pr_label_failure", action: "pr-label-failed", detail: "march:needs-human: gh exploded" }, record, rr, vi.fn(), label);
+    expect(label.mock.calls).toEqual([
+      ["march:opened", "add", "ok", "p"],
+      ["march:needs-human", "remove", "ok", undefined],
+      ["march:needs-human", "unknown", "failed", undefined],
+    ]);
+    expect(record).not.toHaveBeenCalled();
+    expect(rr).not.toHaveBeenCalled();
+  });
+});

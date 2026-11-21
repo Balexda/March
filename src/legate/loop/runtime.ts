@@ -43,10 +43,11 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createFoldDeps } from "./state/fold-deps.js";
 import { execLegateGh, LegateGitHubError, requestCopilotReview } from "./clients/github.js";
+import { LABEL_SPECS } from "./pure/pr-labels.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
-import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
+import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type DispatchDecisionRow, type SpawnBudget } from "./pure/slice.js";
 import { ReviewerBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
 import type { ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
 import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
@@ -123,6 +124,19 @@ interface ProfileRuntime {
   /** The profile's per-task-type merge policy, refreshed from the registry each
    *  tick (undefined = all merge requirements enforced). */
   mergePolicy?: MergePolicy;
+  /** This profile's latest per-item dispatch decisions (#592), for `GET /queue`.
+   *  In memory only — never written to the heartbeat ndjson. */
+  lastDispatch?: DispatchSnapshot | null;
+}
+
+/** The latest tick's per-item dispatch decisions for one profile (#592). */
+export interface DispatchSnapshot {
+  readonly at: string;
+  /** False when smithy could not be read this tick (no rows then). */
+  readonly smithyOk: boolean;
+  readonly items: readonly DispatchDecisionRow[];
+  /** The plan checkout's last-known default-branch sync status (Herald fold), or null. */
+  readonly checkout: unknown;
 }
 
 const runtimes = new Map<string, ProfileRuntime>();
@@ -189,7 +203,7 @@ export interface LoopSnapshot {
   /** Per-profile latest heartbeat record + live working state (the in-memory
    *  `raw` for that profile, whose `slices` carry per-slice stage/PR/escalation —
    *  the source for the /escalations interrogation endpoint). */
-  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any }>;
+  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any; lastDispatch?: DispatchSnapshot | null }>;
   readonly profiles: string[];
   readonly lastTickAtMs: number;
   readonly lastTickDurationMs: number;
@@ -199,8 +213,9 @@ export interface LoopSnapshot {
 
 /** Latest tick snapshot, consumed by the HTTP /status + /escalations endpoints. */
 export function getLoopSnapshot(): LoopSnapshot {
-  const byProfile: Record<string, { lastHeartbeat: any; workingState: any }> = {};
-  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState };
+  const byProfile: Record<string, { lastHeartbeat: any; workingState: any; lastDispatch?: DispatchSnapshot | null }> = {};
+  for (const [profile, rt] of runtimes)
+    byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState, lastDispatch: rt.lastDispatch ?? null };
   const profiles = Object.keys(byProfile);
   return {
     byProfile,
@@ -392,6 +407,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
         "march.slice_id": input.sliceId,
         "march.profile": profile,
         "march.requeue.close_pr": input.closePr === true,
+        "march.requeue.release_merged": input.releaseMerged === true,
         "march.requeue.requested": result.requested ?? false,
         "march.operator": operatorOf(input),
       },
@@ -412,7 +428,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
   const rt = runtimes.get(profile);
   if (!rt) return finish({ ok: false, status: 404, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
 
-  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true);
+  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true, undefined, input.releaseMerged === true);
   if (!target.ok) return finish({ ok: false, status: target.status, profile, sliceId: input.sliceId, error: target.error });
 
   try {
@@ -420,6 +436,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       type: "slice.requeue.requested",
       sliceId: input.sliceId,
       closePr: input.closePr === true,
+      ...(input.releaseMerged === true ? { releaseMerged: true } : {}),
       ...(input.operator ? { operator: input.operator } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
     }, attributionOf(input));
@@ -432,7 +449,14 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       error: `failed to record the requeue request in Herald: ${err?.message ?? String(err)}`,
     });
   }
-  return finish({ ok: true, profile, sliceId: input.sliceId, requested: true, closesPr: target.openPr });
+  return finish({
+    ok: true,
+    profile,
+    sliceId: input.sliceId,
+    requested: true,
+    closesPr: target.openPr,
+    ...(target.archived ? { releasesArchive: target.archived } : {}),
+  });
 }
 
 // ── Operator levers (#593) ──────────────────────────────────────────────────
@@ -945,25 +969,46 @@ async function readLivePrGh(repoPath: string, prNumber: number, sliceId?: string
   return { state: pr.state ?? "", headSha: pr.headRefOid ?? "", ...(pr.mergeable ? { mergeable: pr.mergeable } : {}) };
 }
 
-/** Repos whose escalation label is known to exist, so it is created once per process. */
+/** Repo+label pairs known to exist, so each label is created once per process. */
 const ensuredLabels = new Set<string>();
 
 /**
  * Add a label to a PR, creating the label first (idempotently, `--force`) the
  * first time this process uses it in a repo — `gh pr edit --add-label` fails on
- * a label the repo does not have.
+ * a label the repo does not have. Colour/description come from {@link LABEL_SPECS}.
  */
-async function labelPrGh(repoPath: string, prNumber: number, label: string): Promise<void> {
+async function labelPrGh(repoPath: string, prNumber: number, label: string, sliceId?: string): Promise<void> {
   const key = repoPath + "\0" + label;
   if (!ensuredLabels.has(key)) {
+    const spec = LABEL_SPECS[label] ?? { color: "ededed", description: "March legate label" };
     await execLegateGh(
       "write",
-      ["label", "create", label, "--force", "--color", "d93f0b", "--description", "March legate needs a human to act on this PR"],
+      ["label", "create", label, "--force", "--color", spec.color, "--description", spec.description],
       repoPath,
+      sliceId,
     );
     ensuredLabels.add(key);
   }
-  await execLegateGh("write", ["pr", "edit", String(prNumber), "--add-label", label], repoPath);
+  await execLegateGh("write", ["pr", "edit", String(prNumber), "--add-label", label], repoPath, sliceId);
+}
+
+/** Remove a label from a PR. */
+async function unlabelPrGh(repoPath: string, prNumber: number, label: string, sliceId?: string): Promise<void> {
+  await execLegateGh("write", ["pr", "edit", String(prNumber), "--remove-label", label], repoPath, sliceId);
+}
+
+/**
+ * List the repo's open PRs with the fields the label reconciler needs. One
+ * `gh pr list` (a single GraphQL call) per invocation; the handler throttles.
+ */
+async function listOpenPrsForLabels(repoPath: string): Promise<any[]> {
+  const out = await execLegateGh(
+    "read",
+    ["pr", "list", "--state", "open", "--limit", "200", "--json", "number,headRefName,author,labels"],
+    repoPath,
+  );
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 /**
@@ -1120,6 +1165,14 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     labelPr: (repoPath: string, prNumber: number, label: string) => labelPrGh(repoPath, prNumber, label),
   };
 
+  const prLabelsDeps = {
+    listOpenPrs: (repoPath: string) => listOpenPrsForLabels(repoPath),
+    addLabel: (repoPath: string, prNumber: number, label: string, sliceId?: string) =>
+      labelPrGh(repoPath, prNumber, label, sliceId),
+    removeLabel: (repoPath: string, prNumber: number, label: string, sliceId?: string) =>
+      unlabelPrGh(repoPath, prNumber, label, sliceId),
+  };
+
   const ioDeps = dispatchIoDeps(meta);
   const dispatchDeps = {
     // The default-branch sync is owned by Herald (#300, always on since #601); the
@@ -1145,6 +1198,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     babysit: babysitDeps,
     dispatch: dispatchDeps,
     dependencyMerge: dependencyMergeDeps,
+    prLabels: prLabelsDeps,
     coderabbitRereview: {
       history,
       limits: configuredReviewLimits(),
@@ -1166,6 +1220,12 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
   });
 
   rt.workingState = out.state.raw;
+  rt.lastDispatch = {
+    at: out.tick.ts,
+    smithyOk: out.tick.dispatchDecisions != null,
+    items: out.tick.dispatchDecisions ?? [],
+    checkout: out.state.checkout ?? null,
+  };
 
   // Agent-health tally for the circuit-breaker: hard-down spawn failures the
   // dispatch handler flagged this tick, and successful spawn completions

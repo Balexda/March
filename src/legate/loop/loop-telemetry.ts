@@ -16,6 +16,8 @@ import {
   recordDependencyUnblock as defaultRecordDependencyUnblock,
   recordReviewRequest as defaultRecordReviewRequest,
   recordReviewRateLimit as defaultRecordReviewRateLimit,
+  recordPrLabel as defaultRecordPrLabel,
+  type PrLabelOp,
   type DependencyUnblockOutcome,
   type LoopMetricsSnapshot,
   type LoopTickActivity,
@@ -49,8 +51,17 @@ export function recordActionEventMetrics(
   record: typeof defaultRecordDependencyUnblock = defaultRecordDependencyUnblock,
   recordReview: typeof defaultRecordReviewRequest = defaultRecordReviewRequest,
   recordRateLimit: typeof defaultRecordReviewRateLimit = defaultRecordReviewRateLimit,
+  recordLabel: typeof defaultRecordPrLabel = defaultRecordPrLabel,
 ): void {
   if (!event || typeof event !== "object") return;
+  if (event.kind === "pr_label" || event.kind === "pr_label_failure") {
+    const action = typeof event.action === "string" ? event.action : "";
+    const op: PrLabelOp = action === "pr-label-added" ? "add" : action === "pr-label-removed" ? "remove" : "unknown";
+    // Failure detail is "label: message"; success detail is the bare label.
+    const known = String(event.detail ?? "").split(": ")[0];
+    recordLabel(known, op, event.kind === "pr_label" ? "ok" : "failed", event.processor ? String(event.processor) : undefined);
+    return;
+  }
   if (event.kind === "review_request") {
     const reviewer = event.reviewer === "copilot" ? "copilot" : "coderabbit";
     recordReview(reviewer, event.outcome);
@@ -116,6 +127,24 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
     return;
   }
 
+  // Owned PR-label reconciliation: slice-linked PRs nest on the slice's trace;
+  // others get a small per-loop trace. A failed label write marks the span errored.
+  if (event.kind === "pr_label" || event.kind === "pr_label_failure") {
+    const pr = event.pr_number;
+    emit({
+      name: "legate.pr-label",
+      traceKey: event.slice_id ? String(event.slice_id) : `${String(event.processor || "legate")}-pr-labels`,
+      root: false,
+      error: event.kind === "pr_label_failure",
+      attributes: {
+        "march.action": event.action || "",
+        ...(event.slice_id ? { "march.slice_id": String(event.slice_id) } : {}),
+        ...(pr != null ? { "march.pr_number": Number(pr) } : {}),
+      },
+    });
+    return;
+  }
+
   const sliceId = event.slice_id;
   if (!sliceId) return;
   if (event.kind === "dispatch_action" && event.action === "dispatch") {
@@ -167,6 +196,7 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
         "march.action": action,
         ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
         ...(event.operator ? { "march.operator": String(event.operator) } : {}),
+        ...(event.archived ? { "march.requeue.archived": true, "march.pr_state": String(event.terminal ?? "") } : {}),
       },
     });
   } else if (event.kind === "operator-merge") {
@@ -278,6 +308,13 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") prBlocker[reason] = count;
     }
   }
+  let dispatchItems: Record<string, number> | undefined;
+  if (record.dispatch_decision_counts && typeof record.dispatch_decision_counts === "object") {
+    dispatchItems = {};
+    for (const [decision, count] of Object.entries(record.dispatch_decision_counts)) {
+      if (typeof count === "number") dispatchItems[decision] = count;
+    }
+  }
   const babysitActionsByKind: Record<string, number> = {};
   if (record.babysit_actions_by_kind && typeof record.babysit_actions_by_kind === "object") {
     for (const [kind, count] of Object.entries(record.babysit_actions_by_kind)) {
@@ -303,6 +340,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     dispatchPaused: record.dispatch_paused ? 1 : 0,
     escalatedByReason,
     prBlocker,
+    ...(dispatchItems ? { dispatchItems } : {}),
   };
   return {
     snapshot,

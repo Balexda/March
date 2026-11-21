@@ -392,6 +392,7 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     sessionsById,
     workers,
     smithy: await senseSmithy(deps, raw, repoPath),
+    checkout: sys.repoSync ?? null,
     perSlice,
     // Operator recovery requests drained this tick (#238) — the recovery handler
     // reconciles `raw` for these so the still-ready smithy work re-dispatches.

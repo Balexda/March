@@ -540,6 +540,17 @@ describe("reduce / fold", () => {
     expect(next.smithy.dispatchable).toBe(9);
   });
 
+  it("#592: repo.sync.changed replaces the fold's checkout sync status", () => {
+    seq = 0;
+    const at = "2026-11-19T00:00:00.000Z";
+    const state = foldEvents([
+      ev({ type: "repo.sync.changed", sync: { ok: true, defaultBranch: "main", head: "a", originHead: "a", behind: 0, ahead: 0, at } }),
+      ev({ type: "repo.sync.changed", sync: { ok: false, defaultBranch: "main", head: "a", originHead: "b", behind: 2, ahead: 0, error: "offline", at } }),
+    ]);
+    expect(state.repoSync).toEqual({ ok: false, defaultBranch: "main", head: "a", originHead: "b", behind: 2, ahead: 0, error: "offline", at });
+    expect(entityRefOf({ type: "repo.sync.changed", sync: state.repoSync! })).toEqual({ kind: "repo", id: "sync" });
+  });
+
   it("reduce advances seq/ts to the last event", () => {
     const state = emptySystemState();
     reduce(state, { seq: 42, id: "e", ts: "2026-05-20T12:00:00Z", source: "herald", profile: "p", type: "heartbeat" });
