@@ -54,7 +54,7 @@ Validation rules:
 - Archive creation runs before artifact deletion.
 - Archive content MUST NOT include a recursive copy of the worktree.
 - Missing logs or extraction artifacts (optional *sources*) do not block later cleanup.
-- Failure of the *sink* — the archive directory or `record.json` write — aborts teardown before any destructive step (FR-007a).
+- Failure of the *sink* — archive directory creation or any archive write (`record.json`, `container.log`, extraction artifact) — aborts teardown before any destructive step (FR-007a). Readable sources that fail to write are sink failures, not missing sources.
 
 ### 4) TeardownStep (`teardown_step`)
 

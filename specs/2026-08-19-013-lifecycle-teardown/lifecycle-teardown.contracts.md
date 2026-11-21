@@ -99,7 +99,9 @@ Traceparent: <optional W3C traceparent>
 #### Signature
 
 ```text
-removeSpawn(spawnId: string, opts?: { mode: "graceful" | "immediate", stopTimeoutSeconds?: number }): void
+stopSpawn(spawnId: string, opts?: { stopTimeoutSeconds?: number }): StopSpawnResult   // target, not yet shipped (SD-004)
+
+removeSpawn(spawnId: string): void
 
 removeWorkspace(
   repoRoot: string,
@@ -115,16 +117,22 @@ removeWorkspace(
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `spawnId` | string | Yes | Spawn compute identity. Compute is keyed off the session id (the container *name* is derived from it), NOT off the tracked `containerId` — that field feeds log capture only. |
-| `mode` | `graceful \| immediate` | No | Stop semantics the caller requires: `graceful` stops before removal (FR-004), `immediate` removes at once (FR-005). **Not yet in the shipped interface** — the host provider calls `docker rm -f` unconditionally, so every teardown is `immediate` today (SD-004). A provider that cannot honour `graceful` MUST signal that rather than silently downgrading. |
-| `stopTimeoutSeconds` | number | No | Bound on the graceful stop before escalation, per the enforced-deadline requirement (FR-020a). |
+| `stopTimeoutSeconds` | number | No | `stopSpawn` only. Bound on the graceful stop before escalation, per the enforced-deadline requirement (FR-020a). |
 | `repoRoot` | absolute path | Yes | Repository root for workspace operations. |
 | `worktreePath` | absolute path | No | Exact worktree path to remove. |
 | `branch` | git ref name | No | Exact branch to delete. |
+
+Graceful and immediate teardown are **two separate operations** so the archive can run between them (FR-006a):
+
+- **`stopSpawn`** (target, FR-004): stops the container gracefully and leaves it present, so its final logs and structured output stay readable for the archive. It MUST NOT remove the container. A provider that cannot stop gracefully MUST report `stopped: false` (or throw) rather than silently removing. Skipped when the request includes `kill`.
+- **`removeSpawn`** (shipped): removes the container immediately. Brood calls it only after the archive succeeds. Called without a prior `stopSpawn`, this is the `kill` path (FR-005). Today it is the only operation: the host provider runs `docker rm -f` unconditionally, so every teardown is immediate (SD-004).
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `stopped` | boolean | `stopSpawn`: whether the container reached a stopped state within `stopTimeoutSeconds`. |
+| `escalated` | boolean | `stopSpawn`: whether the stop deadline was hit and the provider escalated to a kill. FR-005a forbids reporting a graceful outcome in that case. |
 | `worktreeRemoved` | boolean | Whether the exact worktree path was removed. |
 | `branchDeleted` | boolean | Whether the exact branch was deleted. |
 
