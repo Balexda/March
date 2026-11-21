@@ -153,3 +153,6 @@ agent-deck/
 # March build artifacts
 dist/
 *.tsbuildinfo
+
+# Smithy: clarify-log scratch files (per-RFC append-only working memory)
+.smithy/clarify-logs/

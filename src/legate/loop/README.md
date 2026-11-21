@@ -49,7 +49,7 @@ drop-in (see [`state/types.ts`](./state/types.ts)).
 ### The handler pipeline (order is load-bearing)
 
 `requeue → cleanup → ghost-cleanup → castra-recover → relaunch → babysit →
-recovery → adopt-from-fold → dispatch`, awaited in
+recovery → adopt-from-fold → dispatch → dependency-merge → pr-labels`, awaited in
 order. Do **not** parallelize — earlier handlers drop sessions/slices that later
 ones must not act on. `requeue` runs **first** so no later handler touches a
 slice the operator has discarded (cleanup archiving its just-closed PR, relaunch
@@ -68,6 +68,26 @@ re-dispatch this same tick).
 | [`babysit`](./handlers/babysit.ts) | The steward watchdog: login-block recovery, worker-error escalation, stranded-steward nudges, PR discovery, conflict / review-thread / CI handling, post-dispatch re-nudges. |
 | [`recovery`](./handlers/recovery.ts) | Graduated recovery ladder ([#413](https://github.com/Balexda/March/issues/413), fixes [#409](https://github.com/Balexda/March/issues/409); supersedes the [#238](https://github.com/Balexda/March/issues/238) drop-only path). An operator `slice.recovery.requested` (or a slice already carrying `recovery_rung`) walks least-destructive-first: **0b** steward `awaiting_input` → refuse; **0a** errored session → un-escalate and let `castra-recover` restart it in place (descend by dropping the wedged session when its budget is spent); **1** vanished session → un-escalate to the working stage so `relaunch` re-attaches a steward to the **preserved** worktree; **2** relaunch budget spent → hold one tick to confirm; **3** last resort → tombstone + fresh re-dispatch (the old #238 behavior). Each descent is recorded durably (`slice.recovery.requested {rung}`) so a cold-start resumes mid-ladder; the walk completes the moment the slice is un-escalated with a live steward. Acting on the *drained* request is what reaches the warm loop — the fold edit alone never does (warm-loop invisibility). |
 | [`dispatch`](./handlers/dispatch.ts) | Smithy's layer-0 ready items → Hatchery codex spawns; drains completed spawns; bounded auto-recovery of recoverable escalations (#211). |
+| [`pr-labels`](./handlers/pr-labels.ts) | **Runs last**, independent of slice work. Reconciles the two PR labels the legate owns on every open PR of the profile repo (see [Owned PR labels](#owned-pr-labels)). Lists open PRs at most every ~2 min per profile (one `gh pr list`), writes only non-empty diffs. Actions `pr-label-added` / `pr-label-removed` / `pr-label-failed`; each PR is isolated so one failure never blocks the rest. Kill switch: `MARCH_LEGATE_PR_LABELS=0`. |
+
+### Owned PR labels
+
+The legate owns exactly two labels and never touches any other: `march:opened`
+(this PR is March's) and `march:needs-human` (a human must act). PRs without
+`march:opened` are fair game to touch by hand. Rules, per open PR:
+
+- **`march:opened`**: present when a slice in legate state links to the PR, or
+  the head branch matches March's naming (`smithy/…`, `feature/smithy/…`,
+  `march/spawn/…`; the branch fallback stops flapping when the fold briefly
+  loses a slice→PR link). Otherwise removed.
+- **`march:needs-human`** on a slice-linked PR: present when the slice is
+  `escalated`, or its `merge_gate` is `waiting-approval` or
+  `blocked-merge-state`; otherwise removed. Dependabot PRs are skipped
+  (`dependency-merge` owns the label there). Non-slice PRs have it removed.
+
+Observability: `pr_label` / `pr_label_failure` events, a `legate.pr-label` span
+(on the slice trace when linked), and the `march.legate.pr_labels{label,op,outcome}`
+counter. Set `MARCH_LEGATE_PR_LABELS=0` to disable the handler (default on).
 
 The heartbeat ([`heartbeat.ts`](./heartbeat.ts)) folds the tick's results into a
 record on disk and a snapshot for `GET /status`.

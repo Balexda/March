@@ -50,6 +50,73 @@ function ctxWith(snap: LoopSnapshot): LoopHttpContext {
   return { startedAtMs: Date.now() - 5000, getSnapshot: () => snap };
 }
 
+describe("loop http /queue (#592)", () => {
+  const rows = [{ path: "a.tasks.md", rowId: "S1", command: "smithy.forge", arguments: [], sliceId: "a-forge", branch: "b", decision: "archived_closed", heldBy: { sliceId: "a-forge", matchedOn: "id", prNumber: 333, terminal: "CLOSED" } }];
+  const snap = () =>
+    snapshot({
+      byProfile: {
+        march: {
+          lastHeartbeat: heartbeat,
+          workingState: { slices: {} },
+          lastDispatch: { at: "2026-11-19T00:00:00.000Z", smithyOk: true, items: rows as any, checkout: { ok: true, behind: 0 } },
+        },
+        smithy: { lastHeartbeat: heartbeat, workingState: { slices: {} } },
+      },
+    });
+
+  it("serves one profile's per-item decisions and checkout status", async () => {
+    const app = buildLoopServer(ctxWith(snap()));
+    try {
+      const res = await app.inject({ method: "GET", url: "/queue?profile=march" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        ok: true,
+        profile: "march",
+        last_tick_at: "2026-11-19T00:00:00.000Z",
+        smithy_ok: true,
+        queue: { dispatchable: 2, blocked: 1, total: 5 },
+        items: rows,
+        checkout: { ok: true, behind: 0 },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("serves every profile without ?profile, empty items before a tick", async () => {
+    const app = buildLoopServer(ctxWith(snap()));
+    try {
+      const res = await app.inject({ method: "GET", url: "/queue" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().profiles).toEqual(["march", "smithy"]);
+      expect(res.json().by_profile.smithy).toMatchObject({ items: [], smithy_ok: null, checkout: null });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("404s an unknown profile with the known ones", async () => {
+    const app = buildLoopServer(ctxWith(snap()));
+    try {
+      const res = await app.inject({ method: "GET", url: "/queue?profile=nope" });
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ ok: false, profiles: ["march", "smithy"] });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("404s an inherited Object property name rather than treating it as a profile", async () => {
+    const app = buildLoopServer(ctxWith(snap()));
+    try {
+      const res = await app.inject({ method: "GET", url: "/queue?profile=toString" });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe("loop http (fastify)", () => {
   it("builds a per-profile /status payload from that profile's heartbeat", () => {
     const status = buildStatus(ctxWith(snapshot()), "smithy");
@@ -355,6 +422,25 @@ describe("resolveRequeueTarget (#588)", () => {
     expect(resolveRequeueTarget(merged, "s", true)).toMatchObject({ ok: false, status: 409 });
     const closed = { slices: { s: { pr: { number: 7, state: "CLOSED" } } } };
     expect(resolveRequeueTarget(closed, "s", false)).toEqual({ ok: true, openPr: null });
+  });
+});
+
+describe("resolveRequeueTarget archived holds (#592)", () => {
+  const ws = (terminal_state: string | null) => ({ slices: {}, archived_slices: { x: { command: "smithy.forge", terminal_state } } });
+
+  it("releases an archived CLOSED slice without any flag", () => {
+    expect(resolveRequeueTarget(ws("CLOSED"), "x", false)).toEqual({ ok: true, openPr: null, archived: "CLOSED" });
+  });
+
+  it("releases an archived MERGED slice only with releaseMerged", () => {
+    const refused = resolveRequeueTarget(ws("MERGED"), "x", false) as any;
+    expect(refused).toMatchObject({ ok: false, status: 409 });
+    expect(refused.error).toMatch(/releaseMerged/);
+    expect(resolveRequeueTarget(ws("MERGED"), "x", false, undefined, true)).toEqual({ ok: true, openPr: null, archived: "MERGED" });
+  });
+
+  it("still 409s an archive with no closed or merged PR", () => {
+    expect(resolveRequeueTarget(ws(null), "x", false, undefined, true)).toMatchObject({ ok: false, status: 409 });
   });
 });
 

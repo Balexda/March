@@ -66,6 +66,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     escalated_by_reason: t.escalatedByReason,
     pr_blocker_counts: t.prBlockerCounts,
     babysit_actions_by_kind: t.babysitActionsByKind,
+    ...(t.dispatchDecisionCounts ? { dispatch_decision_counts: t.dispatchDecisionCounts } : {}),
   };
 }
 
@@ -160,6 +161,17 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   for (const failure of out.results.dependencyMerge?.failures ?? []) {
     event(meta.processor_events_path, { ...base, kind: "dependency_merge_failure", action: failure.action, pr_number: failure.pr?.number ?? null, pr_url: failure.pr?.url ?? null, detail: failure.detail });
     log("[" + ts + "] " + failure.action + ": " + failure.detail);
+  }
+
+  // pr-labels runs after dependency-merge; owned-label reconciliation, keyed by PR
+  // (slice-linked PRs carry slice_id).
+  for (const a of out.results.prLabels?.actions ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "pr_label", action: a.action, slice_id: a.sliceId, pr_number: a.pr ?? null, detail: a.detail });
+    log("[" + ts + "] " + a.action + " #" + a.pr + ": " + a.detail);
+  }
+  for (const failure of out.results.prLabels?.failures ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "pr_label_failure", action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr ?? null, detail: failure.detail });
+    log("[" + ts + "] " + failure.action + (failure.pr ? " #" + failure.pr : "") + ": " + failure.detail);
   }
 
   deps.appendTextSilent(

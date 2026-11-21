@@ -76,6 +76,9 @@ export interface LoopMetricsSnapshot {
    *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
    *  3-way merge-readiness gauge above collapses away (#non-thread-comments). */
   readonly prBlocker: Readonly<Record<string, number>>;
+  /** Ready plan items keyed by dispatch decision (#592: dispatch / spawn_cap /
+   *  in_flight / recovery_* / archived_*). Absent when smithy was unreadable. */
+  readonly dispatchItems?: Readonly<Record<string, number>>;
 }
 
 /** Per-tick deltas folded into the cumulative counters + the duration histogram. */
@@ -169,6 +172,7 @@ interface ReviewCapSample {
 let latestReviewCaps: readonly ReviewCapSample[] = [];
 let reviewRequests: Counter | undefined;
 let reviewRateLimits: Counter | undefined;
+let prLabels: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -244,6 +248,12 @@ function ensureInstruments(meter: Meter): void {
   // Zero baseline so rate() shows the first hit instead of waiting for a second.
   reviewRateLimits.add(0, { reviewer: "coderabbit" });
   reviewRateLimits.add(0, { reviewer: "copilot" });
+  // Owned PR-label reconciliations (march:opened / march:needs-human), by bounded
+  // `label`, `op` and `outcome`.
+  prLabels = meter.createCounter("march.legate.pr_labels", {
+    description: "Count of owned PR label reconciliations by label, op and outcome",
+    unit: "1",
+  });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
     description: "Legate loop tick wall-clock duration",
     unit: "s",
@@ -391,6 +401,22 @@ function ensureInstruments(meter: Meter): void {
     for (const s of latestByProfile.values()) {
       for (const [reason, count] of Object.entries(s.prBlocker)) {
         result.observe(count, { ...base(s), reason });
+      }
+    }
+  });
+
+  // Ready plan items by dispatch decision (#592) — why `dispatchable` reads 0
+  // while the plan still has dependency-free rows (archived_closed holds, spawn
+  // cap, in-flight). `decision` is the bounded DISPATCH_DECISIONS vocabulary.
+  // Exported as `march_legate_dispatch_items{decision}`.
+  const dispatchItems: ObservableGauge = meter.createObservableGauge(
+    "march.legate.dispatch.items",
+    { description: "Ready plan items by dispatch decision (dispatch/spawn_cap/in_flight/recovery_*/archived_*)" },
+  );
+  dispatchItems.addCallback((result: ObservableResult) => {
+    for (const s of latestByProfile.values()) {
+      for (const [decision, count] of Object.entries(s.dispatchItems ?? {})) {
+        result.observe(count, { ...base(s), decision });
       }
     }
   });
@@ -621,4 +647,24 @@ export function recordReviewRateLimit(reviewer: "coderabbit" | "copilot"): void 
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
   reviewRateLimits!.add(1, { reviewer });
+}
+
+/** The owned PR labels (metric label values); anything else is bucketed as "other". */
+export type PrLabelMetricLabel = "march:opened" | "march:needs-human" | "other";
+/** The bounded operations of a PR-label reconciliation — a metric label. */
+export type PrLabelOp = "add" | "remove" | "unknown";
+/** The bounded outcomes of a PR-label reconciliation — a metric label. */
+export type PrLabelOutcome = "ok" | "failed";
+
+/**
+ * Count one owned PR-label reconciliation. `label` is bucketed to the two owned
+ * labels (or "other") so the series stays low-cardinality. `processor` is the
+ * profile's loop name. No-op when telemetry is disabled.
+ */
+export function recordPrLabel(label: string, op: PrLabelOp, outcome: PrLabelOutcome, processor?: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  const bounded: PrLabelMetricLabel = label === "march:opened" || label === "march:needs-human" ? label : "other";
+  prLabels!.add(1, { label: bounded, op, outcome, ...(processor ? { processor } : {}) });
 }

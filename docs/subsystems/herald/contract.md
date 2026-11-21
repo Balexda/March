@@ -45,6 +45,18 @@ observation (#601; there is no switch, and removing the profile is how to stop
 it). Herald fetches and pulls over HTTPS with the same repository entitlement
 and requires a fast-forward.
 
+Each sync produces a checkout status (#592): `ok`, `defaultBranch`, local
+`head`, `originHead` (`refs/remotes/origin/<default>`), `behind` and `ahead`
+(commits between them after the fetch), an `error` on failure, and `at`. On a
+failed sync the position fields are the last-known local values from a no-fetch
+read, or null. Herald appends `repo.sync.changed { sync }` only when `ok`,
+`defaultBranch`, `head`, `originHead`, `behind` or `ahead` differ from the
+fold, so a steady checkout adds no events; the fold keeps it as
+`SystemState.repoSync`, and Legate serves it as `checkout` on `/queue` and
+`/status`. Herald's `GET /status` adds `by_profile[p].sync`: the folded status
+plus in-memory `last_fetch_at` (last attempt) and `last_success_at`, which reset
+when Herald restarts.
+
 Herald reads these settings:
 
 | Variable | Meaning |

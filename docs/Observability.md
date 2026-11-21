@@ -98,6 +98,7 @@ grouping.
 | `legate.cleanup` | Legate loop | loop service |
 | `legate.dependency-merge` / `legate.dependency-unblock` | Legate loop | Dependabot auto-merge and its conflict ladder (#573). Not slices: one root trace per PR (`<processor>-dependency-pr-<n>`); errored on a `*-failed` action or an escalation |
 | `legate.review.request` | Legate loop | A configured reviewer request was made, deferred or refused. The slice child span records the reviewer, verb, reason and outcome. Failures, cap exhaustion and unavailable identity mark it errored |
+| `legate.pr-label` | Legate loop | Owned PR label reconciliation (`march:opened` / `march:needs-human`, `pr-label-added` / `pr-label-removed`). Nested on the slice's trace when the PR is slice-linked, else a per-loop trace; errored on `pr-label-failed`. Kill switch `MARCH_LEGATE_PR_LABELS=0` |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
@@ -306,6 +307,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks the loop would dispatch this tick (ready − in-flight; #219) |
 | `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
 | `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
+| `march.legate.dispatch.items` (gauge) | `march_legate_dispatch_items` | dependency-free plan items by dispatch `decision` (#592): `dispatch`, `spawn_cap`, `in_flight`, `recovery_due`, `recovery_backoff`, `archived_merged`, `archived_closed`, `archived_other`; the per-item rows are on the legate's `GET /queue` |
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
 | `march.legate.slices` (gauge) | `march_legate_slices` | non-archived slices by lifecycle `stage` (#220) |
 | `march.legate.slices.ready_to_merge` (gauge) | `march_legate_slices_ready_to_merge` | `pr-open` slices clean+mergeable, no threads owed (#220) |
@@ -315,6 +317,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.dependency.unblock` (counter) | `march_legate_dependency_unblock_total` | Dependabot conflict-ladder steps (#573) by `outcome`: `recreate_requested`, `recreate_failed`, `escalated`, `escalate_failed`, `resolved`; labelled with `processor` |
 | `march.legate.review.requests` (counter) | `march_legate_review_requests_total` | Review decisions by `reviewer` and `outcome` |
 | `march.legate.review.rate_limited` (counter) | `march_legate_review_rate_limited_total` | Observed rate-limit hits by `reviewer` |
+| `march.legate.pr_labels` (counter) | `march_legate_pr_labels_total` | Owned PR label reconciliations by `label` (`march:opened`, `march:needs-human`, `other`), `op` (`add`, `remove`, `unknown`) and `outcome` (`ok`, `failed`); labelled with `processor` |
 
 > Gauges carry no `unit`: the OTel→Prometheus bridge exports a `unit: "1"`
 > instrument with a `_ratio` suffix (e.g. `march_legate_loop_up_ratio`), which

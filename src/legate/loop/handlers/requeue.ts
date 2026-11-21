@@ -1,6 +1,7 @@
 import type { HandlerContext, HandlerResult, LoopState, RequeueRequest } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dropRecoveredSlice, dropSession } from "../state/mutations.js";
+import { releasableArchive } from "../pure/slice.js";
 
 /**
  * Operator REQUEUE (#588/#593): "throw this slice's output away and put the smithy
@@ -22,6 +23,13 @@ import { dropRecoveredSlice, dropSession } from "../state/mutations.js";
  *   4. Drop the slice from the warm state and append the rung-3 tombstone
  *      (`slice.recovery.requested {rung:3}`), which clears `requeueRequested`, the
  *      stale steward report and PR in the fold. Dispatch re-selects the item fresh.
+ *
+ * An ARCHIVED slice (#592) has no incarnation left to tear down, but it still
+ * holds its plan row back from dispatch (the archive dedup). Requeueing one
+ * RELEASES that hold: a CLOSED archive always, a MERGED one only with
+ * `releaseMerged` (see {@link releasableArchive}). The handler skips steps 1–2,
+ * deletes the archive's leftover remote branch if any (step 3), and appends the
+ * same rung-3 tombstone, after which the row dispatches fresh.
  *
  * A slice with an open PR is refused unless the request carries `closePr` (the
  * endpoint refuses up front; this re-check guards a PR that opened in between).
@@ -48,6 +56,7 @@ export interface RequeueDeps {
 
 export type RequeueDecision =
   | { readonly sliceId: string; readonly action: "requeue"; readonly request: RequeueRequest; readonly prNumber: number | null }
+  | { readonly sliceId: string; readonly action: "release-archived"; readonly request: RequeueRequest; readonly terminal: "MERGED" | "CLOSED" }
   | { readonly sliceId: string; readonly action: "refuse"; readonly request: RequeueRequest; readonly reason: string };
 
 /** The slice's PR as the fold observed it, falling back to the warm record. */
@@ -79,6 +88,20 @@ export function assess(state: LoopState): RequeueDecision[] {
     const { sliceId } = request;
     if (typeof handled[sliceId] === "number" && request.seq <= handled[sliceId]) continue;
     const slice = state.slices?.[sliceId];
+    const archived = state.archived?.[sliceId];
+    if ((!slice || typeof slice !== "object") && archived && typeof archived === "object") {
+      // #592: release an archived hold. Prefer the archive's recorded outcome;
+      // fall back to the fold's PR observation when the archive lacks one.
+      const observed = prOf(state, sliceId, archived).state;
+      const subject = archived.terminal_state || !observed ? archived : { ...archived, terminal_state: observed };
+      const release = releasableArchive(subject, request.releaseMerged === true);
+      out.push(
+        release.ok
+          ? { sliceId, action: "release-archived", request, terminal: release.terminal }
+          : { sliceId, action: "refuse", request, reason: `slice ${release.error}` },
+      );
+      continue;
+    }
     if (!slice || typeof slice !== "object" || slice.recovered) {
       out.push({ sliceId, action: "refuse", request, reason: "slice is not in flight (unknown, archived or already recovered)" });
       continue;
@@ -192,17 +215,25 @@ export async function apply(
       continue;
     }
 
-    const slice = state.slices[d.sliceId];
-    const sessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : null;
+    const releasing = d.action === "release-archived";
+    const slice = releasing ? state.archived[d.sliceId] : state.slices[d.sliceId];
+    const sessionId = !releasing && typeof slice.worker_session_id === "string" ? slice.worker_session_id : null;
     const branch = String(slice.actual_branch || slice.branch || "");
     const notes: string[] = [];
+    const archivedAttrs = releasing ? { archived: true, terminal: d.terminal } : {};
 
     let failure: string | null = null;
-    const teardown = await teardownIncarnation(d.sliceId, slice, state, ctx);
-    notes.push(teardown.detail);
-    if (!teardown.ok) failure = teardown.detail;
+    if (releasing) {
+      // Nothing to tear down: the archive's session/worktree went with the cleanup
+      // that archived it, and its PR is already terminal.
+      notes.push(`released archived ${d.terminal} hold`);
+    } else {
+      const teardown = await teardownIncarnation(d.sliceId, slice, state, ctx);
+      notes.push(teardown.detail);
+      if (!teardown.ok) failure = teardown.detail;
+    }
 
-    if (!failure && d.prNumber !== null) {
+    if (!failure && d.action === "requeue" && d.prNumber !== null) {
       if (!deps || !state.repoPath) {
         failure = "cannot close the PR: GitHub seam or repo path unavailable";
       } else {
@@ -215,6 +246,10 @@ export async function apply(
       }
     }
 
+    // A released archive's leftover remote branch (a closed attempt's, or a merged
+    // one GitHub kept) would collide with the fresh dispatch, which reuses the
+    // deterministic branch name; a merged branch's work is already on the default
+    // branch, so deleting it loses nothing. `false` (already gone) is fine.
     if (!failure && branch && deps && state.repoPath) {
       try {
         const deleted = await deps.deleteRemoteBranch(state.repoPath, branch, d.sliceId);
@@ -247,7 +282,7 @@ export async function apply(
           if (event) res.requests.push(event);
         }
       }
-      res.actions.push({ ...base, action: "requeue-failed", session_id: sessionId, attempts, detail: failure });
+      res.actions.push({ ...base, ...archivedAttrs, action: "requeue-failed", session_id: sessionId, attempts, detail: failure });
       continue;
     }
 
@@ -260,7 +295,7 @@ export async function apply(
     // fresh slice.dispatched that follows re-creates it clean.
     ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: 3 });
     res.mutated = true;
-    res.actions.push({ ...base, action: "requeue-done", session_id: sessionId, detail: notes.join("; ") });
+    res.actions.push({ ...base, ...archivedAttrs, action: "requeue-done", session_id: sessionId, detail: notes.join("; ") });
   }
   return res;
 }

@@ -187,6 +187,25 @@ describe("dispatch apply (orchestration)", () => {
   });
 });
 
+describe("dispatch apply (#592 per-item decisions)", () => {
+  it("records one decision row per ready item, marking budget-deferred items spawn_cap", async () => {
+    const ready = [readyItem("a.tasks.md"), readyItem("b.tasks.md"), readyItem("c.tasks.md")];
+    const held = readyItem("d.tasks.md");
+    const state = loopState({
+      raw: { slices: {}, archived_slices: { [dispatchSliceId(held)]: { command: "smithy.forge", terminal_state: "CLOSED" } }, repo: { path: "/repo" } },
+      smithy: { ok: true, ready: [...ready, held], queue: { dispatchable: 4, blocked: 0, total: 4 } },
+    });
+    const res = await apply(assess(state), { ...ctx(), spawnBudget: createSpawnBudget(2, 0) }, state, deps());
+    expect(res.dispatchDecisions?.map((r) => r.decision)).toEqual(["dispatch", "dispatch", "spawn_cap", "archived_closed"]);
+  });
+
+  it("records no rows when smithy could not be read", async () => {
+    const state = loopState({ smithy: { ok: false, error: "down", ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } } });
+    const res = await apply(assess(state), ctx(), state, deps());
+    expect(res.dispatchDecisions).toBeUndefined();
+  });
+});
+
 describe("dispatch apply (#313 global concurrent-spawn cap)", () => {
   // A handler context carrying the shared global spawn budget.
   const ctxWithBudget = (budget: SpawnBudget): HandlerContext => ({ ...ctx(), spawnBudget: budget });
