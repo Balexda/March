@@ -224,8 +224,8 @@ writeTeardownArchive(
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Archive directory cannot be created, or `record.json` cannot be written | Failed archive step that **aborts teardown** | The sink is unusable, so no destructive step runs and the session stays retryable (FR-007a). |
-| Container logs unavailable | Warning | Optional *source*; later cleanup continues. |
+| Archive directory cannot be created, or any archive write (`record.json`, `container.log`, extraction artifact) fails | Failed archive step that **aborts teardown** | The sink is unusable, so no destructive step runs and the session stays retryable (FR-007a). |
+| Container logs unreadable | Warning | Optional *source*; later cleanup continues. Readable logs that fail to write are the sink failure above. |
 | Extraction artifact unavailable | Warning | Optional *source*; later cleanup continues. |
 
 ## Events / Hooks
