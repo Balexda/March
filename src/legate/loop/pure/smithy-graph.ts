@@ -1,4 +1,10 @@
-import { actionArguments, dispatchSliceId, slugifyDispatchPart } from "./dispatch-id.js";
+import {
+  actionArguments,
+  dispatchItemKey,
+  dispatchSliceId,
+  sliceActionKey,
+  slugifyDispatchPart,
+} from "./dispatch-id.js";
 
 /**
  * Pure reasoning over a `smithy status --format json` graph: dependency
@@ -95,7 +101,26 @@ export function dependencySatisfied(state: any, status: any, depId: string): boo
   const candidates = [depId, depItem ? dispatchSliceId(depItem) : null, slugifyDispatchPart(depId)].filter(
     Boolean,
   ) as string[];
-  return candidates.some((candidate) => dependencyMerged(state, candidate));
+  if (candidates.some((candidate) => dependencyMerged(state, candidate))) return true;
+  return depItem ? dependencyMergedByActionKey(state, depItem) : false;
+}
+
+/**
+ * Fallback for a dependency archived under an id that no longer matches its
+ * derived one — e.g. a semantic id that was cut to 56 characters before #599.
+ * The action key (command + arguments + artifact path) identifies the row
+ * regardless of id.
+ */
+function dependencyMergedByActionKey(state: any, depItem: any): boolean {
+  const archived =
+    state?.archived_slices && typeof state.archived_slices === "object" ? state.archived_slices : {};
+  const key = dispatchItemKey(depItem);
+  for (const slice of Object.values(archived) as any[]) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!(slice.terminal_state === "MERGED" || slice.merged_at)) continue;
+    if (sliceActionKey(slice) === key) return true;
+  }
+  return false;
 }
 
 export function dependenciesClear(state: any, status: any, item: any): boolean {

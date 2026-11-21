@@ -515,6 +515,125 @@ describe("dispatch-recovery self-heal state (#460)", () => {
   });
 });
 
+// #599: before the fix, every row of a long-named tasks file got the same
+// 56-character slice id, so once one row was archived MERGED (or in flight) its
+// siblings were skipped on id alone. State keyed by that old cut id must still
+// block the row that ran (via the action key) and must not block the siblings.
+describe("legacy cut slice ids do not block sibling rows (#599)", () => {
+  const SLUG = "structured-review-feedback-with-automatic-retry-handling";
+  const SPEC = `docs/specs/${SLUG}/${SLUG}.spec.md`;
+  const OLD_CUT_ID = `${SLUG}-forge`;
+  // Each story has its own tasks file; the semantic id is derived from the spec.
+  const row = (rowId: string, slice: string) => {
+    const tasks = `docs/specs/${SLUG}/${rowId.toLowerCase()}.tasks.md`;
+    return {
+      path: tasks,
+      parent_path: SPEC,
+      parent_row_id: rowId,
+      next_action: { command: "smithy.forge", arguments: [tasks, slice] },
+    };
+  };
+  const us1s1 = row("US1", "1");
+  const us1s2 = row("US1", "2");
+  const us2s1 = row("US2", "1");
+  const us3s4 = row("US3", "4");
+  const ranSlice = {
+    command: "smithy.forge",
+    arguments: [us1s1.path, "1"],
+    artifact_path: us1s1.path,
+    branch: `smithy/forge/${SLUG}`,
+  };
+
+  it("rows now get distinct ids, none equal to the old cut id", () => {
+    const ids = [us1s1, us1s2, us2s1, us3s4].map(dispatchSliceId);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).not.toContain(OLD_CUT_ID);
+  });
+
+  it("an archived MERGED slice under the old id blocks only the row that ran", () => {
+    const state = {
+      slices: {},
+      archived_slices: { [OLD_CUT_ID]: { ...ranSlice, terminal_state: "MERGED" } },
+    };
+    expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
+  });
+
+  it("a live slice under the old id keeps only the row that ran in flight", () => {
+    const state = { slices: { [OLD_CUT_ID]: { ...ranSlice, stage: "implementing" } }, archived_slices: {} };
+    expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
+  });
+
+  // After a restart the working state is rebuilt from the Herald fold, which keeps
+  // id + branch but not the action key (rebuildWorkingState), so an old-id entry
+  // cannot say which row it was for.
+  describe("entries rebuilt without an action key (cold start)", () => {
+    const rebuiltArchive = (terminal_state: string | null) => ({
+      pr_number: 1, pr_url: null, branch: `smithy/forge/${SLUG}`, terminal_state,
+    });
+    const all = [us1s1, us1s2, us2s1, us3s4];
+
+    it("a MERGED archive under the old id blocks nothing (smithy marks the merged row done)", () => {
+      const state = { slices: {}, archived_slices: { [OLD_CUT_ID]: rebuiltArchive("MERGED") } };
+      expect(dispatchableReady(state, all)).toEqual(all);
+    });
+
+    it("an escalated/closed archive under the old id keeps blocking every row that maps to it", () => {
+      for (const terminal of ["CLOSED", null]) {
+        const state = { slices: {}, archived_slices: { [OLD_CUT_ID]: rebuiltArchive(terminal) } };
+        expect(dispatchableReady(state, all)).toEqual([]);
+      }
+    });
+
+    it("a live slice under the old id blocks every row that maps to it (no duplicate dispatch)", () => {
+      const live = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "implementing", pr: null };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: live }, archived_slices: {} }, all)).toEqual([]);
+      // Matched by the old branch too, whatever the key.
+      expect(dispatchableReady({ slices: { other: live }, archived_slices: {} }, all)).toEqual([]);
+    });
+
+    it("a live MERGED slice under the old id releases its rows", () => {
+      const merged = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "merged", pr: { state: "MERGED" } };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: merged }, archived_slices: {} }, all)).toEqual(all);
+    });
+
+    it("rows whose id never changed are unaffected", () => {
+      const short = {
+        path: "docs/short/us1.tasks.md", parent_path: "docs/short/short.spec.md", parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["docs/short/us1.tasks.md", "1"] },
+      };
+      const live = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "implementing", pr: null };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: live }, archived_slices: {} }, [short])).toEqual([short]);
+    });
+  });
+
+  describe("recovering an escalation stored under the old id", () => {
+    const escalated = (extra: object = {}) => ({
+      kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "escalated",
+      escalated_reason: "hatchery_dispatch_failed", ...extra,
+    });
+
+    it("is recovered under the old id when it carries the item's action key", () => {
+      const state = {
+        slices: { [OLD_CUT_ID]: escalated({ command: "smithy.forge", arguments: [us2s1.path, "1"], artifact_path: us2s1.path }) },
+        archived_slices: {}, transient_retry_counts: {},
+      };
+      const out = recoverableEscalations(state, [us1s1, us2s1, us3s4]);
+      expect(out.map((r) => [r.item, r.sliceId])).toEqual([[us2s1, OLD_CUT_ID]]);
+    });
+
+    it("rebuilt without an action key: recovered only when one ready item maps to the old id", () => {
+      const state = { slices: { [OLD_CUT_ID]: escalated() }, archived_slices: {}, transient_retry_counts: {} };
+      expect(recoverableEscalations(state, [us1s2]).map((r) => r.sliceId)).toEqual([OLD_CUT_ID]);
+      expect(recoverableEscalations(state, [us1s1, us2s1])).toEqual([]);
+    });
+
+    it("is never also dispatched fresh", () => {
+      const state = { slices: { [OLD_CUT_ID]: escalated() }, archived_slices: {}, transient_retry_counts: {} };
+      expect(dispatchableReady(state, [us1s2])).toEqual([]);
+    });
+  });
+});
+
 describe("classifyReady (#592 per-item dispatch decisions)", () => {
   const SID = dispatchSliceId(item);
   const action = { command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"], artifact_path: "docs/x.tasks.md" };
@@ -597,5 +716,52 @@ describe("classifyReady (#592 per-item dispatch decisions)", () => {
     expect(inFlightSliceMatches(state, item, SID)).toBe(true);
     expect(findArchiveBlocker(state, item, SID)).toBeNull();
     expect(alreadyArchivedSlice(state, item, SID)).toBe(false);
+  });
+});
+
+describe("classifyReady with pre-#599 cut ids (#599)", () => {
+  const SLUG = "structured-review-feedback-with-automatic-retry-handling";
+  const OLD_CUT_ID = `${SLUG}-forge`;
+  const row = (rowId: string, slice: string) => {
+    const tasks = `docs/specs/${SLUG}/${rowId.toLowerCase()}.tasks.md`;
+    return {
+      path: tasks, parent_path: `docs/specs/${SLUG}/${SLUG}.spec.md`, parent_row_id: rowId,
+      next_action: { command: "smithy.forge", arguments: [tasks, slice] },
+    };
+  };
+  const us1 = row("US1", "1");
+  const us2 = row("US2", "1");
+  const branch = `smithy/forge/${SLUG}`;
+
+  it("labels a rebuilt live old-id slice as in_flight via legacy_id", () => {
+    const state = { slices: { [OLD_CUT_ID]: { branch, stage: "implementing" } }, archived_slices: {} };
+    const rows = classifyReady(state, [us1, us2]);
+    expect(rows.map((r) => [r.decision, r.heldBy?.matchedOn, r.heldBy?.sliceId])).toEqual([
+      ["in_flight", "legacy_id", OLD_CUT_ID],
+      ["in_flight", "legacy_id", OLD_CUT_ID],
+    ]);
+  });
+
+  it("labels a rebuilt non-MERGED old-id archive as archived via legacy_id; MERGED dispatches", () => {
+    const closed = { archived_slices: { [OLD_CUT_ID]: { branch, terminal_state: "CLOSED" } }, slices: {} };
+    expect(classifyReady(closed, [us2])[0]).toMatchObject({ decision: "archived_closed", heldBy: { matchedOn: "legacy_id" } });
+    const merged = { archived_slices: { [OLD_CUT_ID]: { branch, terminal_state: "MERGED" } }, slices: {} };
+    expect(classifyReady(merged, [us2])[0]).toMatchObject({ decision: "dispatch" });
+  });
+
+  it("labels the owner of an old-id recoverable escalation recovery_due, its siblings in_flight", () => {
+    const state = {
+      slices: {
+        [OLD_CUT_ID]: {
+          branch, stage: "escalated", escalated_reason: "hatchery_dispatch_failed",
+          command: "smithy.forge", arguments: [us2.path, "1"], artifact_path: us2.path,
+        },
+      },
+      archived_slices: {}, transient_retry_counts: {},
+    };
+    const rows = classifyReady(state, [us1, us2]);
+    // us1 has a different action key, so the keyed entry does not hold it at all.
+    expect(rows.map((r) => r.decision)).toEqual(["dispatch", "recovery_due"]);
+    expect(rows[1]!.heldBy).toMatchObject({ sliceId: OLD_CUT_ID, matchedOn: "action_key" });
   });
 });
