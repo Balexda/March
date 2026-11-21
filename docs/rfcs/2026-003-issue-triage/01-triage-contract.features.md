@@ -64,7 +64,7 @@ _None — no specification debt was recorded._
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| F1 | Versioned Triage Verdicts | — | — |
+| F1 | Versioned Triage Verdicts | — | specs/2026-11-21-015-versioned-triage-verdicts/ |
 | F2 | GitHub Triage Labels and Signals | F1 | — |
 | F3 | Sticky Triage Notes | F1 | — |
 

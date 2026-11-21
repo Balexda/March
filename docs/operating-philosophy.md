@@ -93,4 +93,6 @@ Specs and feature maps that explicitly invoke this philosophy:
 
 - `specs/2026-11-15-013-tessera-credential-entitlement-service/tessera-credential-entitlement-service.spec.md` — Tessera (the credential/entitlement service). Like Castra and Statio, an infrastructure seam with no row in the per-component table; invokes all three rules of thumb in its Clarifications section (no interactive surfaces — credentials provisioned at deploy; minimum required access — policy-declared, per-repository, per-access-level tokens; clean exits — typed, bounded issuance failures with no silent identity fallback).
 
+- `specs/2026-11-21-015-versioned-triage-verdicts/versioned-triage-verdicts.spec.md` — FR-003. Applies rule 3 (clean exits): invalid triage verdicts are rejected before any GitHub write and surface as a diagnostic plus an errored span.
+
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
