@@ -65,6 +65,17 @@ describe("emitActionEventSpan", () => {
     expect(emit.mock.calls[0][0].attributes).toMatchObject({ "march.operator": "jb", "march.action": "requeue-done" });
   });
 
+  it("emits a legate.operator-merge span for the merge-now execution, errored on refusal (#593)", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "operator-merge", slice_id: "s", action: "operator-merge", pr_number: 42 }, emit);
+    emitActionEventSpan({ kind: "operator-merge", slice_id: "s", action: "operator-merge-refused", pr_number: 42, detail: "PR #42 has merge conflicts" }, emit);
+    expect(emit.mock.calls.map((c) => [c[0].name, c[0].traceKey, c[0].root, c[0].error])).toEqual([
+      ["legate.operator-merge", "s", false, false],
+      ["legate.operator-merge", "s", false, true],
+    ]);
+    expect(emit.mock.calls[1][0].attributes).toMatchObject({ "march.pr_number": 42, "march.error": "PR #42 has merge conflicts" });
+  });
+
   it("emits a legate.ghost-cleanup span keyed by the session id (no slice_id)", () => {
     const emit = vi.fn();
     emitActionEventSpan({ kind: "ghost_cleanup", session_id: "w", action: "ghost-cleanup" }, emit);
@@ -240,6 +251,7 @@ describe("buildLoopTickActivity", () => {
       blockedOnMergeState: 2,
       stranded: 4,
       recoveryRate: 2,
+      dispatchPaused: 0,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
       prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
     });

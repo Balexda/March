@@ -97,6 +97,12 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   if (completed.mutated) res.mutated = true;
   await fireNotifications(deps, ts, completed.notifications, res);
 
+  // Operator pause (#593): finish draining spawns already in flight (above), but
+  // launch nothing new — neither a fresh dispatch nor a recovery re-dispatch —
+  // until the operator resumes. Every other handler keeps running. The pause
+  // guards only the launch loop, so a drained hard-down failure still feeds the
+  // agent-health breaker below.
+
   // 2. Re-derive selection AFTER completion so a slice freed this tick isn't
   //    blocked by its own stale in-flight entry. Fresh dispatches launch a new
   //    slice; recovery re-dispatches a recoverably-escalated one (#211).
@@ -115,7 +121,7 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   // same matchers assess() uses at the same moment (after completion).
   const rows = state.smithy.ok ? classifyReady(state.raw, state.smithy.ready, parseMs(state.ts)) : null;
   if (rows) res.dispatchDecisions = rows;
-  for (const decision of assess(state)) {
+  for (const decision of state.dispatchPaused ? [] : assess(state)) {
     let reserved = false;
     if (decision.kind === "dispatch" && budget) {
       if (budget.remaining <= 0) {

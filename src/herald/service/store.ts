@@ -86,14 +86,13 @@ function rowToEvent(row: EventRow): HeraldEvent {
     profile: row.profile,
     ...body,
   } as HeraldEvent;
-  // Surface the audit columns only on operator-authored rows (#265) so they are
-  // never present on normal events; the spread of `body` cannot collide because
+  // Surface the audit columns only when stamped: `admin` on break-glass rows
+  // (#265), `operator`/`note` on any operator-attributed row (#593). They are
+  // absent on the loop's own events; the spread of `body` cannot collide because
   // the audit fields live in the envelope, never in any event body.
-  if (row.admin) {
-    event.admin = true;
-    if (row.operator !== null) event.operator = row.operator;
-    if (row.note !== null) event.note = row.note;
-  }
+  if (row.admin) event.admin = true;
+  if (row.operator !== null) event.operator = row.operator;
+  if (row.note !== null) event.note = row.note;
   return event;
 }
 
@@ -101,6 +100,16 @@ function rowToEvent(row: EventRow): HeraldEvent {
 export interface AppendAudit {
   readonly operator: string;
   readonly note: string;
+}
+
+/**
+ * Operator attribution on a normal (non-admin) append (#593): who asked for a
+ * lever (an operator request relayed by the legate, a merge-policy edit) and
+ * why. Envelope-only forensic metadata — the reducer never reads it.
+ */
+export interface AppendAttribution {
+  readonly operator?: string;
+  readonly note?: string;
 }
 
 /** The body half of an event (everything the producer sets minus the envelope). */
@@ -225,13 +234,19 @@ export class EventStore {
    * row is stamped `admin=1` with the operator + note for forensics. These are
    * envelope columns, never folded — the corrective event still reduces by its
    * own type, so an admin-authored event folds identically to a normal one.
+   *
+   * `attribution` (#593) stamps `operator`/`note` WITHOUT the admin flag: an
+   * operator-requested lever relayed through the normal write path. Ignored when
+   * `audit` is given.
    */
-  append(input: AppendEventInput, audit?: AppendAudit): HeraldEvent {
+  append(input: AppendEventInput, audit?: AppendAudit, attribution?: AppendAttribution): HeraldEvent {
     const id = input.id ?? crypto.randomUUID();
     const ts = input.ts ?? new Date().toISOString();
     const profile = input.profile && input.profile.length > 0 ? input.profile : this.defaultProfile;
     const body = bodyOf(input);
     const ref = entityRefOf(body);
+    const operator = audit ? audit.operator : attribution?.operator || null;
+    const note = audit ? audit.note : attribution?.note || null;
 
     const result = this.db
       .prepare(
@@ -248,8 +263,8 @@ export class EventStore {
         profile,
         JSON.stringify(body),
         audit ? 1 : 0,
-        audit ? audit.operator : null,
-        audit ? audit.note : null,
+        operator,
+        note,
       );
 
     if (result.changes === 0) {
@@ -262,11 +277,9 @@ export class EventStore {
 
     const seq = Number(result.lastInsertRowid);
     const event: HeraldEvent = { seq, id, ts, source: input.source, profile, ...body } as HeraldEvent;
-    if (audit) {
-      event.admin = true;
-      event.operator = audit.operator;
-      event.note = audit.note;
-    }
+    if (audit) event.admin = true;
+    if (operator !== null) event.operator = operator;
+    if (note !== null) event.note = note;
     reduceMulti(this.hot, event);
     if (++this.appendsSinceSnapshot >= this.snapshotEvery) {
       this.writeSnapshot();

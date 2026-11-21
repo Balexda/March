@@ -103,9 +103,17 @@ export class ProfileClient {
     return body as ProfileRecord;
   }
 
-  /** Register/upsert a profile. */
-  async register(input: RegisterProfileInput): Promise<ProfileRecord> {
-    const { status, body } = await this.request("POST", "/profiles", input);
+  /**
+   * Register/upsert a profile. `attribution` (#593) names who made the change;
+   * Herald stamps it on the `profile.merge_policy.changed` event a policy edit
+   * appends.
+   */
+  async register(
+    input: RegisterProfileInput,
+    attribution?: { operator?: string; note?: string },
+  ): Promise<ProfileRecord> {
+    const stamp = attribution && (attribution.operator || attribution.note) ? { attribution } : {};
+    const { status, body } = await this.request("POST", "/profiles", { ...input, ...stamp });
     if (status !== 201) {
       throw new HeraldClientError(bodyError(body, `herald POST /profiles failed (${status})`));
     }

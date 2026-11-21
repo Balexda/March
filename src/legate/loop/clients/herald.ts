@@ -33,6 +33,12 @@ import type { StewardAttachment } from "../state/sense.js";
  */
 
 /** The legate-written subset of the taxonomy (the transition events). */
+/** Who asked for an operator lever, and why (#593) — stamped on the envelope. */
+export interface OperatorAttribution {
+  operator?: string;
+  note?: string;
+}
+
 export type TransitionEvent = Extract<
   EventBody,
   {
@@ -54,7 +60,16 @@ export type TransitionEvent = Extract<
       | "slice.requeue.refused"
       | "retry.counted"
       | "review.requested"
-      | "review.backoff";
+      | "review.backoff"
+      // Operator slice levers (#593): the HTTP endpoint appends the request; the
+      // handler appends a refusal when it cannot carry it out.
+      | "slice.merge.requested"
+      | "slice.relaunch.requested"
+      | "slice.operator.refused"
+      // Profile-level operator levers (#593).
+      | "legate.tick.requested"
+      | "dispatch.paused"
+      | "dispatch.resumed";
   }
 >;
 
@@ -246,10 +261,17 @@ export class LegateHerald {
   /**
    * Append a transition event (the legate write-path), stamped with the owning
    * profile. Herald forces the source to `legate` and assigns the seq. Returns
-   * the stored event.
+   * the stored event. `attribution` (#593) names the operator who asked for an
+   * operator lever; Herald stamps it on the envelope so history tells operator
+   * actions apart from the loop's own.
    */
-  async append(profile: string, event: TransitionEvent & { id?: string }): Promise<HeraldEvent> {
-    return this.client.append({ ...event, profile });
+  async append(
+    profile: string,
+    event: TransitionEvent & { id?: string },
+    attribution?: OperatorAttribution,
+  ): Promise<HeraldEvent> {
+    const stamp = attribution && (attribution.operator || attribution.note) ? { attribution } : {};
+    return this.client.append({ ...event, profile, ...stamp });
   }
 
   /**

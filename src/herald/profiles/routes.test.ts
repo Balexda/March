@@ -1,7 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { sqliteAvailable } from "../service/sqlite.js";
 import { registerProfileRoutes, validateRegisterProfile } from "./routes.js";
@@ -163,5 +163,69 @@ describe.skipIf(!sqliteAvailable)("profile routes", () => {
 
     const delMissing = await app.inject({ method: "DELETE", url: "/profiles/ghost" });
     expect(delMissing.statusCode).toBe(404);
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("POST /profiles merge-policy history (#593)", () => {
+  it("appends an attributed profile.merge_policy.changed only when the policy actually changes", async () => {
+    const { EventStore } = await import("../service/store.js");
+    const store = new ProfileStore({ dbPath: ":memory:" });
+    const events = new EventStore({ dbPath: ":memory:", defaultProfile: "march" });
+    const app = Fastify();
+    await registerProfileRoutes(app, { store, events });
+    try {
+      // Plain registration without a policy: no history row.
+      expect((await app.inject({ method: "POST", url: "/profiles", payload: body() })).statusCode).toBe(201);
+      expect(events.readAfter(0, 10)).toHaveLength(0);
+
+      const policy = { byTaskType: { cut: { approval: false } } };
+      await app.inject({
+        method: "POST",
+        url: "/profiles",
+        payload: body({ mergePolicy: policy, attribution: { operator: "ana", note: "cut PRs stranded" } }),
+      });
+      const [changed] = events.readAfter(0, 10);
+      expect(changed).toMatchObject({
+        type: "profile.merge_policy.changed",
+        profile: "march",
+        source: "herald",
+        previous: null,
+        mergePolicy: policy,
+        operator: "ana",
+        note: "cut PRs stranded",
+      });
+
+      // Re-register with the same policy (or omitting it, which preserves it): no new row.
+      await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: policy }) });
+      await app.inject({ method: "POST", url: "/profiles", payload: body() });
+      expect(events.readAfter(0, 10)).toHaveLength(1);
+
+      // Clearing it is a change.
+      await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: {} }) });
+      const rows = events.readAfter(0, 10);
+      expect(rows).toHaveLength(2);
+      expect(rows[1]).toMatchObject({ previous: policy, mergePolicy: null });
+      expect(rows[1].operator).toBeUndefined();
+    } finally {
+      await app.close();
+      store.close();
+      events.close();
+    }
+  });
+
+  it("leaves the policy unchanged when the history append fails, so a retry still records it", async () => {
+    const store = new ProfileStore({ dbPath: ":memory:" });
+    const events = { append: vi.fn(() => { throw new Error("disk full"); }) } as any;
+    const app = Fastify();
+    await registerProfileRoutes(app, { store, events });
+    try {
+      const policy = { byTaskType: { cut: { approval: false } } };
+      const res = await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: policy }) });
+      expect(res.statusCode).toBe(500);
+      expect(store.get("march")?.mergePolicy).toBeUndefined();
+    } finally {
+      await app.close();
+      store.close();
+    }
   });
 });

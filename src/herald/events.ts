@@ -15,6 +15,9 @@
  * the fold on cold start. Keep `EventType` low-cardinality (it is a metric label).
  */
 
+/** Operator slice levers that leave a durable request in the fold (#593). */
+export type OperatorSliceAction = "merge" | "relaunch";
+
 /** Who wrote an event: Herald observed it, or the legate transitioned it. */
 export type EventSource = "herald" | "legate";
 
@@ -190,7 +193,55 @@ export type EventBody =
    * forensics-only. It is intentionally NOT in `POST /events`' accepted set: only
    * the admin route authors it, never a client.
    */
-  | { type: "admin.event.appended"; appendedSeq: number; operator: string; note: string };
+  | { type: "admin.event.appended"; appendedSeq: number; operator: string; note: string }
+  /**
+   * A profile's merge policy changed through `POST /profiles` (#593). History
+   * only — the policy itself lives in the profile registry, which the legate
+   * reads live each tick — so the reducer ignores it. `previous`/`mergePolicy`
+   * are the before/after policy objects (null when unset). Authored only by
+   * Herald's profile route (never accepted on `POST /events`); who changed it is
+   * the envelope `operator`/`note`.
+   */
+  /**
+   * Operator levers that act on a whole profile (#593). `legate.tick.requested`
+   * is history only (the legate ran a tick on demand). `dispatch.paused` /
+   * `dispatch.resumed` toggle the durable {@link SystemState.dispatchPaused} flag:
+   * while set the legate launches no NEW work for the profile (relaunch, babysit,
+   * merge and recovery keep running). Who asked is the envelope `operator`.
+   */
+  /**
+   * Operator MERGE NOW (#593): squash-merge the slice's open PR on the next tick,
+   * bypassing the review/CI merge gates (the head SHA is still pinned). Folds to
+   * {@link SliceState.mergeRequested}; cleared by the `merged` stage transition
+   * or by `slice.operator.refused {action:"merge"}`.
+   */
+  | { type: "slice.merge.requested"; sliceId: string; prNumber: number; reason?: string }
+  /**
+   * Operator RELAUNCH (#593): replace the slice's steward on the next tick —
+   * remove a still-live session (keeping the worktree) and attach a fresh one to
+   * the preserved PR/branch, bypassing the self-heal backoff. Folds to
+   * {@link SliceState.relaunchRequested}; cleared by `steward.relaunched` or by
+   * `slice.operator.refused {action:"relaunch"}`.
+   */
+  | { type: "slice.relaunch.requested"; sliceId: string; reason?: string }
+  /** The legate could not carry out an operator slice lever (#593): `action`
+   *  names which, `reason` why. Clears that lever's pending request. */
+  | {
+      type: "slice.operator.refused";
+      sliceId: string;
+      action: OperatorSliceAction;
+      reason: string;
+      /** The request seq this refusal settles; a later pending request survives it. */
+      requestSeq?: number;
+    }
+  | { type: "legate.tick.requested"; reason?: string }
+  | { type: "dispatch.paused"; reason?: string }
+  | { type: "dispatch.resumed"; reason?: string }
+  | {
+      type: "profile.merge_policy.changed";
+      mergePolicy: Record<string, unknown> | null;
+      previous: Record<string, unknown> | null;
+    };
 
 /** The discriminator values — also the `march.herald.events` metric labels. */
 export type EventType = EventBody["type"];
@@ -214,11 +265,13 @@ export interface EventEnvelope {
    */
   profile: string;
   /**
-   * Audit attributes set ONLY on operator-authored rows from the break-glass
-   * `POST /admin/events` endpoint (#265). Absent (undefined) on every normal
-   * observation/transition append. They survive the fold as forensic metadata —
-   * the reducer never reads them — so an operator-authored corrective event is
-   * always distinguishable from one the producer services emitted.
+   * Audit attributes. `admin` is set ONLY on rows from the break-glass
+   * `POST /admin/events` endpoint (#265). `operator`/`note` are set on those rows
+   * and on any operator-attributed append (#593): a lever an operator asked the
+   * legate for (recover, respond, requeue, merge now, pause, ...), or a
+   * merge-policy edit. Absent (undefined) on the loop's own events. They survive
+   * the fold as forensic metadata — the reducer never reads them — so an
+   * operator's request is always distinguishable from one the services emitted.
    */
   admin?: boolean;
   operator?: string;
@@ -260,6 +313,9 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.steward.report":
     case "slice.requeue.requested":
     case "slice.requeue.refused":
+    case "slice.merge.requested":
+    case "slice.relaunch.requested":
+    case "slice.operator.refused":
       return { kind: "slice", id: body.sliceId };
     case "session.changed":
       return { kind: "session", id: body.session.id };
@@ -276,6 +332,10 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "state.ok":
     case "admin.event.appended":
     case "review.backoff":
+    case "profile.merge_policy.changed":
+    case "legate.tick.requested":
+    case "dispatch.paused":
+    case "dispatch.resumed":
       return { kind: "system", id: "all" };
   }
 }
@@ -346,6 +406,10 @@ export interface SliceState {
    * handled (its tombstone not yet drained back) from a new one.
    */
   requeueRequested?: { seq: number; closePr: boolean; releaseMerged?: boolean; operator?: string; reason?: string };
+  /** Pending operator MERGE NOW (#593): the request seq and the PR it targets. */
+  mergeRequested?: { seq: number; prNumber: number };
+  /** Pending operator RELAUNCH (#593): the request seq. */
+  relaunchRequested?: { seq: number };
 }
 
 /** The folded system state — the projection both services read. */
@@ -366,6 +430,12 @@ export interface SystemState {
   repoSync?: RepoSyncStatus;
   /** Transient auto-recovery retry counters (replaces state.json's). */
   retries: Record<string, number>;
+  /**
+   * Set while an operator has paused fresh dispatch for this profile (#593):
+   * the `dispatch.paused` seq/ts and its reason. Durable across restarts; cleared
+   * by `dispatch.resumed`.
+   */
+  dispatchPaused?: { seq: number; ts: string; reason?: string };
 }
 
 /**
@@ -593,6 +663,9 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.stage.changed": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = event.stage;
+      // A merge (operator-requested or the auto-merge gate) settles any pending
+      // operator merge request (#593).
+      if (event.stage === "merged") delete slice.mergeRequested;
       // Mirror slice.dispatched: only set when present so a stage transition
       // without a sessionId never clobbers a known link (#210). The handoff
       // transition carries it so a restart's rebuild keeps the slice→session link.
@@ -651,6 +724,8 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     }
     case "steward.relaunched": {
       const slice = sliceOf(state, event.sliceId);
+      // A fresh steward settles any pending operator relaunch (#593).
+      delete slice.relaunchRequested;
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
       // Record the LIVE worktree the relaunch attached to (#410/#412) so a
       // cold-start rebuild keeps it instead of the relaunch handler re-guessing a
@@ -700,6 +775,30 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if (slice) delete slice.requeueRequested;
       break;
     }
+    case "slice.merge.requested": {
+      const slice = state.slices[event.sliceId];
+      // Like requeue: only a slice the fold knows (and has not tombstoned).
+      if (!slice || slice.recovered) break;
+      slice.mergeRequested = { seq: event.seq, prNumber: event.prNumber };
+      break;
+    }
+    case "slice.relaunch.requested": {
+      const slice = state.slices[event.sliceId];
+      if (!slice || slice.recovered) break;
+      slice.relaunchRequested = { seq: event.seq };
+      break;
+    }
+    case "slice.operator.refused": {
+      const slice = state.slices[event.sliceId];
+      // Settle only the request this refusal names: one appended while the
+      // refused attempt was in flight stays pending. (No requestSeq → legacy,
+      // settles whatever is pending.)
+      const settles = (pending?: { seq: number }) =>
+        pending && (typeof event.requestSeq !== "number" || pending.seq <= event.requestSeq);
+      if (slice && event.action === "merge" && settles(slice.mergeRequested)) delete slice.mergeRequested;
+      if (slice && event.action === "relaunch" && settles(slice.relaunchRequested)) delete slice.relaunchRequested;
+      break;
+    }
     case "retry.counted":
       state.retries[event.key] = event.count;
       break;
@@ -707,6 +806,21 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // Forensics-only (#265): the paired audit row never moves system state.
       // The corrective event it records is folded by its OWN type. Still advance
       // seq/ts below so the projection's cursor tracks every appended row.
+      break;
+    case "profile.merge_policy.changed":
+    case "legate.tick.requested":
+      // History only (#593): the registry is the policy's source of truth, and a
+      // requested tick changes nothing in the fold.
+      break;
+    case "dispatch.paused":
+      state.dispatchPaused = {
+        seq: event.seq,
+        ts: event.ts,
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      };
+      break;
+    case "dispatch.resumed":
+      delete state.dispatchPaused;
       break;
   }
   state.seq = event.seq;

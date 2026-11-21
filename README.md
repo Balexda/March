@@ -78,6 +78,13 @@ the rest are container entrypoints and internals covered in
 | `march legate recover <sliceId>` | Hand a stuck/escalated slice back to the loop's graduated recovery ladder: it un-escalates and tries to relaunch in place first (preserving the slice's branch/worktree/PR), and only tombstones for a fresh re-dispatch as a last resort — no manual state surgery. |
 | `march legate respond <sliceId>` | Answer a steward escalated as `steward_awaiting_input` — deliver a reply into its live session (`--message`), or `--ack` to clear a false-positive escalation back to the normal fix→merge path. |
 | `march legate requeue <sliceId>` | Throw away a slice's current attempt and put its work back in the queue: tears down the steward session, worktree and branch, then the loop re-dispatches it fresh. Use when a steward asked a question and then died, or went off the rails. Refuses a slice with an open PR unless `--close-pr`. |
+| `march legate merge <sliceId>` | Merge a slice's open PR now (squash), bypassing the review/CI merge gates. The legate re-reads the PR, refuses a closed or conflicting one, and pins the merge to its current head SHA. Use instead of `gh pr merge` so the merge is in the event log. |
+| `march legate relaunch <sliceId>` | Replace a wedged steward: remove its session if it is still alive (the worktree is kept) and attach a fresh steward to the existing PR and branch, skipping the self-heal backoff. |
+| `march legate resend-threads <sliceId>` | Ask the steward to address review threads again: delivers `/smithy.fix` for the given unresolved threads (`--thread <id>...`, default all), even ones the loop already counts as sent. |
+| `march legate tick` | Run a legate tick now instead of waiting for the interval. |
+| `march legate pause` / `resume` | Pause fresh dispatch (in-flight work drains; relaunch, babysit, merge and recovery keep running) and resume it. The pause survives restarts. `--profile` narrows to one profile. |
+
+Every one of these goes through the legate's operator API, and each appends an event that records who asked (`--operator`, default `$MARCH_OPERATOR` or your OS username) and why (`--reason`). Set `MARCH_LEGATE_OPERATOR_TOKEN` on the legate and in your shell to require a bearer token for them. `march profile merge-policy set` records its change the same way.
 
 `march version` / `march help [command]` round out the set. `march legate init`
 is deprecated — it prints a deprecation warning and then runs the same profile

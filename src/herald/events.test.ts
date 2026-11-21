@@ -603,3 +603,66 @@ describe("reduceMulti / foldEventsMulti", () => {
     expect(Object.keys(next.byProfile).sort()).toEqual(["a", "b"]);
   });
 });
+
+describe("operator profile levers (#593)", () => {
+  it("dispatch.paused sets a durable per-profile flag that dispatch.resumed clears; tick + policy events are history only", () => {
+    seq = 0;
+    const multi = foldEventsMulti([
+      ev({ type: "dispatch.paused", profile: "march", reason: "deploy" }),
+      ev({ type: "legate.tick.requested", profile: "march" }),
+      ev({ type: "profile.merge_policy.changed", profile: "smithy", mergePolicy: { defaults: { approval: false } }, previous: null }),
+    ]);
+    expect(multi.byProfile.march!.dispatchPaused).toEqual({ seq: 1, ts: "2026-05-20T00:00:01Z", reason: "deploy" });
+    // Pausing one profile never pauses another.
+    expect(multi.byProfile.smithy!.dispatchPaused).toBeUndefined();
+    expect(multi.byProfile.smithy!.slices).toEqual({});
+
+    const resumed = foldEventsMulti([ev({ type: "dispatch.resumed", profile: "march" })], structuredClone(multi));
+    expect(resumed.byProfile.march!.dispatchPaused).toBeUndefined();
+    expect(entityRefOf({ type: "dispatch.paused" })).toEqual({ kind: "system", id: "all" });
+  });
+});
+
+describe("operator merge-now fold (#593)", () => {
+  it("slice.merge.requested records a pending merge; the merged stage or a refusal clears it", () => {
+    seq = 0;
+    const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
+    const requested = foldEvents([ev({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })], base);
+    expect(requested.slices.s1!.mergeRequested).toEqual({ seq: 2, prNumber: 42 });
+    expect(entityRefOf({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })).toEqual({ kind: "slice", id: "s1" });
+
+    const merged = foldEvents([ev({ type: "slice.stage.changed", sliceId: "s1", stage: "merged" })], structuredClone(requested));
+    expect(merged.slices.s1!.mergeRequested).toBeUndefined();
+
+    const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "conflicts" })], structuredClone(requested));
+    expect(refused.slices.s1!.mergeRequested).toBeUndefined();
+    // A refusal for a different lever leaves the merge request alone.
+    const other = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x" })], structuredClone(requested));
+    expect(other.slices.s1!.mergeRequested).toEqual({ seq: 2, prNumber: 42 });
+    // A refusal settles only the request it names: one appended during the
+    // refused attempt (seq 5 > requestSeq 2) stays pending.
+    const later = structuredClone(requested);
+    later.slices.s1!.mergeRequested = { seq: 5, prNumber: 42 };
+    const stale = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x", requestSeq: 2 })], later);
+    expect(stale.slices.s1!.mergeRequested).toEqual({ seq: 5, prNumber: 42 });
+    const exact = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x", requestSeq: 2 })], structuredClone(requested));
+    expect(exact.slices.s1!.mergeRequested).toBeUndefined();
+    // Unknown slice: no-op.
+    expect(foldEvents([ev({ type: "slice.merge.requested", sliceId: "nope", prNumber: 1 })]).slices.nope).toBeUndefined();
+  });
+});
+
+describe("operator relaunch fold (#593)", () => {
+  it("slice.relaunch.requested is pending until steward.relaunched or a relaunch refusal", () => {
+    seq = 0;
+    const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
+    const requested = foldEvents([ev({ type: "slice.relaunch.requested", sliceId: "s1" })], base);
+    expect(requested.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
+    const done = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh" })], structuredClone(requested));
+    expect(done.slices.s1!.relaunchRequested).toBeUndefined();
+    const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "no PR" })], structuredClone(requested));
+    expect(refused.slices.s1!.relaunchRequested).toBeUndefined();
+    const kept = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x", requestSeq: 1 })], structuredClone(requested));
+    expect(kept.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
+  });
+});
