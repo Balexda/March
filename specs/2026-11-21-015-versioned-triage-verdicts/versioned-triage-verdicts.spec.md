@@ -50,7 +50,7 @@ As a March maintainer, I want to use the open baseline and allow a future judgme
 
 | ID | Title | Depends On | Artifact |
 |---|---|---|---|
-| US1 | Read a consistent recommendation across profiles | — | — |
+| US1 | Read a consistent recommendation across profiles | — | specs/2026-11-21-015-versioned-triage-verdicts/01-read-a-consistent-recommendation-across-profiles.tasks.md |
 | US2 | Use a compatible judgment provider | US1 | — |
 
 ## Requirements
