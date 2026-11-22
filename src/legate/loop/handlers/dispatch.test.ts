@@ -161,10 +161,12 @@ describe("dispatch apply (orchestration)", () => {
       artifact_path: wedged.path,
     };
     const d = deps();
-    await apply(assess(state), ctx(), state, d);
+    const res = await apply(assess(state), ctx(), state, d);
     expect(d.completePending).toHaveBeenCalled();
     expect(d.launchDispatch).not.toHaveBeenCalled();
     expect(d.recoverDispatch).not.toHaveBeenCalled();
+    // The queue reports what pause blocked as paused, not as dispatch/recovery_due.
+    expect(res.dispatchDecisions?.map((r) => r.decision)).toEqual(["paused", "paused"]);
   });
 
   it("while paused still feeds a drained hard-down failure to the agent breaker", async () => {

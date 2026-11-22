@@ -494,6 +494,7 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
  *
  *  - `dispatch`: launched fresh this tick.
  *  - `spawn_cap`: would launch, but the global spawn budget (cap or breaker) ran out.
+ *  - `paused`: would launch or re-dispatch, but an operator paused dispatch (#593).
  *  - `in_flight`: a live slice already covers it.
  *  - `recovery_due` / `recovery_backoff`: its own slice is a recoverable
  *    escalation, re-dispatched this tick or cooling down / rate-limited.
@@ -503,6 +504,7 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
 export const DISPATCH_DECISIONS = [
   "dispatch",
   "spawn_cap",
+  "paused",
   "in_flight",
   "recovery_due",
   "recovery_backoff",

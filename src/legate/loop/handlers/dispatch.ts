@@ -121,6 +121,11 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   // same matchers assess() uses at the same moment (after completion).
   const rows = state.smithy.ok ? classifyReady(state.raw, state.smithy.ready, parseMs(state.ts)) : null;
   if (rows) res.dispatchDecisions = rows;
+  // Paused (#593): nothing launches or re-dispatches, so report those rows as
+  // paused. Archive, in-flight and backoff reasons still hold and are kept.
+  if (rows && state.dispatchPaused) {
+    for (const row of rows) if (row.decision === "dispatch" || row.decision === "recovery_due") row.decision = "paused";
+  }
   for (const decision of state.dispatchPaused ? [] : assess(state)) {
     let reserved = false;
     if (decision.kind === "dispatch" && budget) {
