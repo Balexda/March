@@ -2,6 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import { apply, assess, relaunchBackoffMs, RELAUNCH_BACKOFF_MAX_MS, type RelaunchDeps } from "./relaunch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 import { relaunchGeneration, resendStillCurrent } from "../http.js";
@@ -501,5 +502,114 @@ describe("operator relaunch (#593)", () => {
     const raw = { slices: { s: eligibleSlice() } };
     const state = loopState({ raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 1 }] });
     expect(assess(state).map((d) => d.mode)).toEqual(["operator"]);
+  });
+});
+
+describe("relaunch stopped stewards (#587)", () => {
+  const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+
+  it("leaves a stopped session alone while castra-recover still has budget (recovery_pending)", () => {
+    const state = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped", recovery_pending: true }],
+    });
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("never replaces a stopped session whose restart budget isn't confirmed spent", () => {
+    // e.g. a stale `stopped` observation of a session Castra already sees as live
+    // (so the sweep returned no result for it and no recovery_pending was set).
+    const state = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      raw: { slices: {}, castra_recover_attempts: { w1: 1 } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    expect(assess(state)).toEqual([]);
+    const untouched = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    expect(assess(untouched)).toEqual([]);
+  });
+
+  it("skips a budget-spent stopped session the sweep just touched (recovery_pending)", () => {
+    const state = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      raw: { slices: {}, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped", recovery_pending: true }],
+    });
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("still treats errored and running listed sessions as present", () => {
+    const state = loopState({
+      slices: {
+        e: eligibleSlice({ worker_session_id: "w-err" }),
+        r: eligibleSlice({ worker_session_id: "w-run" }),
+      },
+      sessions: [
+        { id: "w-err", group: "legate-workers", status: "error" },
+        { id: "w-run", group: "legate-workers", status: "running" },
+      ],
+    });
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("relaunches a stopped steward whose restart budget is spent, dropping the stale session first", async () => {
+    const slice = eligibleSlice({ worker_session_id: "w1", worktree_path: "/wt/feature-feat-a" });
+    const state = loopState({
+      slices: { s: slice },
+      raw: { slices: { s: slice }, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ sliceId: "s", removeStaleSessionId: "w1" });
+
+    const order: string[] = [];
+    const c = ctx(() => {
+      order.push("launch");
+      return { sessionId: "fresh" };
+    });
+    c.castra.removeSession = vi.fn(async () => {
+      order.push("remove");
+    });
+    const res = await apply(decisions, c, state, deps);
+
+    expect(c.castra.removeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ profile: "p", sessionId: "w1", pruneWorktree: false, traceKey: "s" }),
+    );
+    expect(order).toEqual(["remove", "launch"]);
+    expect(slice.worker_session_id).toBe("fresh");
+    expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", sessionId: "fresh" });
+    expect(res.actions[0].detail).toContain("dropped stopped session w1");
+  });
+
+  it("still relaunches when dropping the stale stopped session fails", async () => {
+    const slice = eligibleSlice({ worker_session_id: "w1" });
+    const state = loopState({
+      slices: { s: slice },
+      raw: { slices: { s: slice }, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    c.castra.removeSession = vi.fn(async () => {
+      throw new Error("castra down");
+    });
+    const res = await apply(assess(state), c, state, deps);
+    expect(c.castra.launchSession).toHaveBeenCalled();
+    expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", sessionId: "fresh" });
+    expect(res.actions[0].detail).toContain("could not drop stopped session w1");
+  });
+
+  it("does not drop anything for a vanished session", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({ slices: { s: slice }, raw: { slices: { s: slice } } });
+    const decisions = assess(state);
+    expect(decisions[0].removeStaleSessionId).toBeUndefined();
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    c.castra.removeSession = vi.fn();
+    await apply(decisions, c, state, deps);
+    expect(c.castra.removeSession).not.toHaveBeenCalled();
   });
 });

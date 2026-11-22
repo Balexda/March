@@ -4,6 +4,7 @@ import { dropRecoveredSlice } from "../state/mutations.js";
 import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import { RELAUNCH_LIMIT, relaunchRetryKey } from "./relaunch.js";
 import { deriveUnescalateStage, unescalate } from "../steps/unescalate.js";
+import { isDeadSessionStatus } from "../pure/session.js";
 
 export { deriveUnescalateStage } from "../steps/unescalate.js";
 
@@ -18,7 +19,7 @@ export { deriveUnescalateStage } from "../steps/unescalate.js";
  *
  *   0b human-input — steward parked `awaiting_input` → REFUSE, touch nothing
  *                    (the full refuse-and-redirect UX lands in PR3).
- *   0a static      — errored worker session → un-escalate in place and let
+ *   0a static      — errored (or stopped, #587) worker session → un-escalate in place and let
  *                    `castra-recover` restart it. Descend when its budget
  *                    (`castra_recover_attempts >= MAX_RECOVER_ATTEMPTS`) is spent
  *                    and the session is still errored: drop the wedged session
@@ -164,9 +165,11 @@ function classify(state: LoopState, sliceId: string, requested: boolean): Recove
   const sessId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
   const snap = sessId ? state.sessionsById?.get(sessId) : undefined;
   const sessionPresent = !!snap;
-  const sessionErrored = sessionPresent && snap.status === "error";
-  const sessionHealthy = sessionPresent && snap.status !== "error";
-  const sessionGone = !sessionPresent;
+  // "Errored" = present but not live: `error` OR `stopped` (#587). Both are
+  // restarted in place by castra-recover at rung 0, and dropped for relaunch
+  // once that budget is spent — a stopped steward is never "healthy".
+  const sessionErrored = sessionPresent && isDeadSessionStatus(snap.status);
+  const sessionHealthy = sessionPresent && !isDeadSessionStatus(snap.status);
 
   // Walk complete: the slice is no longer escalated and has a live steward —
   // babysit drives it from here. Idempotent / cold-start-safe (re-derived every
@@ -213,10 +216,13 @@ function classify(state: LoopState, sliceId: string, requested: boolean): Recove
     }
     // No errored session to recover in place (vanished, or alive-but-escalated):
     // rung 0 has nothing to do — go straight to the relaunch rung.
-    return relaunchRung(state, sliceId, slice, sessionGone, fresh);
+    return relaunchRung(state, sliceId, slice, !sessionHealthy, fresh);
   }
 
-  return relaunchRung(state, sliceId, slice, sessionGone, fresh);
+  // A listed-but-dead session (`error`/`stopped`) is as unavailable as a vanished
+  // one for the exhausted-relaunch descent, so the ladder still reaches
+  // confirm/nuke instead of re-preparing forever (#587).
+  return relaunchRung(state, sliceId, slice, !sessionHealthy, fresh);
 }
 
 /**

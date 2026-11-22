@@ -242,3 +242,81 @@ describe("recoverErrorSessions", () => {
     expect(restart).not.toHaveBeenCalled();
   });
 });
+
+describe("stopped sessions (#587)", () => {
+  it("selects a stopped session only under explicit id targeting", () => {
+    const sessions = [
+      view({ sessionId: "stopped-1", status: "stopped" }),
+      view({ sessionId: "err-1", status: "error" }),
+      view({ sessionId: "run-1", status: "running" }),
+    ];
+    // Group-wide sweep: stopped sessions are never revived.
+    expect(selectRecoverable(sessions, { profile: "p" }).map((s) => s.sessionId)).toEqual(["err-1"]);
+    expect(
+      selectRecoverable(sessions, { profile: "p", group: "legate-workers" }).map((s) => s.sessionId),
+    ).toEqual(["err-1"]);
+    // Explicit targeting: stopped + errored named ids are eligible, running is not.
+    expect(
+      selectRecoverable(sessions, { profile: "p", sessionIds: ["stopped-1", "err-1", "run-1"] }).map(
+        (s) => s.sessionId,
+      ),
+    ).toEqual(["stopped-1", "err-1"]);
+  });
+
+  it("restarts an explicitly targeted stopped session and reports it recovered", async () => {
+    let status = "stopped";
+    const { deps, restart } = harness({
+      sessions: [view({ sessionId: "s1", status: "stopped" })],
+      restart: () => {
+        status = "running";
+      },
+      readSession: (_p, id) => view({ sessionId: id, status }),
+    });
+    const report = await recoverErrorSessions(deps, { profile: "p", sessionIds: ["s1"] });
+    expect(restart).toHaveBeenCalledWith("p", "s1");
+    expect(report.recovered).toHaveLength(1);
+    expect(report.recovered[0]).toMatchObject({ sessionId: "s1", outcome: "recovered", finalStatus: "running" });
+  });
+
+  it("reports still_error when a stopped session stays stopped after restart", async () => {
+    const { deps } = harness({
+      sessions: [view({ sessionId: "s1", status: "stopped" })],
+      readSession: (_p, id) => view({ sessionId: id, status: "stopped" }),
+    });
+    const report = await recoverErrorSessions(deps, { profile: "p", sessionIds: ["s1"] });
+    expect(report.recovered[0]).toMatchObject({ outcome: "still_error", finalStatus: "stopped" });
+  });
+
+  it("does not restart a stopped session during a group sweep", async () => {
+    const { deps, restart } = harness({ sessions: [view({ sessionId: "s1", status: "stopped" })] });
+    const report = await recoverErrorSessions(deps, { profile: "p", group: "legate-workers" });
+    expect(restart).not.toHaveBeenCalled();
+    expect(report.recovered).toEqual([]);
+  });
+
+  it("treats an errored session that comes back stopped as still not live", async () => {
+    const { deps } = harness({
+      sessions: [view({ sessionId: "e1", status: "error" })],
+      readSession: (_p, id) => view({ sessionId: id, status: "stopped" }),
+    });
+    const report = await recoverErrorSessions(deps, { profile: "p" });
+    expect(report.recovered[0]).toMatchObject({ outcome: "still_error", finalStatus: "stopped" });
+  });
+});
+
+describe("explicit-id group scope includes subgroups (#587)", () => {
+  it("admits a targeted session in a subgroup of the requested group, not a sibling group", () => {
+    const sessions = [
+      view({ sessionId: "sub", status: "stopped", group: "legate-workers/forge" }),
+      view({ sessionId: "base", status: "error", group: "legate-workers" }),
+      view({ sessionId: "other", status: "error", group: "legate-workers-x" }),
+    ];
+    expect(
+      selectRecoverable(sessions, {
+        profile: "p",
+        group: "legate-workers",
+        sessionIds: ["sub", "base", "other"],
+      }).map((s) => s.sessionId),
+    ).toEqual(["sub", "base"]);
+  });
+});

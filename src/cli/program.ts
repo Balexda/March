@@ -2210,7 +2210,8 @@ castra
   .option("--group <group>", "Only recover sessions in this group")
   .option(
     "--session <id>",
-    "Recover only this session id (repeatable) — a controlled, targeted sweep",
+    "Recover only this session id (repeatable) — a controlled, targeted sweep; " +
+      "an explicitly named `stopped` session is restarted too",
     (id: string, prev: string[]) => [...prev, id],
     [] as string[],
   )

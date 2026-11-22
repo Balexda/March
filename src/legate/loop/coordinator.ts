@@ -20,7 +20,7 @@ import {
   type DispatchDecisionRow,
   type SpawnBudget,
 } from "./pure/slice.js";
-import { isWorkerSession } from "./pure/session.js";
+import { isDeadSessionStatus, isWorkerSession } from "./pure/session.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
@@ -126,7 +126,13 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   // up) every tick. Built from this tick's live worker-session list.
   const liveWorkerSessionIds = new Set<string>();
   for (const s of Array.isArray(state.sessions) ? state.sessions : []) {
-    if (isWorkerSession(s, state.workerGroup) && typeof s?.id === "string" && s.id.length > 0) {
+    // A listed-but-dead session (`error`/`stopped`, #587) is no live steward.
+    if (
+      isWorkerSession(s, state.workerGroup) &&
+      typeof s?.id === "string" &&
+      s.id.length > 0 &&
+      !isDeadSessionStatus(s.status)
+    ) {
       liveWorkerSessionIds.add(s.id);
     }
   }
