@@ -2,6 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import { apply, assess, relaunchBackoffMs, RELAUNCH_BACKOFF_MAX_MS, type RelaunchDeps } from "./relaunch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
@@ -377,6 +378,31 @@ describe("relaunch stopped stewards (#587)", () => {
     expect(assess(state)).toEqual([]);
   });
 
+  it("never replaces a stopped session whose restart budget isn't confirmed spent", () => {
+    // e.g. a stale `stopped` observation of a session Castra already sees as live
+    // (so the sweep returned no result for it and no recovery_pending was set).
+    const state = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      raw: { slices: {}, castra_recover_attempts: { w1: 1 } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    expect(assess(state)).toEqual([]);
+    const untouched = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
+    });
+    expect(assess(untouched)).toEqual([]);
+  });
+
+  it("skips a budget-spent stopped session the sweep just touched (recovery_pending)", () => {
+    const state = loopState({
+      slices: { s: eligibleSlice({ worker_session_id: "w1" }) },
+      raw: { slices: {}, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
+      sessions: [{ id: "w1", group: "legate-workers", status: "stopped", recovery_pending: true }],
+    });
+    expect(assess(state)).toEqual([]);
+  });
+
   it("still treats errored and running listed sessions as present", () => {
     const state = loopState({
       slices: {
@@ -395,7 +421,7 @@ describe("relaunch stopped stewards (#587)", () => {
     const slice = eligibleSlice({ worker_session_id: "w1", worktree_path: "/wt/feature-feat-a" });
     const state = loopState({
       slices: { s: slice },
-      raw: { slices: { s: slice } },
+      raw: { slices: { s: slice }, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
       sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
     });
     const decisions = assess(state);
@@ -425,7 +451,7 @@ describe("relaunch stopped stewards (#587)", () => {
     const slice = eligibleSlice({ worker_session_id: "w1" });
     const state = loopState({
       slices: { s: slice },
-      raw: { slices: { s: slice } },
+      raw: { slices: { s: slice }, castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
       sessions: [{ id: "w1", group: "legate-workers", status: "stopped" }],
     });
     const c = ctx(() => ({ sessionId: "fresh" }));

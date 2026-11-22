@@ -5,6 +5,7 @@ import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import {
   backoffMs,
   parseMs,
@@ -74,8 +75,10 @@ import {
  * `stopped` (tmux gone, e.g. after a long host pause) is as dead as a vanished
  * one — no babysit message can reach it. castra-recover (earlier in the tick)
  * restarts it in place first and marks it `recovery_pending` while its restart
- * budget lasts; relaunch leaves such a session alone. Once the budget is spent
- * (or Castra could not be reached), relaunch treats the stopped session as gone:
+ * budget lasts; relaunch leaves such a session alone. Only once that budget is
+ * CONFIRMED spent (`castra_recover_attempts[id] >= MAX_RECOVER_ATTEMPTS`, and the
+ * session isn't pending from this tick's sweep) does relaunch treat the stopped
+ * session as gone — a merely stale `stopped` observation never authorizes it:
  * it drops the stale session first (`removeSession`, worktree NOT pruned — the
  * documented manual workaround, automated) so it can't keep holding the
  * worktree, then re-attaches a fresh steward as usual. `error` sessions keep
@@ -263,14 +266,16 @@ export function assess(state: LoopState): RelaunchDecision[] {
   const repoPath = state.repoPath;
   if (typeof repoPath !== "string" || repoPath.length === 0) return [];
 
-  // Listed worker sessions count as live, EXCEPT a `stopped` one that
-  // castra-recover is no longer restarting (no `recovery_pending`, #587): that
-  // one is dead and recorded so apply() can drop it before relaunching.
+  // Listed worker sessions count as live, EXCEPT a `stopped` one whose in-place
+  // restart budget is confirmed spent and that this tick's sweep didn't just
+  // touch (#587): that one is dead and recorded so apply() can drop it first.
+  const recoverAttempts: Record<string, number> = state.raw?.castra_recover_attempts ?? {};
   const liveSessionIds = new Set<string>();
   const staleStoppedIds = new Set<string>();
   for (const s of state.sessions) {
     if (!isWorkerSession(s, state.workerGroup) || typeof s?.id !== "string") continue;
-    if (s.status === "stopped" && !s.recovery_pending) staleStoppedIds.add(s.id);
+    const budgetSpent = (recoverAttempts[s.id] ?? 0) >= MAX_RECOVER_ATTEMPTS;
+    if (s.status === "stopped" && budgetSpent && !s.recovery_pending) staleStoppedIds.add(s.id);
     else liveSessionIds.add(s.id);
   }
   const nowMs = parseMs(state.ts);

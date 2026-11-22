@@ -218,3 +218,31 @@ describe("castra-recover stopped stewards (#587)", () => {
     expect((state.raw as any).castra_recover_attempts.w1).toBe(1);
   });
 });
+
+describe("castra-recover: unconfirmed stopped at the cap (#587)", () => {
+  it("keeps a stopped session pending on the tick it hit the cap, so relaunch waits a tick", async () => {
+    const state = loopState([sess("w1", "stopped")], {
+      raw: {
+        slices: { "slice-a": { stage: "pr-open", worker_session_id: "w1" } },
+        castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS - 1 },
+      },
+    });
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "stopped" })],
+    }));
+    await apply(assess(state), c, state);
+    expect((state.raw as any).castra_recover_attempts.w1).toBe(MAX_RECOVER_ATTEMPTS);
+    expect(state.sessionsById!.get("w1").recovery_pending).toBe(true);
+  });
+
+  it("still clears pending for an errored session at the cap so babysit can escalate", async () => {
+    const state = loopState([sess("w1", "error")], {
+      raw: { castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS - 1 } },
+    });
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "error" })],
+    }));
+    await apply(assess(state), c, state);
+    expect(state.sessionsById!.get("w1").recovery_pending).toBeUndefined();
+  });
+});

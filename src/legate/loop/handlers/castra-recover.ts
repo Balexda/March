@@ -156,8 +156,14 @@ export async function apply(
       // While recovery still has budget for a stuck session, mark it so babysit
       // (the next handler) defers its worker-error escalation until the cap is
       // exhausted — a slow restart / missed picker shouldn't cry wolf on attempt 1.
+      // A stopped session that wasn't confirmed live stays pending for THIS tick
+      // even at the cap, so relaunch only replaces it on the next tick's fresh
+      // observation — never on the same tick a restart may just have worked but
+      // couldn't be observed (#587). (babysit ignores stopped workers, so this
+      // never suppresses an escalation.)
       if (snap) {
-        if (!left && (counts[r.sessionId] ?? 0) < MAX_RECOVER_ATTEMPTS) {
+        const stoppedUnconfirmed = !left && snap.status === "stopped";
+        if (stoppedUnconfirmed || (!left && (counts[r.sessionId] ?? 0) < MAX_RECOVER_ATTEMPTS)) {
           snap.recovery_pending = true;
         } else {
           delete snap.recovery_pending;
