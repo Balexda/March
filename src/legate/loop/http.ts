@@ -459,6 +459,17 @@ export type ResendTarget =
  * needs a steward session to deliver to. Unlike babysit it ignores the seen-set
  * and `needs_response`: re-sending already-sent threads is the point.
  */
+/**
+ * After a resend's await (#593): may it still be recorded on the warm slice? Only
+ * when the warm entry is the one captured before the send (no requeue replaced
+ * it) AND its steward is still the session that received the message (no relaunch
+ * swapped `worker_session_id` in place). Otherwise the feedback went to a gone
+ * incarnation or session, and recording it would mark it handled for the new one.
+ */
+export function resendStillCurrent(current: any, captured: any, sessionId: string): boolean {
+  return current === captured && current?.worker_session_id === sessionId;
+}
+
 export function resolveResendTarget(slice: any, observedPr: any, threadIds?: string[]): ResendTarget {
   if (slice?.stage === "merged") return { ok: false, status: 409, error: "slice is merged." };
   const observed = observedPr && !observedPr.skipped && observedPr.number ? observedPr : null;

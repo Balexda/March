@@ -9,6 +9,7 @@ import {
   escalationsForWorkingState,
   resolveRequeueTarget,
   resolveResendTarget,
+  resendStillCurrent,
   resolveRespondTarget,
   type LoopHttpContext,
   type ProfileLeverInput,
@@ -821,6 +822,22 @@ describe("POST /slices/:sliceId/review-threads/resend (#593)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("resendStillCurrent (#593)", () => {
+  it("records only when neither a requeue nor a relaunch happened during the send", () => {
+    const slice = { worker_session_id: "old" };
+    // Unchanged: same warm entry, same steward.
+    expect(resendStillCurrent(slice, slice, "old")).toBe(true);
+    // Requeue: the warm entry was replaced (or dropped) under the same id.
+    expect(resendStillCurrent({ worker_session_id: "old" }, slice, "old")).toBe(false);
+    expect(resendStillCurrent(undefined, slice, "old")).toBe(false);
+    // Relaunch: the same entry, but relaunch.apply swapped the steward in place
+    // after the old session received the message.
+    const relaunched = { worker_session_id: "old" };
+    relaunched.worker_session_id = "fresh";
+    expect(resendStillCurrent(relaunched, relaunched, "old")).toBe(false);
   });
 });
 

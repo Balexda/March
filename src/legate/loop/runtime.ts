@@ -79,6 +79,7 @@ import { reviewFixMessage } from "./pure/messages.js";
 import {
   resolveRequeueTarget,
   resolveResendTarget,
+  resendStillCurrent,
   resolveRespondTarget,
   type OperatorActionResult,
   type OperatorFields,
@@ -758,10 +759,11 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
     );
   }
 
-  // The tick may have requeued/relaunched the slice during the send, replacing
-  // its warm entry with a new incarnation under the same id. Recording now would
-  // mark the old comment ids handled on the replacement, so refuse to record.
-  if (rt.workingState?.slices?.[input.sliceId] !== slice) {
+  // The tick may have requeued the slice during the send (a new warm entry under
+  // the same id) or relaunched its steward (a new worker_session_id in place).
+  // Recording now would mark the old comment ids handled for a steward that never
+  // got them, so refuse to record.
+  if (!resendStillCurrent(rt.workingState?.slices?.[input.sliceId], slice, sessionId)) {
     return finishOperatorAction(
       "resend_threads",
       input,
@@ -773,7 +775,7 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
         delivered: true,
         threadIds,
         commentIds,
-        error: `delivered to session ${sessionId}, but the slice was replaced while sending — not recorded against the new incarnation.`,
+        error: `delivered to session ${sessionId}, but the slice was requeued or its steward relaunched while sending — not recorded; re-send to reach the new steward.`,
       },
       { "march.failure_stage": "incarnation" },
     );
