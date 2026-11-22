@@ -14,6 +14,20 @@ export interface WorkerSummary {
   other: number;
 }
 
+/**
+ * agent-deck statuses for a session that EXISTS but has no live pane behind it:
+ * `error` (pane died, e.g. a reboot) and `stopped` (tmux session gone, e.g. after a
+ * long host pause, #587). Neither can receive a babysit message, so they must not
+ * count as a live steward: castra-recover restarts them in place first, then
+ * relaunch / the recovery ladder replace them.
+ */
+export const DEAD_SESSION_STATUSES: ReadonlySet<string> = new Set(["error", "stopped"]);
+
+/** Is this agent-deck status a present-but-not-live session ({@link DEAD_SESSION_STATUSES})? */
+export function isDeadSessionStatus(status: unknown): boolean {
+  return typeof status === "string" && DEAD_SESSION_STATUSES.has(status);
+}
+
 export function sessionGroup(session: any): string {
   return session.group || session.group_path || "";
 }

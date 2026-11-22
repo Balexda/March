@@ -51,8 +51,10 @@ export interface CastraSession {
  *                          session left `error`; a stronger `recovered` that
  *                          records the resume path was exercised.
  *   - `restart_failed`   — `agent-deck session restart` threw; nothing changed.
- *   - `still_error`      — restarted but the session was still `error` at the
- *                          status deadline (manual attention may be needed).
+ *   - `still_error`      — restarted but the session was still not live
+ *                          (`error`, or `stopped` for an explicitly targeted
+ *                          stopped session, #587) at the status deadline
+ *                          (manual attention may be needed).
  */
 export type SessionRecoveryOutcome =
   | "recovered"

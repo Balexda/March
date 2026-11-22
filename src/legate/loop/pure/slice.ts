@@ -925,8 +925,9 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
 
 /**
  * Count non-terminal slices in a {@link STEWARD_STAGES steward stage} that have NO
- * live worker session — an empty `worker_session_id`, or a pointer to a session
- * Castra no longer lists. These slices read as active work on the board (they sit
+ * live worker session — an empty `worker_session_id`, a pointer to a session
+ * Castra no longer lists, or one it lists as `error`/`stopped` (#587: the caller
+ * leaves those out of `liveWorkerSessionIds`). These slices read as active work on the board (they sit
  * in `pr-open`/`implementing`/…) but have no resource behind them: the steward
  * crashed, or the slice was adopted from an observed open PR whose dispatch failed
  * before a steward ever launched (gatecli's spawn-failed forge slices, promoted to

@@ -325,7 +325,9 @@ export function assess(state: LoopState): BabysitDecision[] {
       continue;
     }
 
-    // 3. Worker error.
+    // 3. Worker error. (A `stopped` worker falls through as "other": it can't
+    // receive a message, so castra-recover restarts it and relaunch replaces it
+    // once that budget is spent, #587 — babysit takes no action on it.)
     if (workerStatus === "error") {
       // A worker Castra is still auto-recovering (within its restart budget) is
       // marked `recovery_pending` by the castra-recover handler, which runs just

@@ -19,6 +19,13 @@ import type { RecoverReport, SessionRecoveryResult } from "./types.js";
  * markers and, when seen, press Enter to accept the preselected default
  * ("Resume from summary"). That gets the session back to a workable state.
  *
+ * A session can also be `stopped` (its tmux session is gone, e.g. after a long
+ * host pause, #587). `session restart` brings that back the same way, but a
+ * stopped session may have been stopped deliberately by an operator, so it is
+ * only recovered when the caller names it explicitly (`sessionIds`) — the legate
+ * does exactly that for stopped stewards still backing a live slice. A group-wide
+ * sweep keeps recovering `error` sessions only.
+ *
  * The runtime, clock, and sleeper are injected so the orchestration is unit
  * testable without a live agent-deck/tmux; production wires {@link
  * createAgentDeckRecoveryRuntime}.
@@ -31,6 +38,13 @@ export const RECOVERY_DEFAULT_EXCLUDED_GROUPS = ["conductor"] as const;
 
 /** The status agent-deck reports for a session whose pane died (e.g. reboot). */
 const ERROR_STATUS = "error";
+
+/** The status agent-deck reports for a session whose tmux session is gone
+ *  (e.g. a long host pause, #587). Recovered only on explicit id targeting. */
+const STOPPED_STATUS = "stopped";
+
+/** Statuses a restart is meant to leave: a session still in one is not live. */
+const NOT_LIVE_STATUSES: ReadonlySet<string> = new Set([ERROR_STATUS, STOPPED_STATUS]);
 
 /**
  * Substrings that appear together only on Claude's resume picker. Both must be
@@ -56,10 +70,11 @@ export interface RecoverOptions {
    */
   readonly group?: string;
   /**
-   * When set, recovery is restricted to these exact session ids (still only the
-   * errored ones). This is explicit operator targeting — it overrides the
-   * default conductor exclusion, so an operator can name a specific session in
-   * any group. Combined with `group`, both must match. Use for a controlled
+   * When set, recovery is restricted to these exact session ids — the errored
+   * ones AND the `stopped` ones (#587: a stopped session is only ever restarted
+   * when named explicitly, never by a group sweep). This is explicit targeting —
+   * it overrides the default conductor exclusion, so an operator can name a
+   * specific session in any group. Combined with `group`, both must match. Use for a controlled
    * "recover just these" sweep rather than a whole group.
    */
   readonly sessionIds?: readonly string[];
@@ -80,7 +95,7 @@ export interface RecoverDeps {
   readonly pickerTimeoutMs?: number;
   /** Pane poll cadence while waiting for the picker. Default 250ms. */
   readonly pickerPollMs?: number;
-  /** How long to wait for the session to leave `error` status. Default 10s. */
+  /** How long to wait for the session to leave `error`/`stopped`. Default 10s. */
   readonly statusTimeoutMs?: number;
   /** Status poll cadence. Default 500ms. */
   readonly statusPollMs?: number;
@@ -93,7 +108,8 @@ const DEFAULTS = {
   statusPollMs: 500,
 } as const;
 
-/** Which errored sessions a sweep targets, honoring group/excludeGroups. */
+/** Which sessions a sweep targets, honoring group/excludeGroups. `error` is
+ *  always eligible; `stopped` only under explicit `sessionIds` targeting. */
 export function selectRecoverable(
   sessions: readonly RecoverySessionView[],
   options: RecoverOptions,
@@ -102,10 +118,13 @@ export function selectRecoverable(
     options.sessionIds && options.sessionIds.length ? new Set(options.sessionIds) : null;
   const excluded = new Set(options.excludeGroups ?? RECOVERY_DEFAULT_EXCLUDED_GROUPS);
   return sessions.filter((s) => {
-    if (s.status !== ERROR_STATUS) return false;
     // Explicit id targeting wins (overrides the conductor exclusion); when a
     // group is also given, both must match.
-    if (ids) return ids.has(s.sessionId) && (!options.group || s.group === options.group);
+    if (ids) {
+      if (s.status !== ERROR_STATUS && s.status !== STOPPED_STATUS) return false;
+      return ids.has(s.sessionId) && (!options.group || s.group === options.group);
+    }
+    if (s.status !== ERROR_STATUS) return false;
     if (options.group) return s.group === options.group;
     return !excluded.has(s.group);
   });
@@ -173,7 +192,7 @@ async function recoverOne(
   let finalStatus: string;
   try {
     pickerResolved = await resolvePickerIfShown(deps, profile, target.sessionId, now, cfg);
-    finalStatus = await waitForLeaveError(deps, profile, target.sessionId, now, cfg);
+    finalStatus = await waitForLive(deps, profile, target.sessionId, target.status, now, cfg);
   } catch (err) {
     return {
       ...base,
@@ -184,7 +203,7 @@ async function recoverOne(
     };
   }
 
-  if (finalStatus === ERROR_STATUS) {
+  if (NOT_LIVE_STATUSES.has(finalStatus)) {
     return { ...base, outcome: "still_error", pickerResolved, finalStatus };
   }
   return {
@@ -219,20 +238,21 @@ async function resolvePickerIfShown(
   }
 }
 
-/** Poll status until the session leaves `error`, or return the last status. */
-async function waitForLeaveError(
+/** Poll status until the session leaves `error`/`stopped`, or return the last status. */
+async function waitForLive(
   deps: RecoverDeps,
   profile: string,
   sessionId: string,
+  initialStatus: string,
   now: () => number,
   cfg: { statusTimeoutMs: number; statusPollMs: number },
 ): Promise<string> {
   const deadline = now() + cfg.statusTimeoutMs;
-  let last = ERROR_STATUS;
+  let last = initialStatus;
   for (;;) {
     const view = deps.runtime.readSession(profile, sessionId);
     last = view?.status ?? last;
-    if (last !== ERROR_STATUS) return last;
+    if (!NOT_LIVE_STATUSES.has(last)) return last;
     if (now() >= deadline) return last;
     await deps.sleep(cfg.statusPollMs);
   }

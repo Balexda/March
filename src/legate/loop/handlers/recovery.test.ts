@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { apply, assess, deriveUnescalateStage } from "./recovery.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 import { relaunchRetryKey } from "./relaunch.js";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 
 function loopState(over: Partial<LoopState> & { raw?: any } = {}): LoopState {
   const raw = {
@@ -352,5 +353,48 @@ describe("completion + edge cases", () => {
     const c = ctx();
     await apply(assess(state), c, state);
     expect(c.log).not.toHaveBeenCalled();
+  });
+});
+
+describe("recovery: stopped steward sessions (#587)", () => {
+  it("a requested pr-open slice behind a stopped session is not a no-op complete", () => {
+    const state = withSession(
+      loopState({
+        recoveryRequests: ["s1"],
+        raw: { slices: { s1: { stage: "pr-open", branch: "feature/a", worker_session_id: "w1", pr: { number: 7 } } } },
+      }),
+      "w1",
+      "stopped",
+    );
+    const [d] = assess(state);
+    expect(d.action).toBe("hold-castra");
+  });
+
+  it("an escalated slice behind a stopped session holds for an in-place Castra restart", () => {
+    const state = withSession(
+      loopState({
+        recoveryRequests: ["s1"],
+        raw: { slices: { s1: { stage: "escalated", branch: "feature/a", worker_session_id: "w1", pr: { number: 7 } } } },
+      }),
+      "w1",
+      "stopped",
+    );
+    const [d] = assess(state);
+    expect(d).toMatchObject({ action: "hold-castra", stage: "pr-open" });
+  });
+
+  it("drops the stopped session for relaunch once the restart budget is spent", () => {
+    const state = withSession(
+      loopState({
+        raw: {
+          slices: { s1: { stage: "pr-open", recovery_rung: 0, branch: "feature/a", worker_session_id: "w1", pr: { number: 7 } } },
+          castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS },
+        },
+      }),
+      "w1",
+      "stopped",
+    );
+    const [d] = assess(state);
+    expect(d).toMatchObject({ action: "free-and-relaunch", removeSessionId: "w1", emitRung: 1 });
   });
 });
