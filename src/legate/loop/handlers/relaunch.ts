@@ -565,8 +565,11 @@ export async function apply(
     const slice = state.slices[d.sliceId];
     // Mark the warm slice while this relaunch is between its first await and the
     // rebind of worker_session_id (#593): an operator resend that overlaps it must
-    // not record feedback as handled for a steward that is being replaced.
+    // not record feedback as handled for a steward that is being replaced. The
+    // generation bumps on every attempt, so a resend that captured the old value
+    // is refused even if the relaunch removed the session and then failed to launch.
     slice.relaunch_in_progress = true;
+    slice.relaunch_generation = (typeof slice.relaunch_generation === "number" ? slice.relaunch_generation : 0) + 1;
     try {
 
       // Operator relaunch (#593): REPLACE a still-live steward — remove its session

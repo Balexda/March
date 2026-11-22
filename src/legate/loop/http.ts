@@ -466,10 +466,22 @@ export type ResendTarget =
  * swapped `worker_session_id` in place). Otherwise the feedback went to a gone
  * incarnation or session, and recording it would mark it handled for the new one.
  */
-export function resendStillCurrent(current: any, captured: any, sessionId: string): boolean {
+export function resendStillCurrent(current: any, captured: any, sessionId: string, generation: number): boolean {
   // `relaunch_in_progress` covers a relaunch that started during the send and has
-  // not yet rebound worker_session_id (the relaunch handler sets it across its awaits).
-  return current === captured && current?.worker_session_id === sessionId && current?.relaunch_in_progress !== true;
+  // not yet rebound worker_session_id. `relaunch_generation` (bumped by every
+  // relaunch attempt) covers one that started and ended during the send, including
+  // one that removed the session and then failed to launch a replacement.
+  return (
+    current === captured &&
+    current?.worker_session_id === sessionId &&
+    current?.relaunch_in_progress !== true &&
+    relaunchGeneration(current) === generation
+  );
+}
+
+/** The warm slice's relaunch generation (#593): bumped by every relaunch attempt. */
+export function relaunchGeneration(slice: any): number {
+  return typeof slice?.relaunch_generation === "number" ? slice.relaunch_generation : 0;
 }
 
 export function resolveResendTarget(slice: any, observedPr: any, threadIds?: string[]): ResendTarget {

@@ -80,6 +80,7 @@ import {
   resolveRequeueTarget,
   resolveResendTarget,
   resendStillCurrent,
+  relaunchGeneration,
   resolveRespondTarget,
   type OperatorActionResult,
   type OperatorFields,
@@ -748,6 +749,7 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
   const resolved = resolveResendTarget(slice, observed, input.threadIds);
   if (!resolved.ok) return refuse(resolved.status, resolved.error);
   const { pr, prNumber, threads, threadIds, commentIds, sessionId } = resolved;
+  const generation = relaunchGeneration(slice);
   try {
     await sendAgentDeckMessage(rt.meta, sessionId, reviewFixMessage(pr, threads), input.sliceId);
   } catch (err: any) {
@@ -763,7 +765,7 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
   // the same id) or relaunched its steward (a new worker_session_id in place).
   // Recording now would mark the old comment ids handled for a steward that never
   // got them, so refuse to record.
-  if (!resendStillCurrent(rt.workingState?.slices?.[input.sliceId], slice, sessionId)) {
+  if (!resendStillCurrent(rt.workingState?.slices?.[input.sliceId], slice, sessionId, generation)) {
     return finishOperatorAction(
       "resend_threads",
       input,

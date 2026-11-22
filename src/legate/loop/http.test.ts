@@ -829,18 +829,21 @@ describe("resendStillCurrent (#593)", () => {
   it("records only when neither a requeue nor a relaunch happened during the send", () => {
     const slice = { worker_session_id: "old" };
     // Unchanged: same warm entry, same steward.
-    expect(resendStillCurrent(slice, slice, "old")).toBe(true);
+    expect(resendStillCurrent(slice, slice, "old", 0)).toBe(true);
     // Requeue: the warm entry was replaced (or dropped) under the same id.
-    expect(resendStillCurrent({ worker_session_id: "old" }, slice, "old")).toBe(false);
-    expect(resendStillCurrent(undefined, slice, "old")).toBe(false);
+    expect(resendStillCurrent({ worker_session_id: "old" }, slice, "old", 0)).toBe(false);
+    expect(resendStillCurrent(undefined, slice, "old", 0)).toBe(false);
     // Relaunch: the same entry, but relaunch.apply swapped the steward in place
     // after the old session received the message.
     const relaunched = { worker_session_id: "old" };
     relaunched.worker_session_id = "fresh";
-    expect(resendStillCurrent(relaunched, relaunched, "old")).toBe(false);
+    expect(resendStillCurrent(relaunched, relaunched, "old", 0)).toBe(false);
     // Relaunch still running (session removed, launch awaited, not yet rebound).
     const relaunching = { worker_session_id: "old", relaunch_in_progress: true };
-    expect(resendStillCurrent(relaunching, relaunching, "old")).toBe(false);
+    expect(resendStillCurrent(relaunching, relaunching, "old", 0)).toBe(false);
+    // A relaunch attempt started and ended during the send (even a failed one).
+    const bumped = { worker_session_id: "old", relaunch_generation: 1 };
+    expect(resendStillCurrent(bumped, bumped, "old", 0)).toBe(false);
   });
 });
 
