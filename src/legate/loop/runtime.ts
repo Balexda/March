@@ -619,13 +619,17 @@ export async function requestTick(input: ProfileLeverInput): Promise<ProfileLeve
   if (!targets.ok) return finishOperatorAction("tick", input, targets.result);
   const reason = input.reason ? { reason: input.reason } : {};
   const failed = await appendProfileLever(input, targets.profiles, { type: "legate.tick.requested", ...reason }, "tick");
-  if (failed) return finishOperatorAction("tick", input, failed);
+  // Nothing recorded: leave the scheduler idle and report the failure.
+  if (failed && !(failed.targets && failed.targets.length > 0)) return finishOperatorAction("tick", input, failed);
   // A tick may have started while the request was being recorded. The
   // scheduler's guard is synchronous, so `ticking` right before runOnce is its
   // admission result; a skipped tick is reported as such (the in-flight tick or
   // the next one picks the request up).
   const started = !scheduler().ticking;
   void scheduler().runOnce();
+  // Partial failure (some profiles recorded): still tick now, and keep the 502
+  // with targets/failed so the caller sees which profiles were not recorded.
+  if (failed) return finishOperatorAction("tick", input, { ...failed, started });
   return finishOperatorAction("tick", input, {
     ok: true,
     requested: true,
