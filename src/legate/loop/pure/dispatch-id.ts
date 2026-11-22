@@ -55,6 +55,27 @@ export function dispatchItemKey(item: any): string {
   });
 }
 
+/**
+ * The action-key fields (#653) for the `slice.dispatched` /
+ * `slice.recovery.dispatched` transition events, so the Herald fold keeps what
+ * {@link dispatchItemKey} keys on and a cold-start rebuild can restore
+ * `command`/`arguments`/`artifact_path`. An empty or whitespace-only command or
+ * path is omitted (Herald's validator rejects those).
+ */
+export function dispatchActionKeyFields(item: any): { command?: string; arguments: string[]; artifactPath?: string } {
+  const action = item?.next_action || {};
+  // Same test as Herald's validator (non-empty after trimming): a value it would
+  // reject must be omitted, or the whole dispatch event — job id included — is lost.
+  const present = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+  const command = present(action.command) ? action.command : undefined;
+  const artifactPath = present(item?.path) ? item.path : undefined;
+  return {
+    ...(command !== undefined ? { command } : {}),
+    arguments: actionArguments(action),
+    ...(artifactPath !== undefined ? { artifactPath } : {}),
+  };
+}
+
 export function sliceActionKey(slice: any): string {
   if (!slice || typeof slice !== "object") return "";
   return JSON.stringify({
