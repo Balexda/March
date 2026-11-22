@@ -674,8 +674,14 @@ describe("operator relaunch fold (#593)", () => {
     const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
     const requested = foldEvents([ev({ type: "slice.relaunch.requested", sliceId: "s1" })], base);
     expect(requested.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
-    const done = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh" })], structuredClone(requested));
+    const done = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh", requestSeq: 2 })], structuredClone(requested));
     expect(done.slices.s1!.relaunchRequested).toBeUndefined();
+    // A relaunch settles only the request it carried out: a newer one stays, and
+    // an automatic relaunch (no requestSeq) settles none.
+    const newer = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh", requestSeq: 1 })], structuredClone(requested));
+    expect(newer.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
+    const auto = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh" })], structuredClone(requested));
+    expect(auto.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
     const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "no PR" })], structuredClone(requested));
     expect(refused.slices.s1!.relaunchRequested).toBeUndefined();
     const kept = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x", requestSeq: 1 })], structuredClone(requested));

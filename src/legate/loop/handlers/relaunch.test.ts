@@ -389,7 +389,7 @@ describe("operator relaunch (#593)", () => {
     expect(c.castra.removeSession).toHaveBeenCalledWith({ profile: "p", sessionId: "live", pruneWorktree: false, traceKey: "s" });
     expect(c.castra.launchSession).toHaveBeenCalledTimes(1);
     expect(state.slices.s.worker_session_id).toBe("fresh");
-    expect(emitted(c)).toContainEqual({ type: "steward.relaunched", sliceId: "s", sessionId: "fresh", worktreePath: "/wt/s" });
+    expect(emitted(c)).toContainEqual({ type: "steward.relaunched", sliceId: "s", sessionId: "fresh", worktreePath: "/wt/s", requestSeq: 12 });
     expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", detail: expect.stringContaining("operator request") });
     // No retry budget is spent, and the settled request is not re-read next tick.
     expect((state.raw as any).transient_retry_counts).toBeUndefined();

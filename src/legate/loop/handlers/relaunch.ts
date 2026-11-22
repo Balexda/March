@@ -686,9 +686,16 @@ export async function apply(
     // agent-deck hash) so the fold keeps it durably — a cold-start rebuild then
     // re-attaches to the real worktree instead of re-guessing a colliding one
     // (#410/#412).
-    ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId, worktreePath: liveWorktree });
+    ctx.emitTransition?.({
+      type: "steward.relaunched",
+      sliceId: d.sliceId,
+      sessionId: newSessionId,
+      worktreePath: liveWorktree,
+      // Operator mode names the request it settles, so a newer one stays pending.
+      ...(d.mode === "operator" && typeof d.requestSeq === "number" ? { requestSeq: d.requestSeq } : {}),
+    });
     if (d.mode === "operator") {
-      // Settled by the `steward.relaunched` above (the fold clears the request);
+      // Settled by the `steward.relaunched` above (its requestSeq clears this request);
       // the warm seq keeps the in-flight fold from re-reading it next tick.
       if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
     } else {

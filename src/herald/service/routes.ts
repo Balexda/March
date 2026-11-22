@@ -262,6 +262,10 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
       (typeof body.prNumber !== "number" || !Number.isSafeInteger(body.prNumber) || body.prNumber < 1)) {
     return { ok: false, error: `event "slice.merge.requested" requires a positive integer prNumber.` };
   }
+  if (type === "steward.relaunched" && body.requestSeq !== undefined &&
+      (typeof body.requestSeq !== "number" || !Number.isSafeInteger(body.requestSeq))) {
+    return { ok: false, error: `event "steward.relaunched" requestSeq must be an integer.` };
+  }
   if (type === "slice.operator.refused" &&
       (!OPERATOR_SLICE_ACTIONS.includes(body.action as OperatorSliceAction) || typeof body.reason !== "string" ||
         (body.requestSeq !== undefined && (typeof body.requestSeq !== "number" || !Number.isSafeInteger(body.requestSeq))))) {

@@ -135,7 +135,7 @@ The operator levers add these event types:
 | Event | Fold effect |
 |-------|-------------|
 | `slice.merge.requested {sliceId, prNumber, reason?}` | Sets the slice's `mergeRequested`. A `merged` stage change or a `merge` refusal clears it. |
-| `slice.relaunch.requested {sliceId, reason?}` | Sets `relaunchRequested`. `steward.relaunched` or a `relaunch` refusal clears it. |
+| `slice.relaunch.requested {sliceId, reason?}` | Sets `relaunchRequested`. A `steward.relaunched` whose `requestSeq` is at or after the request's `seq`, or a `relaunch` refusal, clears it. An automatic relaunch (`steward.relaunched` without `requestSeq`) leaves it pending. |
 | `slice.operator.refused {sliceId, action, reason, requestSeq?}` | `action` is `merge` or `relaunch`. With `requestSeq`, clears that lever's pending request only if its `seq` is at most `requestSeq`, so a newer request filed while the refused attempt ran stays pending. Without `requestSeq` (legacy events) it clears the pending request unconditionally. |
 | `dispatch.paused {reason?}` / `dispatch.resumed {reason?}` | Sets or clears the profile's `dispatchPaused` (`seq`, `ts`, `reason`). |
 | `legate.tick.requested {reason?}` | None (history only). |

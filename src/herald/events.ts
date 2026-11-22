@@ -168,7 +168,14 @@ export type EventBody =
    *  taken) so the fold records it durably — a cold-start rebuild then keeps the
    *  real worktree instead of the relaunch handler re-guessing a colliding path
    *  (#410/#412). */
-  | { type: "steward.relaunched"; sliceId: string; sessionId?: string; worktreePath?: string }
+  | {
+      type: "steward.relaunched";
+      sliceId: string;
+      sessionId?: string;
+      worktreePath?: string;
+      /** The operator relaunch request this relaunch settled (#593); absent for automatic relaunches. */
+      requestSeq?: number;
+    }
   /** The slice was escalated for legate judgement. */
   | { type: "slice.escalated"; sliceId: string; reason?: string }
   /**
@@ -731,8 +738,16 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     }
     case "steward.relaunched": {
       const slice = sliceOf(state, event.sliceId);
-      // A fresh steward settles any pending operator relaunch (#593).
-      delete slice.relaunchRequested;
+      // An operator relaunch settles only the request it carried out (#593): one
+      // filed while it ran (higher seq) stays pending. An automatic relaunch
+      // (no requestSeq) never settles an operator request.
+      if (
+        slice.relaunchRequested &&
+        typeof event.requestSeq === "number" &&
+        slice.relaunchRequested.seq <= event.requestSeq
+      ) {
+        delete slice.relaunchRequested;
+      }
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
       // Record the LIVE worktree the relaunch attached to (#410/#412) so a
       // cold-start rebuild keeps it instead of the relaunch handler re-guessing a
