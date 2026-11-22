@@ -3,7 +3,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";
+import { OPERATOR_REQUEST_TYPES, registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { EventStore } from "./store.js";
 
@@ -111,6 +111,32 @@ describe("validateEvent", () => {
     const spoof = validateEvent({ type: "slice.pr.changed", sliceId: "s1", pr: {}, source: "herald" });
     expect(spoof.ok && spoof.input.source).toBe("legate");
   });
+  it("strips a nested attribution off the payload and returns it separately (#593)", () => {
+    const v = validateEvent({ type: "slice.recovery.requested", sliceId: "s1", attribution: { operator: " ana ", note: "stuck" } });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.attribution).toEqual({ operator: "ana", note: "stuck" });
+    expect((v.input as Record<string, unknown>).attribution).toBeUndefined();
+    // Empty attribution collapses to none; body-level requeue `operator` is untouched.
+    const empty = validateEvent({ type: "slice.requeue.requested", sliceId: "s1", operator: "bob", attribution: { operator: "  " } });
+    expect(empty.ok && empty.attribution).toBeUndefined();
+    expect(empty.ok && (empty.input as Record<string, unknown>).operator).toBe("bob");
+  });
+  it("type-checks the operator merge/refusal events (#593)", () => {
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1", prNumber: 0 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x" })).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.operator.refused", sliceId: "s1", action: "nuke", reason: "x" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "dispatch.paused", reason: 3 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "dispatch.paused" })).toMatchObject({ ok: true });
+  });
+  it("rejects a malformed attribution (#593)", () => {
+    expect(validateEvent({ type: "heartbeat", attribution: "ana" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "heartbeat", attribution: { operator: 7 } })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "heartbeat", attribution: { operator: "x".repeat(129) } })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "heartbeat", attribution: { note: "x".repeat(1001) } })).toMatchObject({ ok: false });
+  });
 });
 
 describe.skipIf(!sqliteAvailable)("herald routes", () => {
@@ -148,6 +174,26 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
 
     const bad = await app.inject({ method: "POST", url: "/events", payload: { type: "bogus" } });
     expect(bad.statusCode).toBe(400);
+  });
+
+  it("POST /events stamps an operator attribution on the envelope, not the payload (#593)", async () => {
+    const { app, store } = await buildApp();
+    close = async () => { await app.close(); store.close(); };
+    const res = await app.inject({
+      method: "POST",
+      url: "/events",
+      payload: { type: "slice.recovery.requested", sliceId: "s1", attribution: { operator: "ana", note: "wedged" } },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ operator: "ana", note: "wedged", source: "legate" });
+    expect(res.json().admin).toBeUndefined();
+    const [read] = store.readAfter(0, 10);
+    expect(read).toMatchObject({ operator: "ana", note: "wedged" });
+    expect(read.admin).toBeUndefined();
+    expect((read as unknown as Record<string, unknown>).attribution).toBeUndefined();
+    // A loop event without attribution carries none.
+    await app.inject({ method: "POST", url: "/events", payload: { type: "slice.recovery.requested", sliceId: "s2" } });
+    expect(store.readAfter(1, 10)[0].operator).toBeUndefined();
   });
 
   it("persists account-wide back-off and retries a duplicate update idempotently", async () => {
@@ -277,6 +323,52 @@ describe.skipIf(!sqliteAvailable)("POST /admin/events (#265)", () => {
     event,
     operator: "jmbattista",
     note: "legacy slice pre-#213; unstick PR #240",
+  });
+
+  it("requires the operator bearer for operator-request events when MARCH_LEGATE_OPERATOR_TOKEN is set (#593)", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_LEGATE_OPERATOR_TOKEN: "op-tok" });
+    // One valid body per gated type, so the valid-bearer case reaches the append.
+    const gated: Record<string, unknown>[] = [
+      { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 },
+      { type: "slice.relaunch.requested", profile: "march", sliceId: "s1" },
+      { type: "slice.requeue.requested", profile: "march", sliceId: "s1", closePr: false },
+      { type: "slice.recovery.requested", profile: "march", sliceId: "s1" },
+      { type: "dispatch.paused", profile: "march" },
+      { type: "dispatch.resumed", profile: "march" },
+      { type: "legate.tick.requested", profile: "march" },
+    ];
+    expect(gated.map((e) => e.type).sort()).toEqual([...OPERATOR_REQUEST_TYPES].sort());
+    try {
+      for (const payload of gated) {
+        expect((await app.inject({ method: "POST", url: "/events", payload })).statusCode, `${payload.type} missing`).toBe(401);
+        expect(
+          (await app.inject({ method: "POST", url: "/events", payload, headers: { authorization: "Bearer wrong" } })).statusCode,
+          `${payload.type} wrong`,
+        ).toBe(401);
+      }
+      expect(store.count()).toBe(0);
+      for (const payload of gated) {
+        expect(
+          (await app.inject({ method: "POST", url: "/events", payload, headers: { authorization: "Bearer op-tok" } })).statusCode,
+          `${payload.type} valid`,
+        ).toBe(201);
+      }
+      expect(store.count()).toBe(gated.length);
+      // Observation/transition events that don't ask the legate to act stay open.
+      expect((await app.inject({ method: "POST", url: "/events", payload: { type: "slice.stage.changed", profile: "march", sliceId: "s1", stage: "pr-open" } })).statusCode).toBe(201);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("leaves operator-request events open when MARCH_LEGATE_OPERATOR_TOKEN is unset (#593)", async () => {
+    const { app } = await buildApp(undefined, {});
+    try {
+      const res = await app.inject({ method: "POST", url: "/events", payload: { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 } });
+      expect(res.statusCode).toBe(201);
+    } finally {
+      await app.close();
+    }
   });
 
   it("404s (invisible) when MARCH_HERALD_ADMIN_TOKEN is unset — not 401", async () => {

@@ -6,6 +6,7 @@ import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as requeue from "./handlers/requeue.js";
+import * as mergeNow from "./handlers/merge-now.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
 import * as dependencyMerge from "./handlers/dependency-merge.js";
@@ -44,6 +45,9 @@ export interface CoordinatorDeps {
   /** GitHub seams for the operator requeue (#588). Omitted → a requeue that must
    *  close a PR fails (and retries); one with no PR / remote branch still works. */
   requeue?: requeue.RequeueDeps;
+  /** GitHub seams for the operator merge-now (#593). Omitted → a merge request
+   *  is refused ("GitHub seam unavailable") rather than silently stalling. */
+  mergeNow?: mergeNow.MergeNowDeps;
   /** Seams for the opt-in Dependabot auto-merge. Omitted → the handler is inert. */
   dependencyMerge?: dependencyMerge.DependencyMergeDeps;
   /** Seams for opt-in reviewer requests. Omitted → the handler is inert. */
@@ -62,6 +66,8 @@ export interface CoordinatorOutput {
   results: {
     /** Operator requeue (#588/#593); absent in outputs built without it. */
     requeue?: HandlerResult;
+    /** Operator merge-now (#593); absent in outputs built without it. */
+    mergeNow?: HandlerResult;
     cleanup: HandlerResult;
     ghost: HandlerResult;
     castraRecover: HandlerResult;
@@ -162,7 +168,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
     stewardNudgeCount,
     stewardStrandedCount,
-    processorRequestCount: (r.requeue?.requests.length ?? 0) + r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
+    processorRequestCount: (r.requeue?.requests.length ?? 0) + (r.mergeNow?.requests.length ?? 0) + r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
     dispatchActionCount: r.dispatch.actions.length,
     dispatchFailureCount: r.dispatch.failures.length,
     ...(spawnBudget
@@ -189,6 +195,9 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     // just-closed PR, relaunch re-attaching, babysit re-escalating) acts on a slice
     // the operator threw away — and dispatch re-launches the freed item this tick.
     requeue: await requeue.apply(requeue.assess(state), ctx, state, deps.requeue),
+    // Operator merge-now (#593): right after requeue, so a merge the operator asked
+    // for lands before cleanup/babysit evaluate the PR this tick.
+    mergeNow: await mergeNow.apply(mergeNow.assess(state), ctx, state, deps.mergeNow),
     cleanup: await cleanup.apply(cleanup.assess(state), ctx, state),
     ghost: await ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
     // Restart errored worker sessions (e.g. post-reboot) in place BEFORE relaunch

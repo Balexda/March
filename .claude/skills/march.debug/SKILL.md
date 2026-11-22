@@ -79,7 +79,7 @@ on `localhost` regardless of context.
 | `GET http://localhost:8818/state` | Herald's current fold projection (bare `SystemState`: `seq`, `smithy{dispatchable,blocked,total}`, `workers`, `slices{}` keyed by sliceId). |
 | `GET http://localhost:8818/events?after=<seq>&limit=<n>` | drain past events; `{events:[...], lastSeq}`. Each envelope has `source` = `herald` (observation) or `legate` (transition). |
 | `GET http://localhost:8787/status?profile=<p>` | the legate's view of the **same** fold — different in-memory shape, **can diverge** from Herald's projection (see #268). Carries `checkout` (the plan checkout's sync status). |
-| `GET http://localhost:8787/queue?profile=<p>` | **why each dependency-free plan row did or didn't dispatch** last tick (#592): `decision` (`dispatch` / `spawn_cap` / `in_flight` / `recovery_due` / `recovery_backoff` / `archived_merged` / `archived_closed` / `archived_other`), the `heldBy` slice + PR, and `checkout` (HEAD, commits `behind`, sync `ok`). CLI: `march legate queue --profile <p>`. |
+| `GET http://localhost:8787/queue?profile=<p>` | **why each dependency-free plan row did or didn't dispatch** last tick (#592): `decision` (`dispatch` / `spawn_cap` / `paused` / `in_flight` / `recovery_due` / `recovery_backoff` / `archived_merged` / `archived_closed` / `archived_other`), the `heldBy` slice + PR, and `checkout` (HEAD, commits `behind`, sync `ok`). CLI: `march legate queue --profile <p>`. |
 | `GET http://localhost:9264/v1/sessions?profile=<p>` | Castra's live session list (carries `branch` per #264). |
 
 ### OTel correlation gotcha

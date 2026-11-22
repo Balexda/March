@@ -85,6 +85,26 @@ export interface LoopState {
    * requeue handler tears down each slice's incarnation and tombstones it.
    */
   requeueRequests?: RequeueRequest[];
+  /** Pending operator MERGE NOW requests (#593), read from the fold every tick. */
+  mergeRequests?: MergeRequest[];
+  /** Pending operator RELAUNCH requests (#593), read from the fold every tick. */
+  relaunchRequests?: { sliceId: string; seq: number }[];
+  /**
+   * Set while an operator has paused fresh dispatch for this profile (#593),
+   * read from the fold every tick. The dispatch handler still runs: it drains
+   * pending Hatchery jobs and records their failures, then launches and
+   * re-dispatches nothing (its queue rows read `paused`). Every other handler
+   * keeps running.
+   */
+  dispatchPaused?: { seq: number; ts: string; reason?: string };
+}
+
+/** One pending operator merge-now (fold `mergeRequested`, keyed by slice). */
+export interface MergeRequest {
+  sliceId: string;
+  /** Seq of the `slice.merge.requested` event (dedup across ticks). */
+  seq: number;
+  prNumber: number;
 }
 
 /** One pending operator requeue (fold `requeueRequested`, keyed by slice). */

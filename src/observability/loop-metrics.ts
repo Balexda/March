@@ -69,6 +69,8 @@ export interface LoopMetricsSnapshot {
    *  to 1), ramps up on clean rate-limited sweeps. Pairs with `stranded` to show
    *  the recovery loop throttling down during an outage and recovering after. */
   readonly recoveryRate: number;
+  /** 1 while an operator has paused fresh dispatch for this profile (#593). */
+  readonly dispatchPaused?: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -172,6 +174,7 @@ interface ReviewCapSample {
 let latestReviewCaps: readonly ReviewCapSample[] = [];
 let reviewRequests: Counter | undefined;
 let reviewRateLimits: Counter | undefined;
+let operatorActions: Counter | undefined;
 let prLabels: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
@@ -236,6 +239,14 @@ function ensureInstruments(meter: Meter): void {
     description: "Reviewer rate-limit hits",
     unit: "1",
   });
+  // Operator levers on the Legate API (#593), by the bounded `action` (recover,
+  // respond, requeue, merge, relaunch, resend_threads, tick, pause, resume) and
+  // `outcome` (accepted / refused). Who asked lives in the event envelope + span,
+  // never in a metric label.
+  operatorActions = meter.createCounter("march.legate.operator.actions", {
+    description: "Operator actions requested through the Legate API, by action and outcome",
+    unit: "1",
+  });
   meter.createObservableGauge("march.legate.review.cap_remaining", {
     // No unit: `unit: "1"` makes the Prometheus exporter append `_ratio` to a
     // gauge name, which would break the dashboard's `..._cap_remaining` query.
@@ -248,6 +259,11 @@ function ensureInstruments(meter: Meter): void {
   // Zero baseline so rate() shows the first hit instead of waiting for a second.
   reviewRateLimits.add(0, { reviewer: "coderabbit" });
   reviewRateLimits.add(0, { reviewer: "copilot" });
+  // Zero baseline for every operator lever/outcome pair, so increase() shows the
+  // first request instead of waiting for a second (#593).
+  for (const action of OPERATOR_ACTIONS) {
+    for (const outcome of ["accepted", "refused"] as const) operatorActions.add(0, { action, outcome });
+  }
   // Owned PR-label reconciliations (march:opened / march:needs-human), by bounded
   // `label`, `op` and `outcome`.
   prLabels = meter.createCounter("march.legate.pr_labels", {
@@ -354,6 +370,14 @@ function ensureInstruments(meter: Meter): void {
   // open PRs + crashed stewards). Surfaces spawn-failed/steward-less work that the
   // stage gauge alone shows as healthy "In steward". Exported as
   // `march_legate_slices_stranded` (no suffix).
+  // Operator pause (#593): 1 while fresh dispatch is paused for the profile, so a
+  // forgotten pause is visible next to a flat dispatch rate.
+  registerGauge(
+    meter,
+    "march.legate.dispatch.paused",
+    "1 while an operator has paused fresh dispatch for the profile",
+    (s) => s.dispatchPaused ?? 0,
+  );
   registerGauge(
     meter,
     "march.legate.slices.stranded",
@@ -647,6 +671,28 @@ export function recordReviewRateLimit(reviewer: "coderabbit" | "copilot"): void 
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
   reviewRateLimits!.add(1, { reviewer });
+}
+
+/** The bounded operator lever names (#593) — a metric label, keep it closed. */
+export const OPERATOR_ACTIONS = [
+  "recover",
+  "respond",
+  "requeue",
+  "merge",
+  "relaunch",
+  "resend_threads",
+  "tick",
+  "pause",
+  "resume",
+] as const;
+export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
+
+/** Count one operator lever request (#593). No-op when telemetry is disabled. */
+export function recordOperatorAction(action: OperatorAction, outcome: "accepted" | "refused"): void {
+  const otel = getActiveOtel();
+  if (!otel?.enabled) return;
+  ensureInstruments(otel.getMeter());
+  operatorActions!.add(1, { action, outcome });
 }
 
 /** The owned PR labels (metric label values); anything else is bucketed as "other". */

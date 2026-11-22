@@ -1,11 +1,45 @@
 import type { FastifyInstance } from "fastify";
 import { isToolchainSelection, TOOLCHAIN_SELECTIONS } from "../../spawn/toolchain.js";
 import { validateMergePolicy } from "./merge-policy.js";
+import type { EventStore } from "../service/store.js";
 import type { ProfileStore } from "./store.js";
 import type { RegisterProfileInput } from "./types.js";
 
 export interface ProfileRoutesOptions {
   readonly store: ProfileStore;
+  /**
+   * The event log (#593). When given, a `POST /profiles` that changes the merge
+   * policy appends `profile.merge_policy.changed` so policy edits have history.
+   */
+  readonly events?: EventStore;
+}
+
+/** Order-independent serialization, so a key reorder is not a policy change. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** A policy as the event payload carries it: the object, or null when unset/empty. */
+function policyPayload(policy: unknown): Record<string, unknown> | null {
+  return policy && typeof policy === "object" && Object.keys(policy).length > 0
+    ? (policy as Record<string, unknown>)
+    : null;
+}
+
+/** The optional `attribution: {operator?, note?}` on a registration (#593). */
+function readAttribution(raw: unknown): { operator?: string; note?: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const { operator, note } = raw as Record<string, unknown>;
+  const op = typeof operator === "string" ? operator.trim().slice(0, 128) : "";
+  const nt = typeof note === "string" ? note.trim().slice(0, 1000) : "";
+  return { ...(op ? { operator: op } : {}), ...(nt ? { note: nt } : {}) };
 }
 
 /** Profile name rule, matching `march legate init` (deriveDefaults/validateProfile). */
@@ -118,14 +152,33 @@ export async function registerProfileRoutes(
     return record;
   });
 
-  // Register/upsert a profile (the `march legate init` write path).
+  // Register/upsert a profile (the `march legate init` write path). A change to
+  // the merge policy is recorded in the event log with who made it (#593).
   app.post("/profiles", async (request, reply) => {
-    const validation = validateRegisterProfile(
-      (request.body ?? {}) as Record<string, unknown>,
-    );
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const validation = validateRegisterProfile(body);
     if (!validation.ok) {
       reply.code(400);
       return { error: validation.error };
+    }
+    const before = store.get(validation.input.profile, { includeRemoved: true })?.mergePolicy;
+    // The policy register will store (mirrors `store.register`). History goes in
+    // FIRST: the event log and the registry are separate databases, so this order
+    // means a rejected append leaves the policy unchanged (a retry still sees the
+    // difference and records it) instead of a silent change with no history.
+    const after = validation.input.mergePolicy ?? before;
+    if (opts.events && canonical(policyPayload(before)) !== canonical(policyPayload(after))) {
+      opts.events.append(
+        {
+          type: "profile.merge_policy.changed",
+          mergePolicy: policyPayload(after),
+          previous: policyPayload(before),
+          source: "herald",
+          profile: validation.input.profile,
+        },
+        undefined,
+        readAttribution(body.attribution),
+      );
     }
     const record = store.register(validation.input);
     reply.code(201);

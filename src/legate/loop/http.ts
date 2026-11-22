@@ -1,4 +1,6 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { bearerMatches } from "../../shared/bearer.js";
+import { threadCommentIds } from "./handlers/babysit.js";
 import type { LoopSnapshot } from "./runtime.js";
 import { releasableArchive } from "./pure/slice.js";
 
@@ -10,7 +12,83 @@ import { releasableArchive } from "./pure/slice.js";
  * returns the per-profile breakdown. Security model: the server binds `0.0.0.0`
  * inside the container so Docker's loopback port publish can reach it; the host
  * publishes only on loopback, so the API is never exposed beyond the host.
+ *
+ * Operator levers (#593): every non-GET route is an operator action. When
+ * {@link LEGATE_OPERATOR_TOKEN_ENV} is set, each needs `Authorization: Bearer
+ * <token>` (constant-time compare; 401 otherwise). Unset keeps the pre-#593 open
+ * loopback posture so an existing install keeps working (a warning is logged at
+ * startup). Every lever takes an optional `operator` + `reason` and stamps them on
+ * the Herald event it appends, so history shows operator actions next to the
+ * loop's own.
  */
+
+/** Env var holding the shared operator bearer token for the Legate API (#593). */
+export const LEGATE_OPERATOR_TOKEN_ENV = "MARCH_LEGATE_OPERATOR_TOKEN";
+
+/** Attribution every operator lever carries (#593): who asked, and why. */
+export interface OperatorFields {
+  /** Who asked (stamped on the Herald event envelope; "unknown" when absent). */
+  operator?: string;
+  /** Why (the envelope `note`). */
+  reason?: string;
+}
+
+/** Common shape of an operator lever's result (also the HTTP response body). */
+export interface OperatorActionResult {
+  ok: boolean;
+  profile?: string;
+  sliceId?: string;
+  /** The request event was appended; the next tick acts on it. */
+  requested?: boolean;
+  /** HTTP status hint for a refusal (404 unknown, 409 conflict, 502 Herald). */
+  status?: number;
+  error?: string;
+  /** On an unknown-profile error, the known profiles (parity with /status). */
+  profiles?: string[];
+  /** The PR the lever acts on (merge now). */
+  prNumber?: number;
+}
+
+/** Operator input to a profile-level lever (#593): tick / pause / resume.
+ *  `profile` omitted = every registered profile. */
+export interface ProfileLeverInput extends OperatorFields {
+  profile?: string;
+}
+
+/** Result of a profile-level lever (#593). */
+export interface ProfileLeverResult extends OperatorActionResult {
+  /** The profiles the lever was recorded against. */
+  targets?: string[];
+  /** All-profile lever: the profiles whose append failed (the rest were recorded). */
+  failed?: string[];
+  /** Extra context on an accepted request (e.g. a tick that was not started). */
+  note?: string;
+  /** `POST /tick`: a tick was started. */
+  started?: boolean;
+}
+
+/** Operator input to a plain slice lever (#593): recover, merge, relaunch. */
+export interface SliceLeverInput extends OperatorFields {
+  profile: string;
+  sliceId: string;
+}
+
+/** Operator input to the review-thread resend endpoint (#593). */
+export interface ResendThreadsInput extends SliceLeverInput {
+  /** Review thread ids to re-send; omitted = every unresolved thread. */
+  threadIds?: string[];
+}
+
+/** Result of a review-thread resend (#593). */
+export interface ResendThreadsResult extends OperatorActionResult {
+  /** The /smithy.fix reached the steward session. */
+  delivered?: boolean;
+  threadIds?: string[];
+  commentIds?: string[];
+}
+
+/** Operator input to the recover endpoint (#593): walk the recovery ladder. */
+export type RecoverInput = SliceLeverInput;
 
 /** Operator input to the respond endpoint: an answer to deliver, or an ack. */
 export interface RespondInput {
@@ -22,6 +100,10 @@ export interface RespondInput {
   message?: string;
   /** Mark-read: clear the escalation back to babysit handling without an answer. */
   ack?: boolean;
+  /** Who answered (#593 attribution). */
+  operator?: string;
+  /** Why (#593 attribution). */
+  reason?: string;
 }
 
 /** Result of a respond attempt (also the HTTP response body). */
@@ -85,6 +167,59 @@ export interface LoopHttpContext {
   /** Request an operator requeue (#588/#593). Supplied by the runtime; absent in
    *  the pure HTTP unit tests, where the route reports 501. */
   readonly requeueSlice?: (input: RequeueInput) => Promise<RequeueResult>;
+  /** Request the graduated recovery ladder for a slice (#593). */
+  readonly requestRecovery?: (input: RecoverInput) => Promise<OperatorActionResult>;
+  /** Request an operator merge-now (#593). */
+  readonly requestMerge?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
+  /** Request an operator steward relaunch (#593). */
+  readonly requestRelaunch?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
+  /** Re-send review threads to the slice's steward (#593). */
+  readonly resendReviewThreads?: (input: ResendThreadsInput) => Promise<ResendThreadsResult>;
+  /** Run a tick now (#593). */
+  readonly requestTick?: (input: ProfileLeverInput) => Promise<ProfileLeverResult>;
+  /** Pause / resume fresh dispatch (#593). */
+  readonly setDispatchPaused?: (input: ProfileLeverInput & { paused: boolean }) => Promise<ProfileLeverResult>;
+  /** Environment the operator-token gate reads (defaults to process.env). */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/** The profile + sliceId an operator request targets (body/`?profile=` + path). */
+function readTarget(request: FastifyRequest): { profile: string; sliceId: string; body: Record<string, unknown> } {
+  const params = (request.params ?? {}) as Record<string, string | undefined>;
+  const query = (request.query ?? {}) as Record<string, string | undefined>;
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
+  // Validate every supplied profile before picking one: a malformed body value
+  // must not fall through to `?profile=` (or widen a profile lever to all).
+  const valid = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+  const malformed = (body.profile !== undefined && !valid(body.profile)) || (query.profile !== undefined && !valid(query.profile));
+  const profile = malformed ? "" : valid(body.profile) ? body.profile : valid(query.profile) ? query.profile : "";
+  return { profile, sliceId, body };
+}
+
+/** Parse the optional `operator` / `reason` attribution off a lever body (#593). */
+export function readOperatorFields(body: Record<string, unknown>): { ok: true; fields: OperatorFields } | { ok: false; error: string } {
+  // Herald's attribution limits (operator ≤128, note ≤1000, measured untrimmed):
+  // checked here, before any lever side effect, so a lever never acts and then
+  // fails to record who asked.
+  const limits = { operator: 128, reason: 1000 } as const;
+  for (const field of ["operator", "reason"] as const) {
+    if (body[field] !== undefined && typeof body[field] !== "string") {
+      return { ok: false, error: `${field} must be a string.` };
+    }
+    if (typeof body[field] === "string" && (body[field] as string).length > limits[field]) {
+      return { ok: false, error: `${field} must be at most ${limits[field]} characters.` };
+    }
+  }
+  const operator = typeof body.operator === "string" ? body.operator.trim() : "";
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  return { ok: true, fields: { ...(operator ? { operator } : {}), ...(reason ? { reason } : {}) } };
+}
+
+/** HTTP status for a lever result: 202 on success, else its hint (404 for unknowns). */
+function leverStatus(result: OperatorActionResult, okStatus = 202): number {
+  if (result.ok) return okStatus;
+  return result.status ?? (/^unknown (profile|slice)/.test(result.error ?? "") ? 404 : 400);
 }
 
 /** Per-profile status from a heartbeat record + tick timing (pure; testable). */
@@ -120,6 +255,11 @@ export function statusForRecord(
     },
     state_present: r?.state_present ?? false,
     state_error: r?.state_error ?? null,
+    // Operator pause (#593): fresh dispatch is held until `POST /dispatch/resume`.
+    dispatch_paused: r?.dispatch_paused === true,
+    ...(r?.dispatch_paused === true
+      ? { dispatch_paused_since: r?.dispatch_paused_since ?? null, dispatch_paused_reason: r?.dispatch_paused_reason ?? null }
+      : {}),
   };
 }
 
@@ -298,6 +438,93 @@ export function resolveRequeueTarget(
   return { ok: true, openPr };
 }
 
+/** The outcome of resolving a review-thread resend target (pure). */
+export type ResendTarget =
+  | {
+      ok: true;
+      /** The PR object to build the /smithy.fix message from. */
+      pr: any;
+      prNumber: number;
+      threads: any[];
+      threadIds: string[];
+      commentIds: string[];
+      sessionId: string;
+    }
+  | { ok: false; status: 400 | 409; error: string };
+
+/**
+ * Resolve (and validate) a review-thread resend (#593). Pure + testable. Picks
+ * the named threads (all unresolved when `threadIds` is omitted) from the fold's
+ * PR observation — fresher than the warm record, which it falls back to — and
+ * needs a steward session to deliver to. Unlike babysit it ignores the seen-set
+ * and `needs_response`: re-sending already-sent threads is the point.
+ */
+/**
+ * After a resend's await (#593): may it still be recorded on the warm slice? Only
+ * when the warm entry is the one captured before the send (no requeue replaced
+ * it) AND its steward is still the session that received the message (no relaunch
+ * swapped `worker_session_id` in place). Otherwise the feedback went to a gone
+ * incarnation or session, and recording it would mark it handled for the new one.
+ */
+export function resendStillCurrent(current: any, captured: any, sessionId: string, generation: number): boolean {
+  // `relaunch_in_progress` covers a relaunch that started during the send and has
+  // not yet rebound worker_session_id. `relaunch_generation` (bumped by every
+  // relaunch attempt) covers one that started and ended during the send, including
+  // one that removed the session and then failed to launch a replacement.
+  return (
+    current === captured &&
+    current?.worker_session_id === sessionId &&
+    current?.relaunch_in_progress !== true &&
+    relaunchGeneration(current) === generation
+  );
+}
+
+/** The warm slice's relaunch generation (#593): bumped by every relaunch attempt. */
+export function relaunchGeneration(slice: any): number {
+  return typeof slice?.relaunch_generation === "number" ? slice.relaunch_generation : 0;
+}
+
+export function resolveResendTarget(slice: any, observedPr: any, threadIds?: string[]): ResendTarget {
+  if (slice?.stage === "merged") return { ok: false, status: 409, error: "slice is merged." };
+  const observed = observedPr && !observedPr.skipped && observedPr.number ? observedPr : null;
+  const pr = observed ?? slice?.pr ?? null;
+  const prNumber = typeof pr?.number === "number" && pr.number > 0 ? pr.number : null;
+  if (prNumber === null) return { ok: false, status: 409, error: "slice has no observed PR." };
+  const unresolved: any[] = Array.isArray(observed?.unresolved_threads)
+    ? observed.unresolved_threads
+    : Array.isArray(slice?.unresolved_threads)
+      ? slice.unresolved_threads
+      : [];
+  let threads = unresolved;
+  if (threadIds) {
+    const byId = new Map(unresolved.map((t) => [String(t?.id), t]));
+    const unknown = threadIds.filter((id) => !byId.has(id));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        status: 400,
+        error: `unknown or resolved review thread(s) on PR #${prNumber}: ${unknown.join(", ")} (unresolved: ${[...byId.keys()].join(", ") || "none"}).`,
+      };
+    }
+    threads = threadIds.map((id) => byId.get(id));
+  }
+  if (threads.length === 0) return { ok: false, status: 409, error: `PR #${prNumber} has no unresolved review threads to re-send.` };
+  const sessionId = typeof slice?.worker_session_id === "string" ? slice.worker_session_id : "";
+  if (!sessionId) return { ok: false, status: 409, error: "slice has no steward session — relaunch it first." };
+  if (slice?.relaunch_in_progress === true) {
+    return { ok: false, status: 409, error: "the slice's steward is being relaunched — re-send once the new steward is up." };
+  }
+  return {
+    ok: true,
+    pr,
+    prNumber,
+    threads,
+    threadIds: threads.map((t) => String(t.id)),
+    commentIds: [...new Set(threads.flatMap((t) => threadCommentIds(t)))],
+    sessionId,
+  };
+}
+
 /** Build the /escalations payload. With `profile`, that profile's escalated tasks;
  *  else every profile's, keyed by profile. */
 export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
@@ -319,6 +546,18 @@ export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record
 /** Build the Fastify app with the loop routes registered. Exported for tests (inject). */
 export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  // Operator-token gate (#593): every non-GET route is an operator lever. The
+  // token is read per request so a rotated secret takes effect without a restart.
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "GET" || request.method === "HEAD") return;
+    const token = (ctx.env ?? process.env)[LEGATE_OPERATOR_TOKEN_ENV]?.trim();
+    if (!token) return;
+    if (!bearerMatches(request.headers.authorization, token)) {
+      reply.code(401);
+      return reply.send({ ok: false, error: `operator token required (Authorization: Bearer $${LEGATE_OPERATOR_TOKEN_ENV}).` });
+    }
+  });
 
   app.get("/healthz", async () => ({
     status: "ok",
@@ -369,14 +608,7 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // slices, so the report flip alone can't un-escalate them).
   // Profile from the body or `?profile=`. Read-but-acting, so it's the one POST.
   app.post("/escalations/:sliceId/respond", async (request, reply) => {
-    const params = (request.params ?? {}) as Record<string, string | undefined>;
-    const query = (request.query ?? {}) as Record<string, string | undefined>;
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
-    const profile =
-      (typeof body.profile === "string" && body.profile.length > 0 && body.profile) ||
-      (typeof query.profile === "string" && query.profile.length > 0 && query.profile) ||
-      "";
+    const { profile, sliceId, body } = readTarget(request);
     const message = typeof body.message === "string" ? body.message.trim() : "";
     const ack = body.ack === true;
 
@@ -405,6 +637,11 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
         error: "provide exactly one of `message` (answer) or `ack:true` (mark read), not both.",
       };
     }
+    const attribution = readOperatorFields(body);
+    if (!attribution.ok) {
+      reply.code(400);
+      return { ok: false, error: attribution.error };
+    }
     if (!ctx.respondToEscalation) {
       reply.code(501);
       return { ok: false, error: "respond is not available in this context." };
@@ -415,6 +652,7 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
       sliceId,
       ...(message ? { message } : {}),
       ack,
+      ...attribution.fields,
     });
     if (result.ok) {
       reply.code(200);
@@ -432,14 +670,7 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // operator + reason for attribution); the next tick's requeue handler acts on
   // it, so the response is 202 Accepted.
   app.post("/slices/:sliceId/requeue", async (request, reply) => {
-    const params = (request.params ?? {}) as Record<string, string | undefined>;
-    const query = (request.query ?? {}) as Record<string, string | undefined>;
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
-    const profile =
-      (typeof body.profile === "string" && body.profile.length > 0 && body.profile) ||
-      (typeof query.profile === "string" && query.profile.length > 0 && query.profile) ||
-      "";
+    const { profile, sliceId, body } = readTarget(request);
     if (!profile) {
       reply.code(400);
       return { ok: false, error: "profile is required (body.profile or ?profile=)." };
@@ -454,35 +685,154 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
         return { ok: false, error: `${field} must be a boolean.` };
       }
     }
-    for (const field of ["operator", "reason"] as const) {
-      if (body[field] !== undefined && typeof body[field] !== "string") {
-        reply.code(400);
-        return { ok: false, error: `${field} must be a string.` };
-      }
+    const attribution = readOperatorFields(body);
+    if (!attribution.ok) {
+      reply.code(400);
+      return { ok: false, error: attribution.error };
     }
     if (!ctx.requeueSlice) {
       reply.code(501);
       return { ok: false, error: "requeue is not available in this context." };
     }
-    const operator = typeof body.operator === "string" ? body.operator.trim() : "";
-    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
     const result = await ctx.requeueSlice({
       profile,
       sliceId,
       closePr: body.closePr === true,
       ...(body.releaseMerged === true ? { releaseMerged: true } : {}),
-      ...(operator ? { operator } : {}),
-      ...(reason ? { reason } : {}),
+      ...attribution.fields,
     });
-    if (result.ok) {
-      reply.code(202);
-    } else {
-      reply.code(result.status ?? (/^unknown profile/.test(result.error ?? "") ? 404 : 400));
-    }
+    reply.code(leverStatus(result));
     return result;
   });
 
+  // Operator RECOVER (#593): walk the graduated recovery ladder for one slice —
+  // the least-destructive way out of an escalation. Moved here from a direct
+  // Herald append so the request is authenticated and attributed like every
+  // other lever. Appends `slice.recovery.requested` (with the operator on the
+  // envelope); the next tick's recovery handler acts on it.
+  registerSliceLever(app, "/slices/:sliceId/recover", "recover", ctx.requestRecovery);
+
+  // Operator MERGE NOW (#593): squash-merge the slice's open PR on the next tick
+  // (kicked off immediately), bypassing the review/CI gates but still pinned to
+  // the head SHA re-read from GitHub. 409 for no PR / already merged / closed.
+  // Replaces running `gh pr merge` out of band, so the merge is in the log.
+  registerSliceLever(app, "/slices/:sliceId/merge", "merge", ctx.requestMerge);
+
+  // Operator RELAUNCH (#593): replace the slice's steward — remove a still-live
+  // session (worktree kept) and attach a fresh one to the preserved PR/branch,
+  // bypassing the self-heal backoff. 409 for a merged / PR-less slice (use
+  // requeue to start one over).
+  registerSliceLever(app, "/slices/:sliceId/relaunch", "relaunch", ctx.requestRelaunch);
+
+  // Operator RESEND REVIEW THREADS (#593): deliver /smithy.fix for the named
+  // unresolved review threads (all, when `threadIds` is omitted) straight into
+  // the live steward session — even threads the loop's dedup already counts as
+  // sent, or that the steward answered without fixing. Synchronous like respond:
+  // 200 once delivered; 400 for an unknown thread id; 409 when there is nothing
+  // to send or no steward session; 502 when the send fails.
+  registerSliceLever<ResendThreadsInput>(
+    app,
+    "/slices/:sliceId/review-threads/resend",
+    "resend",
+    ctx.resendReviewThreads,
+    (body) => {
+      if (body.threadIds === undefined) return { ok: true, fields: {} };
+      if (!Array.isArray(body.threadIds) || body.threadIds.length === 0) {
+        return { ok: false, error: "threadIds must be a non-empty array of thread ids (omit it to re-send every unresolved thread)." };
+      }
+      const ids = body.threadIds.map((id) => (typeof id === "number" || typeof id === "string" ? String(id).trim() : ""));
+      if (ids.some((id) => id.length === 0)) return { ok: false, error: "threadIds must be non-empty strings or numbers." };
+      return { ok: true, fields: { threadIds: [...new Set(ids)] } };
+    },
+    200,
+  );
+
+  // Profile-level levers (#593). `profile` (body or `?profile=`) narrows to one
+  // profile; omitted = every registered profile.
+  //   - POST /tick runs a tick now (409 while one is already in flight).
+  //   - POST /dispatch/pause holds fresh dispatch (durable `dispatch.paused` in
+  //     the fold, so a restart stays paused); in-flight spawns still drain and
+  //     relaunch/babysit/merge/recovery keep running.
+  //   - POST /dispatch/resume lifts it.
+  registerProfileLever(app, "/tick", "tick", ctx.requestTick);
+  registerProfileLever(app, "/dispatch/pause", "pause", ctx.setDispatchPaused && ((i) => ctx.setDispatchPaused!({ ...i, paused: true })));
+  registerProfileLever(app, "/dispatch/resume", "resume", ctx.setDispatchPaused && ((i) => ctx.setDispatchPaused!({ ...i, paused: false })));
+
   return app;
+}
+
+/**
+ * Register a plain slice lever (#593): `POST <path>` with `{profile?, operator?,
+ * reason?}` plus any lever-specific fields `extra` parses. 400 on a bad body, 501
+ * when the runtime effect is absent, else the effect's result (202 on success).
+ */
+function registerSliceLever<I extends OperatorFields & { profile: string; sliceId: string }>(
+  app: FastifyInstance,
+  routePath: string,
+  label: string,
+  effect: ((input: I) => Promise<OperatorActionResult>) | undefined,
+  extra?: (body: Record<string, unknown>) => { ok: true; fields: Omit<I, "profile" | "sliceId" | "operator" | "reason"> } | { ok: false; error: string },
+  okStatus = 202,
+): void {
+  app.post(routePath, async (request, reply) => {
+    const { profile, sliceId, body } = readTarget(request);
+    if (!profile) {
+      reply.code(400);
+      return { ok: false, error: "profile is required (body.profile or ?profile=)." };
+    }
+    if (!sliceId) {
+      reply.code(400);
+      return { ok: false, error: "sliceId path param is required." };
+    }
+    const attribution = readOperatorFields(body);
+    if (!attribution.ok) {
+      reply.code(400);
+      return { ok: false, error: attribution.error };
+    }
+    const parsed = extra ? extra(body) : { ok: true as const, fields: {} };
+    if (!parsed.ok) {
+      reply.code(400);
+      return { ok: false, error: parsed.error };
+    }
+    if (!effect) {
+      reply.code(501);
+      return { ok: false, error: `${label} is not available in this context.` };
+    }
+    const result = await effect({ ...parsed.fields, profile, sliceId, ...attribution.fields } as I);
+    reply.code(leverStatus(result, okStatus));
+    return result;
+  });
+}
+
+/** Register a profile-level lever (#593): `POST <path>` with `{profile?, operator?, reason?}`. */
+function registerProfileLever(
+  app: FastifyInstance,
+  routePath: string,
+  label: string,
+  effect: ((input: ProfileLeverInput) => Promise<ProfileLeverResult>) | undefined,
+): void {
+  app.post(routePath, async (request, reply) => {
+    const { profile, body } = readTarget(request);
+    // An omitted profile means "every profile"; a supplied but malformed one
+    // must not silently widen to all of them.
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    if (!profile && (body.profile !== undefined || query.profile !== undefined)) {
+      reply.code(400);
+      return { ok: false, error: "profile must be a non-empty string (omit it to target every profile)." };
+    }
+    const attribution = readOperatorFields(body);
+    if (!attribution.ok) {
+      reply.code(400);
+      return { ok: false, error: attribution.error };
+    }
+    if (!effect) {
+      reply.code(501);
+      return { ok: false, error: `${label} is not available in this context.` };
+    }
+    const result = await effect({ ...(profile ? { profile } : {}), ...attribution.fields });
+    reply.code(leverStatus(result));
+    return result;
+  });
 }
 
 /** Start the loop HTTP server on the given port (loopback by default). */
@@ -492,6 +842,12 @@ export async function startLoopHttpServer(
   host = "127.0.0.1",
 ): Promise<FastifyInstance> {
   const app = buildLoopServer(ctx);
+  if (!(ctx.env ?? process.env)[LEGATE_OPERATOR_TOKEN_ENV]?.trim()) {
+    console.warn(
+      `${LEGATE_OPERATOR_TOKEN_ENV} is unset — the Legate operator levers (POST routes) are unauthenticated; ` +
+        "set it to require a bearer token.",
+    );
+  }
   await app.listen({ port, host });
   return app;
 }

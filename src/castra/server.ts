@@ -1,4 +1,5 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { bearerMatches } from "../shared/bearer.js";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
@@ -128,12 +129,6 @@ function traceLogFields(
   return span ? { trace_id: span.traceId, span_id: span.spanId } : {};
 }
 
-function bearerMatches(authorization: string | undefined, token: string): boolean {
-  if (!authorization || !authorization.startsWith("Bearer ")) return false;
-  const provided = Buffer.from(authorization.slice("Bearer ".length));
-  const expected = Buffer.from(token);
-  return provided.length === expected.length && timingSafeEqual(provided, expected);
-}
 
 /**
  * Build the Castra Fastify app. The agent-deck adapter is injected so tests can

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { bearerMatches } from "../shared/bearer.js";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
@@ -104,12 +104,6 @@ function statioLogFields(
   };
 }
 
-function bearerMatches(authorization: string | undefined, token: string): boolean {
-  if (!authorization || !authorization.startsWith("Bearer ")) return false;
-  const provided = Buffer.from(authorization.slice("Bearer ".length));
-  const expected = Buffer.from(token);
-  return provided.length === expected.length && timingSafeEqual(provided, expected);
-}
 
 function createDefaultForgeClient(): StatioRouteForgeClient {
   const adapter = createGhForgeAdapter();

@@ -15,7 +15,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordDwell, recordLoopHeartbeat, recordReviewCaps, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import {
+  recordDwell,
+  recordLoopHeartbeat,
+  recordOperatorAction,
+  recordReviewCaps,
+  recordSpawnBudget,
+  type OperatorAction,
+} from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
 import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -47,7 +54,7 @@ import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
 import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
-import { LegateHerald } from "./clients/herald.js";
+import { LegateHerald, type OperatorAttribution } from "./clients/herald.js";
 // Dispatch ops (ask Hatchery to spawn / poll a job to completion). The legate's
 // effecting dispatch logic, behind the DispatchIoDeps seam built below. #144.
 import type { DispatchIoDeps } from "./handlers/dispatch-io.js";
@@ -65,14 +72,23 @@ import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan, recordA
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
+import { resendWithDeps } from "./operator-resend.js";
 // Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
 // shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
 // the LoopSnapshot TYPE from here, so this value import is a one-way edge.
 import {
   resolveRequeueTarget,
   resolveRespondTarget,
+  type OperatorActionResult,
+  type OperatorFields,
+  type ProfileLeverInput,
+  type ProfileLeverResult,
+  type RecoverInput,
   type RequeueInput,
+  type SliceLeverInput,
   type RequeueResult,
+  type ResendThreadsInput,
+  type ResendThreadsResult,
   type RespondInput,
   type RespondResult,
 } from "./http.js";
@@ -260,8 +276,10 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
         "march.respond.delivered": result.delivered ?? false,
         "march.respond.cleared": result.cleared ?? false,
         "march.respond.recovery_requested": result.recoveryRequested ?? false,
+        "march.operator": operatorOf(input),
       },
     });
+    recordOperatorAction("respond", result.ok ? "accepted" : "refused");
     emitLoopLog({
       severity: result.ok ? "INFO" : "ERROR",
       body: result.ok
@@ -347,7 +365,11 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
   //    open PR — handing the slice back to babysit's PR (fix + merge) path.
   let recoveryRequested = false;
   try {
-    await legateHerald().append(profile, { type: "slice.recovery.requested", sliceId: input.sliceId });
+    await legateHerald().append(
+      profile,
+      { type: "slice.recovery.requested", sliceId: input.sliceId },
+      attributionOf(input, `respond ${mode}`),
+    );
     recoveryRequested = true;
   } catch (err: any) {
     return finish({
@@ -386,9 +408,10 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
         "march.requeue.close_pr": input.closePr === true,
         "march.requeue.release_merged": input.releaseMerged === true,
         "march.requeue.requested": result.requested ?? false,
-        ...(input.operator ? { "march.operator": input.operator } : {}),
+        "march.operator": operatorOf(input),
       },
     });
+    recordOperatorAction("requeue", result.ok ? "accepted" : "refused");
     emitLoopLog({
       severity: result.ok ? "INFO" : "ERROR",
       body: result.ok
@@ -415,7 +438,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       ...(input.releaseMerged === true ? { releaseMerged: true } : {}),
       ...(input.operator ? { operator: input.operator } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
-    });
+    }, attributionOf(input));
   } catch (err: any) {
     return finish({
       ok: false,
@@ -433,6 +456,316 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
     closesPr: target.openPr,
     ...(target.archived ? { releasesArchive: target.archived } : {}),
   });
+}
+
+// ── Operator levers (#593) ──────────────────────────────────────────────────
+// Every lever validates against the profile's warm working state, appends ONE
+// attributed request event to Herald (the operator on the envelope), and lets the
+// tick act on the folded request — so the log shows the operator's ask next to
+// the loop's response, and a restart re-reads any request not yet acted on.
+
+/** The operator name stamped on the envelope ("unknown" when the caller gave none). */
+function operatorOf(input: OperatorFields): string {
+  return input.operator?.trim() || "unknown";
+}
+
+/** Envelope attribution for an operator lever: who asked, and why. */
+function attributionOf(input: OperatorFields, fallbackNote?: string): OperatorAttribution {
+  const note = input.reason?.trim() || fallbackNote;
+  return { operator: operatorOf(input), ...(note ? { note } : {}) };
+}
+
+/**
+ * Emit the span, log and metric for an operator lever outcome (#593). The span is
+ * `legate.operator.<action>` on the slice trace (a child, never root), errored on
+ * refusal; profile-level levers (tick/pause/resume) have no slice and emit a root
+ * span instead.
+ */
+function finishOperatorAction<R extends OperatorActionResult>(
+  action: OperatorAction,
+  input: OperatorFields & { profile?: string; sliceId?: string },
+  result: R,
+  attributes: Record<string, string | number | boolean> = {},
+): R {
+  const sliceId = input.sliceId;
+  emitLoopSpan({
+    name: `legate.operator.${action}`,
+    traceKey: sliceId ?? `operator:${action}:${Date.now()}`,
+    root: !sliceId,
+    error: !result.ok,
+    attributes: {
+      ...(sliceId ? { "march.slice_id": sliceId } : {}),
+      ...(input.profile ? { "march.profile": input.profile } : {}),
+      "march.operator": operatorOf(input),
+      "march.operator.action": action,
+      ...(result.status ? { "http.status_code": result.status } : {}),
+      ...attributes,
+    },
+  });
+  recordOperatorAction(action, result.ok ? "accepted" : "refused");
+  emitLoopLog({
+    severity: result.ok ? "INFO" : "ERROR",
+    body: result.ok
+      ? `operator ${action}${sliceId ? ` for ${sliceId}` : ""} by ${operatorOf(input)}`
+      : `operator ${action}${sliceId ? ` for ${sliceId}` : ""} refused: ${result.error ?? "unknown error"}`,
+    eventKind: "operator_action",
+    ...(sliceId ? { sliceId } : {}),
+    attributes: { ...(input.profile ? { "march.profile": input.profile } : {}), "march.operator.action": action },
+  });
+  return result;
+}
+
+/** Look up a profile's runtime + a slice in its warm state, or a 404 refusal. */
+function sliceTarget(
+  input: { profile: string; sliceId: string },
+): { ok: true; rt: ProfileRuntime; slice: any } | { ok: false; result: OperatorActionResult } {
+  const rt = runtimes.get(input.profile);
+  if (!rt) {
+    return { ok: false, result: { ok: false, status: 404, error: `unknown profile "${input.profile}".`, profiles: [...runtimes.keys()] } };
+  }
+  const slices = rt.workingState?.slices;
+  // Own entries only: `__proto__` / `constructor` must not resolve to an inherited object.
+  const slice = slices && Object.hasOwn(slices, input.sliceId) ? slices[input.sliceId] : undefined;
+  if (!slice || typeof slice !== "object") {
+    return { ok: false, result: { ok: false, status: 404, profile: input.profile, sliceId: input.sliceId, error: `unknown slice "${input.sliceId}".` } };
+  }
+  return { ok: true, rt, slice };
+}
+
+/** Append an attributed request event, mapping a Herald failure to a 502 refusal. */
+async function appendOperatorRequest(
+  input: OperatorFields & { profile: string; sliceId?: string },
+  event: Parameters<LegateHerald["append"]>[1],
+  what: string,
+): Promise<OperatorActionResult | null> {
+  try {
+    await legateHerald().append(input.profile, event, attributionOf(input));
+    return null;
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 502,
+      profile: input.profile,
+      ...(input.sliceId ? { sliceId: input.sliceId } : {}),
+      error: `failed to record the ${what} request in Herald: ${err?.message ?? String(err)}`,
+    };
+  }
+}
+
+/**
+ * The registered profiles a profile-level lever targets: the named one (404 if it
+ * is not registered), else every registered profile. The registry — not the warm
+ * runtimes map — is the source of truth, so a lever works before the first tick.
+ */
+async function leverProfiles(input: ProfileLeverInput): Promise<{ ok: true; profiles: string[] } | { ok: false; result: ProfileLeverResult }> {
+  let registered: string[];
+  try {
+    registered = (await profileClient.list()).map((p) => p.profile);
+  } catch (err: any) {
+    return { ok: false, result: { ok: false, status: 502, error: `failed to list profiles from Herald: ${err?.message ?? String(err)}` } };
+  }
+  if (input.profile) {
+    if (!registered.includes(input.profile)) {
+      return { ok: false, result: { ok: false, status: 404, error: `unknown profile "${input.profile}".`, profiles: registered } };
+    }
+    return { ok: true, profiles: [input.profile] };
+  }
+  if (registered.length === 0) return { ok: false, result: { ok: false, status: 404, error: "no profiles are registered." } };
+  return { ok: true, profiles: registered };
+}
+
+/**
+ * Append one attributed profile-level event per target profile. Every target is
+ * attempted — one profile's Herald failure must not leave the rest unrecorded —
+ * and a partial failure reports which profiles were recorded (`targets`) and
+ * which were not (`failed`). A single-profile failure keeps its own error.
+ */
+async function appendProfileLever(
+  input: ProfileLeverInput,
+  targets: string[],
+  event: Parameters<LegateHerald["append"]>[1],
+  what: string,
+): Promise<ProfileLeverResult | null> {
+  const recorded: string[] = [];
+  const failures: { profile: string; result: OperatorActionResult }[] = [];
+  for (const profile of targets) {
+    const failed = await appendOperatorRequest({ ...input, profile }, event, what);
+    if (failed) failures.push({ profile, result: failed });
+    else recorded.push(profile);
+  }
+  if (failures.length === 0) return null;
+  if (targets.length === 1) return failures[0].result;
+  return {
+    ok: false,
+    status: 502,
+    targets: recorded,
+    failed: failures.map((f) => f.profile),
+    error:
+      `${what} recorded for ${recorded.length ? recorded.join(", ") : "no profile"}; failed for ` +
+      failures.map((f) => `${f.profile} (${f.result.error ?? "unknown error"})`).join(", "),
+  };
+}
+
+/**
+ * Operator TICK NOW (#593): run a tick immediately instead of waiting for the
+ * interval. Refused (409) while a tick is already in flight — that tick picks up
+ * any pending request anyway. Records `legate.tick.requested` per target profile.
+ */
+export async function requestTick(input: ProfileLeverInput): Promise<ProfileLeverResult> {
+  if (scheduler().ticking) {
+    return finishOperatorAction("tick", input, { ok: false, status: 409, started: false, error: "a tick is already in progress." });
+  }
+  const targets = await leverProfiles(input);
+  if (!targets.ok) return finishOperatorAction("tick", input, targets.result);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendProfileLever(input, targets.profiles, { type: "legate.tick.requested", ...reason }, "tick");
+  // Nothing recorded: leave the scheduler idle and report the failure.
+  if (failed && !(failed.targets && failed.targets.length > 0)) return finishOperatorAction("tick", input, failed);
+  // A tick may have started while the request was being recorded. The
+  // scheduler's guard is synchronous, so `ticking` right before runOnce is its
+  // admission result; a skipped tick is reported as such (the in-flight tick or
+  // the next one picks the request up).
+  const started = !scheduler().ticking;
+  void scheduler().runOnce();
+  // Partial failure (some profiles recorded): still tick now, and keep the 502
+  // with targets/failed so the caller sees which profiles were not recorded.
+  if (failed) return finishOperatorAction("tick", input, { ...failed, started });
+  return finishOperatorAction("tick", input, {
+    ok: true,
+    requested: true,
+    started,
+    targets: targets.profiles,
+    ...(started ? {} : { note: "a tick was already in progress; the request is recorded and the next tick runs on schedule." }),
+  });
+}
+
+/**
+ * Operator PAUSE / RESUME dispatch (#593). Appends `dispatch.paused` /
+ * `dispatch.resumed` per target profile; the fold's durable `dispatchPaused`
+ * makes the dispatch handler launch nothing new from the next tick on.
+ */
+export async function setDispatchPaused(input: ProfileLeverInput & { paused: boolean }): Promise<ProfileLeverResult> {
+  const action = input.paused ? "pause" : "resume";
+  const targets = await leverProfiles(input);
+  if (!targets.ok) return finishOperatorAction(action, input, targets.result);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendProfileLever(
+    input,
+    targets.profiles,
+    { type: input.paused ? "dispatch.paused" : "dispatch.resumed", ...reason },
+    action,
+  );
+  if (failed) return finishOperatorAction(action, input, failed);
+  return finishOperatorAction(action, input, { ok: true, requested: true, targets: targets.profiles });
+}
+
+/** The slice's PR number + state: Herald's observation first (fresher), else the warm record. */
+function observedPr(profile: string, sliceId: string, slice: any): { number: number | null; state: string | null } {
+  const observed = legateHerald().snapshotFor(profile)?.slices?.[sliceId]?.pr as any;
+  const pr = observed && !observed.skipped && observed.number ? observed : slice?.pr;
+  const n = pr?.number;
+  return {
+    number: typeof n === "number" && n > 0 ? n : null,
+    state: typeof pr?.state === "string" ? pr.state.toUpperCase() : null,
+  };
+}
+
+/**
+ * Operator MERGE NOW (#593): request a squash-merge of the slice's open PR,
+ * bypassing the review/CI gates (the merge still pins the head SHA it re-reads).
+ * Appends `slice.merge.requested`; the merge-now handler acts on it. A tick is
+ * kicked off right away (best-effort) so the merge does not wait for the interval.
+ */
+export async function requestMerge(input: SliceLeverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("merge", input, target.result);
+  const pr = observedPr(input.profile, input.sliceId, target.slice);
+  const refuse = (status: number, error: string) =>
+    finishOperatorAction("merge", input, { ok: false, status, profile: input.profile, sliceId: input.sliceId, error });
+  if (pr.number === null) return refuse(409, `slice "${input.sliceId}" has no PR to merge.`);
+  if (pr.state === "MERGED" || target.slice.stage === "merged") return refuse(409, `slice "${input.sliceId}" PR #${pr.number} is already merged.`);
+  if (pr.state === "CLOSED") return refuse(409, `slice "${input.sliceId}" PR #${pr.number} is closed.`);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendOperatorRequest(input, { type: "slice.merge.requested", sliceId: input.sliceId, prNumber: pr.number, ...reason }, "merge");
+  if (failed) return finishOperatorAction("merge", input, failed);
+  void scheduler().runOnce();
+  return finishOperatorAction(
+    "merge",
+    input,
+    { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: pr.number },
+    { "march.pr_number": pr.number },
+  );
+}
+
+/**
+ * Operator RELAUNCH (#593): replace the slice's steward — remove a still-live
+ * session (keeping its worktree) and attach a fresh one to the preserved PR and
+ * branch, bypassing the self-heal backoff. Appends `slice.relaunch.requested`;
+ * the relaunch handler acts on it (a tick is kicked off right away). An errored
+ * session can also be restarted IN PLACE by castra-recover; this is the lever for
+ * a steward that is alive but wedged or misbehaving.
+ */
+export async function requestRelaunch(input: SliceLeverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("relaunch", input, target.result);
+  const slice = target.slice;
+  const pr = observedPr(input.profile, input.sliceId, slice);
+  const refuse = (error: string) =>
+    finishOperatorAction("relaunch", input, { ok: false, status: 409, profile: input.profile, sliceId: input.sliceId, error });
+  if (slice.stage === "merged" || pr.state === "MERGED") return refuse(`slice "${input.sliceId}" is merged — there is no steward to relaunch.`);
+  if (slice.stage === "hatchery-pending") return refuse(`slice "${input.sliceId}" has a spawn in progress (hatchery-pending).`);
+  // Same PR source as the relaunch handler (the warm `slice.pr`), so an accepted
+  // request is never one the handler then refuses for lacking a PR.
+  const warmPr = typeof slice.pr?.number === "number" && slice.pr.number > 0 ? slice.pr.number : null;
+  if (warmPr === null || typeof slice.branch !== "string" || slice.branch.length === 0) {
+    return refuse(`slice "${input.sliceId}" has no PR and branch to re-attach a steward to — use requeue to start it over.`);
+  }
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendOperatorRequest(input, { type: "slice.relaunch.requested", sliceId: input.sliceId, ...reason }, "relaunch");
+  if (failed) return finishOperatorAction("relaunch", input, failed);
+  void scheduler().runOnce();
+  return finishOperatorAction("relaunch", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: warmPr });
+}
+
+/**
+ * Operator RESEND REVIEW THREADS (#593): deliver `/smithy.fix` for chosen
+ * unresolved review threads straight into the live steward session. This is the
+ * lever the dedup keys otherwise block: babysit never re-sends a thread whose
+ * comments are already in the seen-set, nor one the steward answered without
+ * fixing (`threadsNeedingResponse` drops a thread whose last word is March's).
+ *
+ * Synchronous like respond (the operator learns at once whether it reached the
+ * steward). On success it records the dispatch exactly like babysit's review-fix
+ * — comment ids seen, per-thread round counted, dispatch context marked so the
+ * bounded post-dispatch nudge applies — and appends the same attributed
+ * `slice.stage.changed {handledFeedback}` so a restart restores it.
+ */
+export async function resendReviewThreads(input: ResendThreadsInput): Promise<ResendThreadsResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("resend_threads", input, target.result);
+  const { rt, slice } = target;
+  const observed = legateHerald().snapshotFor(input.profile)?.slices?.[input.sliceId]?.pr;
+  const { result, attributes } = await resendWithDeps(input, slice, observed, {
+    send: (sessionId, message) => sendAgentDeckMessage(rt.meta, sessionId, message, input.sliceId),
+    currentSlice: () => rt.workingState?.slices?.[input.sliceId],
+    record: (event) => appendOperatorRequest(input, event, "resend"),
+    now,
+  });
+  return finishOperatorAction("resend_threads", input, result, attributes);
+}
+
+/**
+ * Operator RECOVER (#593): request the graduated recovery ladder for a slice —
+ * the side-effecting half of `POST /slices/:sliceId/recover`. Appends an
+ * attributed `slice.recovery.requested`; the recovery handler walks the ladder
+ * from the next tick.
+ */
+export async function requestRecovery(input: RecoverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("recover", input, target.result);
+  const failed = await appendOperatorRequest(input, { type: "slice.recovery.requested", sliceId: input.sliceId }, "recovery");
+  if (failed) return finishOperatorAction("recover", input, failed);
+  return finishOperatorAction("recover", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true });
 }
 
 function now() {
@@ -589,6 +922,14 @@ async function deleteRemoteBranchGh(repoPath: string, branch: string, sliceId?: 
   }
   await execLegateGh("write", ["api", "-X", "DELETE", ref], repoPath, sliceId);
   return true;
+}
+
+/** Operator merge-now (#593): the PR's live state, head SHA and mergeability,
+ *  read fresh from GitHub (the fold can lag) right before the pinned merge. */
+async function readLivePrGh(repoPath: string, prNumber: number, sliceId?: string): Promise<{ state: string; headSha: string; mergeable?: string }> {
+  const out = await execLegateGh("read", ["pr", "view", String(prNumber), "--json", "state,headRefOid,mergeable"], repoPath, sliceId);
+  const pr = JSON.parse(out) as { state?: string; headRefOid?: string; mergeable?: string };
+  return { state: pr.state ?? "", headSha: pr.headRefOid ?? "", ...(pr.mergeable ? { mergeable: pr.mergeable } : {}) };
 }
 
 /** Repo+label pairs known to exist, so each label is created once per process. */
@@ -833,6 +1174,10 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     requeue: {
       closePr: closePrGh,
       deleteRemoteBranch: deleteRemoteBranchGh,
+    },
+    mergeNow: {
+      readPr: readLivePrGh,
+      mergePr: squashMergePr,
     },
     spawnBudget,
   });

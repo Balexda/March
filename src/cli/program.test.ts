@@ -475,15 +475,37 @@ describe("march CLI", () => {
       expect(result.stdout).toContain("sliceId");
     });
 
-    it("`march legate recover <sliceId>` exits 1 with a reach error when Herald is down", () => {
-      // Point at a closed port so the append fails fast with a connection error,
-      // exercising the recover action's Herald round-trip + error path.
+    it("`march legate recover <sliceId>` exits 1 with a reach error when the legate is down (#593)", () => {
+      // Recover now goes through the legate's authenticated operator API, not a
+      // direct Herald append; --profile skips profile resolution so the failure
+      // is the legate round-trip on a closed port.
       const result = runWithEnv(
-        ["legate", "recover", "some-slice"],
-        { ...process.env, MARCH_HERALD_URL: "http://127.0.0.1:1" },
+        ["legate", "recover", "some-slice", "--profile", "march"],
+        { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" },
       );
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("Could not reach the herald service");
+      expect(result.stderr).toContain("Could not reach the legate service");
+    });
+
+    it("`march legate pause --profile ''` refuses instead of pausing every profile (#593)", () => {
+      const result = runWithEnv(["legate", "pause", "--profile", ""], { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--profile must be non-empty");
+    });
+
+    it("`march legate resend-threads --thread ''` refuses instead of re-sending every thread (#593)", () => {
+      const result = runWithEnv(
+        ["legate", "resend-threads", "some-slice", "--profile", "march", "--thread", ""],
+        { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--thread values must be non-empty");
+    });
+
+    it("`march legate recover --help` lists the attribution options (#593)", () => {
+      const result = run(["legate", "recover", "--help"]);
+      expect(result.stdout).toContain("--operator");
+      expect(result.stdout).toContain("--reason");
     });
 
     it("`march legate requeue --help` exits 0 and prints the requeue usage", () => {

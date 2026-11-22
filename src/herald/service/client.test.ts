@@ -39,6 +39,21 @@ describe("HeraldClient", () => {
     expect(fetchImpl.mock.calls[0][0]).toBe("http://herald/events?after=2&limit=50");
   });
 
+  it("append() sends the operator bearer from MARCH_LEGATE_OPERATOR_TOKEN, and none when unset (#593)", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) => jsonResponse(201, { seq: 1 }));
+    const armed = new HeraldClient({
+      baseUrl: "http://herald",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      env: { MARCH_LEGATE_OPERATOR_TOKEN: " op-tok " } as NodeJS.ProcessEnv,
+    });
+    await armed.append({ type: "slice.merge.requested", profile: "p", sliceId: "s", prNumber: 1 });
+    const open = new HeraldClient({ baseUrl: "http://herald", fetchImpl: fetchImpl as unknown as typeof fetch, env: {} as NodeJS.ProcessEnv });
+    await open.append({ type: "heartbeat", profile: "p" });
+    const headers = fetchImpl.mock.calls.map((c) => (c[1] as RequestInit).headers as Record<string, string>);
+    expect(headers[0].authorization).toBe("Bearer op-tok");
+    expect(headers[1].authorization).toBeUndefined();
+  });
+
   it("append() POSTs /events with source=legate and returns the stored event", async () => {
     const fetchImpl = vi.fn(async (..._args: unknown[]) => jsonResponse(201, { seq: 7, type: "slice.archived" }));
     const client = new HeraldClient({ baseUrl: "http://herald", fetchImpl: fetchImpl as unknown as typeof fetch });

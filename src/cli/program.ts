@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import { createInterface } from "node:readline";
 import { Command, CommanderError, Option } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
@@ -30,6 +29,7 @@ import type { MergePolicy, MergeRequirements } from "../herald/profiles/merge-po
 import { editVerbPolicy, showMergePolicy, type VerbPolicyEdits } from "./merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
+import { legatePost, legateServiceBase, resolveOperator } from "./legate-client.js";
 import {
   HatcheryClientError,
   runSpawnViaService,
@@ -1203,68 +1203,6 @@ legate
     }
   });
 
-legate
-  .command("recover <sliceId>")
-  .description(
-    "Recover an escalated slice: append a recovery request so the running legate drops it and re-dispatches the still-ready smithy work fresh (no restart, no manual state surgery). Resolves Herald via MARCH_HERALD_URL.",
-  )
-  .option(
-    "--profile <profile>",
-    "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
-  )
-  .action(async (sliceId: string, opts: { profile?: string }) => {
-    commandHandled = true;
-    const id = (sliceId ?? "").trim();
-    if (id.length === 0) {
-      process.stderr.write("Provide a non-empty <sliceId> to recover.\n");
-      process.exitCode = ERROR;
-      return;
-    }
-    const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
-    const { ProfileClient } = await import("../herald/profiles/client.js");
-    try {
-      // Resolve the owning profile so the event is stamped with it — otherwise
-      // Herald stamps its store default and the legate's per-profile
-      // takeRecoveryRequests(meta.profile) never sees it (the slice stays stuck).
-      let profile = opts.profile?.trim();
-      if (!profile) {
-        const active = await new ProfileClient().list();
-        if (active.length === 1) {
-          profile = active[0].profile;
-        } else if (active.length === 0) {
-          process.stderr.write(
-            "No profiles are registered with Herald — nothing to recover. " +
-              "Register one with `march legate init` / `march profile register`.\n",
-          );
-          process.exitCode = ERROR;
-          return;
-        } else {
-          process.stderr.write(
-            `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
-              "pass --profile <profile> to disambiguate which one owns the slice.\n",
-          );
-          process.exitCode = ERROR;
-          return;
-        }
-      }
-      const event = await new HeraldClient().append({
-        type: "slice.recovery.requested",
-        sliceId: id,
-        profile,
-      });
-      console.log(
-        `Requested recovery of ${id} (profile=${profile}) (seq=${event.seq}). ` +
-          `The legate will walk the graduated recovery ladder on its next tick — ` +
-          `least-destructive first (restart/relaunch in place), dropping + re-dispatching only as a last resort.`,
-      );
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
-      process.stderr.write(message + "\n");
-      process.exitCode = ERROR;
-    }
-  });
-
 /**
  * Resolve the profile that owns a slice for a legate operator verb: the explicit
  * `--profile`, else the sole registered profile. Writes the error and sets the
@@ -1288,99 +1226,326 @@ async function resolveSliceProfile(explicit: string | undefined, verb: string): 
   return undefined;
 }
 
-/** Base URL of the running legate service (MARCH_LEGATE_URL, else loopback port). */
-function legateServiceBase(): string {
-  return (
-    process.env.MARCH_LEGATE_URL?.trim() ||
-    `http://127.0.0.1:${process.env.MARCH_LEGATE_PORT?.trim() || process.env.MARCH_LEGATE_LOOP_PORT?.trim() || DEFAULT_LOOP_PORT}`
-  ).replace(/\/+$/, "");
+/** Options every `march legate <lever>` verb takes (#593). */
+interface LeverOpts {
+  profile?: string;
+  operator?: string;
+  reason?: string;
 }
 
-legate
-  .command("respond <sliceId>")
-  .description(
-    "Respond to a steward escalated as `steward_awaiting_input`: deliver an answer into its live session (--message), or just mark it read (--ack) to clear the false-positive escalation and hand the slice back to babysit handling (the /smithy.fix + merge path). Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
-  )
-  .option(
-    "--profile <profile>",
-    "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
-  )
-  .option("--message <text>", "Answer to deliver into the live steward session (answer mode).")
-  .option("--ack", "Mark read without an answer: clear the escalation back to babysit handling.")
-  .action(async (sliceId: string, opts: { profile?: string; message?: string; ack?: boolean }) => {
-    commandHandled = true;
-    const id = (sliceId ?? "").trim();
-    const message = opts.message?.trim();
-    if (id.length === 0) {
-      process.stderr.write("Provide a non-empty <sliceId> to respond to.\n");
+/** Add the shared `--profile` / `--operator` / `--reason` options to a lever verb. */
+function leverOptions(cmd: Command, reasonHelp = "Why — recorded with the request in the event log."): Command {
+  return cmd
+    .option(
+      "--profile <profile>",
+      "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
+    )
+    .option("--operator <name>", "Who is asking, for the event log (default: $MARCH_OPERATOR, else your OS username).")
+    .option("--reason <text>", reasonHelp);
+}
+
+/** The `{operator, reason}` attribution body fields for a lever request. */
+function leverAttribution(opts: LeverOpts): { operator?: string; reason?: string } {
+  const operator = resolveOperator(opts.operator);
+  const reason = opts.reason?.trim();
+  return { ...(operator ? { operator } : {}), ...(reason ? { reason } : {}) };
+}
+
+/**
+ * POST one operator lever to the running legate (#593). Prints the refusal (or
+ * the unreachable hint) and sets the exit code on failure, returning undefined;
+ * returns the parsed body on success.
+ */
+async function postLever<T>(route: string, body: Record<string, unknown>, verb: string): Promise<(T & { ok?: boolean; error?: string }) | undefined> {
+  try {
+    const res = await legatePost<T>(route, body);
+    if (!res.ok) {
+      process.stderr.write((res.body.error ?? `legate ${verb} failed (HTTP ${res.status}).`) + "\n");
+      process.exitCode = ERROR;
+      return undefined;
+    }
+    return res.body;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+    return undefined;
+  }
+}
+
+/** Validate a lever's `<sliceId>` argument; writes the error when it is blank. */
+function requireSliceId(sliceId: string, verb: string): string | undefined {
+  const id = (sliceId ?? "").trim();
+  if (id.length > 0) return id;
+  process.stderr.write(`Provide a non-empty <sliceId> to ${verb}.\n`);
+  process.exitCode = ERROR;
+  return undefined;
+}
+
+leverOptions(
+  legate
+    .command("recover <sliceId>")
+    .description(
+      "Recover an escalated slice: ask the running legate to walk the graduated recovery ladder — least-destructive first (restart/relaunch in place), dropping + re-dispatching only as a last resort. Calls the legate's HTTP API (MARCH_LEGATE_URL).",
+    ),
+).action(async (sliceId: string, opts: LeverOpts) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "recover");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "recover");
+    if (!profileName) return;
+    const result = await postLever(`/slices/${encodeURIComponent(id)}/recover`, { profile: profileName, ...leverAttribution(opts) }, "recover");
+    if (!result) return;
+    console.log(
+      `Requested recovery of ${id} (profile=${profileName}). ` +
+        "The legate will walk the graduated recovery ladder on its next tick — " +
+        "least-destructive first (restart/relaunch in place), dropping + re-dispatching only as a last resort.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+leverOptions(
+  legate
+    .command("respond <sliceId>")
+    .description(
+      "Respond to a steward escalated as `steward_awaiting_input`: deliver an answer into its live session (--message), or just mark it read (--ack) to clear the false-positive escalation and hand the slice back to babysit handling (the /smithy.fix + merge path). Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    )
+    .option("--message <text>", "Answer to deliver into the live steward session (answer mode).")
+    .option("--ack", "Mark read without an answer: clear the escalation back to babysit handling."),
+).action(async (sliceId: string, opts: LeverOpts & { message?: string; ack?: boolean }) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "respond to");
+  if (!id) return;
+  const message = opts.message?.trim();
+  if (message && opts.ack) {
+    process.stderr.write("Provide exactly one of --message or --ack, not both.\n");
+    process.exitCode = ERROR;
+    return;
+  }
+  if (!message && !opts.ack) {
+    process.stderr.write("Provide --message <text> to answer the steward, or --ack to mark it read.\n");
+    process.exitCode = ERROR;
+    return;
+  }
+  try {
+    // Resolve the owning profile (sliceIds are unique only within a profile).
+    const profileName = await resolveSliceProfile(opts.profile, "respond to");
+    if (!profileName) return;
+    const body = { profile: profileName, ...(message ? { message } : { ack: true }), ...leverAttribution(opts) };
+    const result = await postLever<{ mode?: string; delivered?: boolean; cleared?: boolean; recoveryRequested?: boolean }>(
+      `/escalations/${encodeURIComponent(id)}/respond`,
+      body,
+      "respond",
+    );
+    if (!result) return;
+    const what = result.mode === "answer" ? `answer delivered=${result.delivered}` : "marked read";
+    console.log(
+      `Responded to ${id} (profile=${profileName}): ${what}, report cleared=${result.cleared}, ` +
+        `recovery requested=${result.recoveryRequested}. The legate walks the graduated recovery ladder ` +
+        "on its next tick — un-escalating the slice back to babysit's PR (fix + merge) handling.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+leverOptions(
+  legate
+    .command("requeue <sliceId>")
+    .description(
+      "Discard a slice's current attempt and put its work back in the queue: tear down the steward session, worktree and branch, then let the legate re-dispatch the smithy item fresh. Works for any in-flight slice — including a steward that asked a question and then died, or one that went off the rails. Refuses a slice with an open PR unless --close-pr. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    )
+    .option("--close-pr", "Also close the slice's open PR (required when it has one).")
+    .option(
+      "--release-merged",
+      "Release an archived slice whose PR MERGED, so its plan row dispatches again. Use only when the merged PR did not do this row's work (an id collision).",
+    ),
+  "Why — recorded with the request and used as the PR-close comment.",
+).action(async (sliceId: string, opts: LeverOpts & { closePr?: boolean; releaseMerged?: boolean }) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "requeue");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "requeue");
+    if (!profileName) return;
+    const body = {
+      profile: profileName,
+      closePr: opts.closePr === true,
+      ...(opts.releaseMerged === true ? { releaseMerged: true } : {}),
+      ...leverAttribution(opts),
+    };
+    const result = await postLever<{ closesPr?: number | null; releasesArchive?: string }>(`/slices/${encodeURIComponent(id)}/requeue`, body, "requeue");
+    if (!result) return;
+    console.log(
+      result.releasesArchive
+        ? `Release requested for archived ${result.releasesArchive} slice ${id} (profile=${profileName}). ` +
+            "On its next tick the legate drops the archive's hold, and the plan row dispatches fresh."
+        : `Requeue requested for ${id} (profile=${profileName})${result.closesPr ? `, closing PR #${result.closesPr}` : ""}. ` +
+            "On its next tick the legate tears down the steward, worktree and branch, then re-dispatches the work fresh.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+leverOptions(
+  legate
+    .command("merge <sliceId>")
+    .description(
+      "Merge a slice's open PR now (squash), bypassing the review/CI merge gates — the legate re-reads the PR and pins the merge to its current head SHA, refusing a closed or conflicting PR. Use instead of running `gh pr merge` by hand, so the merge is in the event log. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    ),
+).action(async (sliceId: string, opts: LeverOpts) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "merge");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "merge");
+    if (!profileName) return;
+    const result = await postLever<{ prNumber?: number }>(`/slices/${encodeURIComponent(id)}/merge`, { profile: profileName, ...leverAttribution(opts) }, "merge");
+    if (!result) return;
+    console.log(
+      `Merge requested for ${id} (profile=${profileName}, PR #${result.prNumber ?? "?"}). ` +
+        "The legate merges it on the tick it just started; a refusal (closed, conflicting, head moved) is recorded as slice.operator.refused.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+leverOptions(
+  legate
+    .command("relaunch <sliceId>")
+    .description(
+      "Replace a slice's steward: remove its session if it is still alive (the worktree is kept) and attach a fresh steward to the existing PR and branch, skipping the self-heal backoff. For a steward that is alive but wedged; use `requeue` to start a slice over. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    ),
+).action(async (sliceId: string, opts: LeverOpts) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "relaunch");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "relaunch");
+    if (!profileName) return;
+    const result = await postLever<{ prNumber?: number }>(`/slices/${encodeURIComponent(id)}/relaunch`, { profile: profileName, ...leverAttribution(opts) }, "relaunch");
+    if (!result) return;
+    console.log(
+      `Relaunch requested for ${id} (profile=${profileName}, PR #${result.prNumber ?? "?"}). ` +
+        "The legate replaces the steward on the tick it just started; a failure is recorded as slice.operator.refused.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+leverOptions(
+  legate
+    .command("resend-threads <sliceId>")
+    .description(
+      "Ask a slice's steward to address review threads again: delivers /smithy.fix for the given unresolved threads (all of them without --thread) straight into the live steward session, even ones the loop already counts as sent. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    )
+    .option("--thread <id...>", "Review thread id(s) to re-send (default: every unresolved thread)."),
+).action(async (sliceId: string, opts: LeverOpts & { thread?: string[] }) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "resend threads for");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "resend threads for");
+    if (!profileName) return;
+    const threadIds = (opts.thread ?? []).map((t) => t.trim());
+    // A blank --thread must not fall through to "every unresolved thread".
+    if (threadIds.some((t) => t.length === 0)) {
+      process.stderr.write("--thread values must be non-empty (omit --thread to re-send every unresolved thread).\n");
       process.exitCode = ERROR;
       return;
     }
-    if (message && opts.ack) {
-      process.stderr.write("Provide exactly one of --message or --ack, not both.\n");
-      process.exitCode = ERROR;
-      return;
-    }
-    if (!message && !opts.ack) {
-      process.stderr.write("Provide --message <text> to answer the steward, or --ack to mark it read.\n");
-      process.exitCode = ERROR;
-      return;
-    }
-    const { HeraldClientError } = await import("../herald/service/client.js");
-    try {
-      // Resolve the owning profile (sliceIds are unique only within a profile),
-      // mirroring `legate recover`.
-      const profileName = await resolveSliceProfile(opts.profile, "respond to");
-      if (!profileName) return;
-      // The respond endpoint lives on the running legate service, not Herald.
-      const base = legateServiceBase();
-      const url = `${base}/escalations/${encodeURIComponent(id)}/respond`;
-      const body = message ? { profile: profileName, message } : { profile: profileName, ack: true };
-      let res: Response;
-      try {
-        res = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-          // Bound the request so a wedged listener that accepts TCP but never
-          // responds fails as a clean exit instead of hanging forever (the abort
-          // surfaces below as the reachability error).
-          signal: AbortSignal.timeout(15_000),
-        });
-      } catch (err) {
-        process.stderr.write(
-          `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
-            "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-      const result = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        mode?: string;
-        delivered?: boolean;
-        cleared?: boolean;
-        recoveryRequested?: boolean;
-        error?: string;
-      };
-      if (!res.ok || !result.ok) {
-        process.stderr.write((result.error ?? `legate respond failed (HTTP ${res.status}).`) + "\n");
-        process.exitCode = ERROR;
-        return;
-      }
-      const what = result.mode === "answer" ? `answer delivered=${result.delivered}` : "marked read";
-      console.log(
-        `Responded to ${id} (profile=${profileName}): ${what}, report cleared=${result.cleared}, ` +
-          `recovery requested=${result.recoveryRequested}. The legate walks the graduated recovery ladder ` +
-          "on its next tick — un-escalating the slice back to babysit's PR (fix + merge) handling.",
-      );
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      const m = err instanceof HeraldClientError ? err.message : (err as Error).message;
-      process.stderr.write(m + "\n");
-      process.exitCode = ERROR;
-    }
-  });
+    const result = await postLever<{ threadIds?: string[] }>(
+      `/slices/${encodeURIComponent(id)}/review-threads/resend`,
+      { profile: profileName, ...(threadIds.length > 0 ? { threadIds } : {}), ...leverAttribution(opts) },
+      "resend-threads",
+    );
+    if (!result) return;
+    console.log(`Sent /smithy.fix for ${result.threadIds?.length ?? 0} review thread(s) to the steward of ${id} (profile=${profileName}): ${(result.threadIds ?? []).join(", ")}.`);
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
+/** Add the `--profile` / `--operator` / `--reason` options to a profile-level lever. */
+function profileLeverOptions(cmd: Command): Command {
+  return cmd
+    .option("--profile <profile>", "Only this profile (default: every registered profile).")
+    .option("--operator <name>", "Who is asking, for the event log (default: $MARCH_OPERATOR, else your OS username).")
+    .option("--reason <text>", "Why — recorded with the request in the event log.");
+}
+
+/** Run one profile-level lever (#593) against the legate and print its outcome. */
+async function runProfileLever(
+  route: string,
+  verb: string,
+  opts: LeverOpts,
+  done: (targets: string, result: { started?: boolean; note?: string }) => string,
+): Promise<void> {
+  const profileName = opts.profile?.trim();
+  // An explicitly blank --profile (e.g. an unset "$PROFILE") must not widen the
+  // lever to every profile; only an omitted --profile means all of them.
+  if (opts.profile !== undefined && !profileName) {
+    process.stderr.write("--profile must be non-empty (omit it to target every registered profile).\n");
+    process.exitCode = ERROR;
+    return;
+  }
+  const result = await postLever<{ targets?: string[]; started?: boolean; note?: string }>(
+    route,
+    { ...(profileName ? { profile: profileName } : {}), ...leverAttribution(opts) },
+    verb,
+  );
+  if (!result) return;
+  console.log(done((result.targets ?? []).join(", ") || "(none)", result));
+  process.exitCode = SUCCESS;
+}
+
+profileLeverOptions(
+  legate
+    .command("tick")
+    .description("Run a legate tick now instead of waiting for the interval. Refused while a tick is already in flight. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/tick", "tick", opts, (targets, result) =>
+    result.started === false
+      ? `Tick request recorded for: ${targets}, but no tick started: ${result.note ?? "a tick was already in progress."}`
+      : `Tick started (recorded for: ${targets}).`,
+  );
+});
+
+profileLeverOptions(
+  legate
+    .command("pause")
+    .description("Pause fresh dispatch: the legate launches no new work (in-flight spawns drain; relaunch, babysit, merge and recovery keep running) until `march legate resume`. Durable across restarts. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/dispatch/pause", "pause", opts, (targets) => `Dispatch paused for: ${targets}. Resume with \`march legate resume\`.`);
+});
+
+profileLeverOptions(
+  legate
+    .command("resume")
+    .description("Resume fresh dispatch after `march legate pause`. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/dispatch/resume", "resume", opts, (targets) => `Dispatch resumed for: ${targets}.`);
+});
 
 legate
   .command("queue")
@@ -1421,91 +1586,6 @@ legate
       console.log(formatQueue(body));
     }
     process.exitCode = SUCCESS;
-  });
-
-legate
-  .command("requeue <sliceId>")
-  .description(
-    "Discard a slice's current attempt and put its work back in the queue: tear down the steward session, worktree and branch, then let the legate re-dispatch the smithy item fresh. Works for any in-flight slice — including a steward that asked a question and then died, or one that went off the rails. Refuses a slice with an open PR unless --close-pr. Also releases an ARCHIVED slice that holds a plan row back (the `held by` slice in `march legate queue`): a closed-unmerged archive directly, a merged one only with --release-merged. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
-  )
-  .option(
-    "--profile <profile>",
-    "Profile the slice belongs to. When omitted, the sole registered profile is used; required if more than one is registered.",
-  )
-  .option("--close-pr", "Also close the slice's open PR (required when it has one).")
-  .option(
-    "--release-merged",
-    "Release an archived slice whose PR MERGED, so its plan row dispatches again. Use only when the merged PR did not do this row's work (an id collision).",
-  )
-  .option("--reason <text>", "Why — recorded with the request and used as the PR-close comment.")
-  .action(async (sliceId: string, opts: { profile?: string; closePr?: boolean; releaseMerged?: boolean; reason?: string }) => {
-    commandHandled = true;
-    const id = (sliceId ?? "").trim();
-    if (id.length === 0) {
-      process.stderr.write("Provide a non-empty <sliceId> to requeue.\n");
-      process.exitCode = ERROR;
-      return;
-    }
-    const { HeraldClientError } = await import("../herald/service/client.js");
-    try {
-      const profileName = await resolveSliceProfile(opts.profile, "requeue");
-      if (!profileName) return;
-      const base = legateServiceBase();
-      const url = `${base}/slices/${encodeURIComponent(id)}/requeue`;
-      let operator = "";
-      try {
-        operator = os.userInfo().username;
-      } catch {
-        // no passwd entry (some containers) — attribution is best-effort
-      }
-      const reason = opts.reason?.trim();
-      const body = {
-        profile: profileName,
-        closePr: opts.closePr === true,
-        ...(opts.releaseMerged === true ? { releaseMerged: true } : {}),
-        ...(operator ? { operator } : {}),
-        ...(reason ? { reason } : {}),
-      };
-      let res: Response;
-      try {
-        res = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(15_000),
-        });
-      } catch (err) {
-        process.stderr.write(
-          `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
-            "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-      const result = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        closesPr?: number | null;
-        releasesArchive?: string;
-        error?: string;
-      };
-      if (!res.ok || !result.ok) {
-        process.stderr.write((result.error ?? `legate requeue failed (HTTP ${res.status}).`) + "\n");
-        process.exitCode = ERROR;
-        return;
-      }
-      console.log(
-        result.releasesArchive
-          ? `Release requested for archived ${result.releasesArchive} slice ${id} (profile=${profileName}). ` +
-              "On its next tick the legate drops the archive's hold, and the plan row dispatches fresh."
-          : `Requeue requested for ${id} (profile=${profileName})${result.closesPr ? `, closing PR #${result.closesPr}` : ""}. ` +
-              "On its next tick the legate tears down the steward, worktree and branch, then re-dispatches the work fresh.",
-      );
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      const m = err instanceof HeraldClientError ? err.message : (err as Error).message;
-      process.stderr.write(m + "\n");
-      process.exitCode = ERROR;
-    }
   });
 
 // Profile registry — Herald is the source of truth for which profiles the single
@@ -1703,7 +1783,11 @@ mergePolicyCmd
   .option("--no-coderabbit-initial-review", "Stop requesting first CodeRabbit reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
   .option("--clear", "Clear the profile policy and restore built-in defaults")
+  .option("--operator <name>", "Who is making the change, for the event log (default: $MARCH_OPERATOR, else your OS username)")
+  .option("--reason <text>", "Why — recorded with the profile.merge_policy.changed event")
   .action(async (profileName: string, opts: VerbPolicyEdits & {
+    operator?: string;
+    reason?: string;
     taskType?: string;
     approval: boolean;
     changesRequested: boolean;
@@ -1809,6 +1893,9 @@ mergePolicyCmd
         marchCliPath: existing.marchCliPath,
         mode: existing.mode,
         mergePolicy: policy,
+      }, {
+        operator: resolveOperator(opts.operator),
+        ...(opts.reason?.trim() ? { note: opts.reason.trim() } : {}),
       });
       console.log(`Updated merge policy for "${record.profile}":`);
       console.log(JSON.stringify(record.mergePolicy ?? {}, null, 2));

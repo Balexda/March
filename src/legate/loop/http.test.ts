@@ -8,9 +8,15 @@ import {
   buildStatus,
   escalationsForWorkingState,
   resolveRequeueTarget,
+  resolveResendTarget,
+  resendStillCurrent,
   resolveRespondTarget,
   type LoopHttpContext,
+  type ProfileLeverInput,
+  type RecoverInput,
   type RequeueInput,
+  type ResendThreadsInput,
+  type SliceLeverInput,
   type RespondInput,
 } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
@@ -519,5 +525,352 @@ describe("POST /slices/:sliceId/requeue (#588)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("operator token gate (#593)", () => {
+  function gated(env: NodeJS.ProcessEnv, calls: RecoverInput[] = []): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      env,
+      requestRecovery: async (input) => {
+        calls.push(input);
+        return { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true };
+      },
+    };
+  }
+  const recover = { method: "POST" as const, url: "/slices/s1/recover", payload: { profile: "march" } };
+
+  it("401s a lever with a missing or wrong bearer when the token is set, without calling the runtime", async () => {
+    const calls: RecoverInput[] = [];
+    const app = buildLoopServer(gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }, calls));
+    try {
+      expect((await app.inject(recover)).statusCode).toBe(401);
+      expect((await app.inject({ ...recover, headers: { authorization: "Bearer nope" } })).statusCode).toBe(401);
+      expect((await app.inject({ ...recover, headers: { authorization: "s3cret" } })).statusCode).toBe(401);
+      expect(calls).toHaveLength(0);
+      const ok = await app.inject({ ...recover, headers: { authorization: "Bearer s3cret" } });
+      expect(ok.statusCode).toBe(202);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("leaves the read-only GET routes open even with the token set", async () => {
+    const app = buildLoopServer(gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }));
+    try {
+      expect((await app.inject({ method: "GET", url: "/healthz" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/status" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/escalations" })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps levers open when the token is unset (pre-#593 posture)", async () => {
+    const app = buildLoopServer(gated({}));
+    try {
+      expect((await app.inject(recover)).statusCode).toBe(202);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("gates the existing respond + requeue levers too", async () => {
+    const app = buildLoopServer({
+      ...gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }),
+      respondToEscalation: async () => ({ ok: true }),
+      requeueSlice: async () => ({ ok: true }),
+    });
+    try {
+      expect((await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", ack: true } })).statusCode).toBe(401);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } })).statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("POST /slices/:sliceId/recover (#593)", () => {
+  function ctxWithRecover(spy: (input: RecoverInput) => void, result: any): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestRecovery: async (input) => {
+        spy(input);
+        return result;
+      },
+    };
+  }
+
+  it("forwards profile + attribution and returns 202", async () => {
+    let seen: RecoverInput | null = null;
+    const app = buildLoopServer(ctxWithRecover((i) => (seen = i), { ok: true, requested: true }));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/slices/s1/recover",
+        payload: { profile: "march", operator: " ana ", reason: " wedged " },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(seen).toEqual({ profile: "march", sliceId: "s1", operator: "ana", reason: "wedged" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s a missing profile or a non-string operator; 404s an unknown slice; 501 without a runtime", async () => {
+    let called = false;
+    const app = buildLoopServer(ctxWithRecover(() => (called = true), { ok: false, status: 404, error: "unknown slice" }));
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: {} })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march", operator: 7 } })).statusCode).toBe(400);
+      expect(called).toBe(false);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march" } })).statusCode).toBe(404);
+      expect((await bare.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march" } })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+
+  it("respond forwards the operator attribution (#593)", async () => {
+    let seen: RespondInput | null = null;
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      respondToEscalation: async (input) => {
+        seen = input;
+        return { ok: true };
+      },
+    });
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", ack: true, operator: "ana" } });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({ profile: "march", sliceId: "s1", ack: true, operator: "ana" });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("profile levers: tick / pause / resume (#593)", () => {
+  function ctxWithLevers(calls: Array<ProfileLeverInput & { paused?: boolean; lever: string }>): LoopHttpContext {
+    return {
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestTick: async (input) => {
+        calls.push({ ...input, lever: "tick" });
+        return input.profile === "busy" ? { ok: false, status: 409, error: "a tick is already in progress." } : { ok: true, started: true, targets: ["march"] };
+      },
+      setDispatchPaused: async (input) => {
+        calls.push({ ...input, lever: "pause" });
+        return { ok: true, requested: true, targets: [input.profile ?? "march"] };
+      },
+    };
+  }
+
+  it("routes tick/pause/resume with an optional profile + attribution, 202 on success", async () => {
+    const calls: Array<ProfileLeverInput & { paused?: boolean; lever: string }> = [];
+    const app = buildLoopServer(ctxWithLevers(calls));
+    try {
+      expect((await app.inject({ method: "POST", url: "/tick", payload: {} })).statusCode).toBe(202);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=march", payload: { operator: "ana", reason: "deploy" } })).statusCode).toBe(202);
+      expect((await app.inject({ method: "POST", url: "/dispatch/resume", payload: {} })).statusCode).toBe(202);
+      expect(calls).toEqual([
+        { lever: "tick" },
+        { lever: "pause", profile: "march", operator: "ana", reason: "deploy", paused: true },
+        { lever: "pause", paused: false },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("409s an overlapping tick, 400s a bad operator, 501s without a runtime", async () => {
+    const app = buildLoopServer(ctxWithLevers([]));
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/tick", payload: { profile: "busy" } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: 1 } })).statusCode).toBe(400);
+      // A malformed profile is a 400, never a silent widen to every profile.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/resume", payload: { profile: "" } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=", payload: {} })).statusCode).toBe(400);
+      // Every supplied profile is validated: a bad body value can't fall back to ?profile=.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=march", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=", payload: { profile: "march" } })).statusCode).toBe(400);
+      // Over Herald's attribution limits: refused before the lever runs.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: "x".repeat(129) } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { reason: "x".repeat(1001) } })).statusCode).toBe(400);
+      expect((await bare.inject({ method: "POST", url: "/tick", payload: {} })).statusCode).toBe(501);
+      expect((await bare.inject({ method: "POST", url: "/dispatch/resume", payload: {} })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+
+  it("/status reports a paused profile from its heartbeat", () => {
+    const paused = snapshot({
+      byProfile: { march: { lastHeartbeat: { ...heartbeat, dispatch_paused: true, dispatch_paused_since: "T", dispatch_paused_reason: "deploy" }, workingState: { slices: {} } } },
+    });
+    expect(buildStatus(ctxWith(paused), "march")).toMatchObject({ dispatch_paused: true, dispatch_paused_since: "T", dispatch_paused_reason: "deploy" });
+    expect(buildStatus(ctxWith(snapshot()), "smithy")).toMatchObject({ dispatch_paused: false });
+  });
+});
+
+describe("POST /slices/:sliceId/merge (#593)", () => {
+  it("forwards profile + attribution and maps the result (202 / 409)", async () => {
+    const seen: SliceLeverInput[] = [];
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestMerge: async (input) => {
+        seen.push(input);
+        return input.sliceId === "merged"
+          ? { ok: false, status: 409, error: "already merged" }
+          : { ok: true, requested: true, prNumber: 42 };
+      },
+    });
+    try {
+      const ok = await app.inject({ method: "POST", url: "/slices/s1/merge", payload: { profile: "march", operator: "ana", reason: "approved offline" } });
+      expect(ok.statusCode).toBe(202);
+      expect(ok.json()).toMatchObject({ prNumber: 42 });
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1", operator: "ana", reason: "approved offline" });
+      expect((await app.inject({ method: "POST", url: "/slices/merged/merge", payload: { profile: "march" } })).statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("POST /slices/:sliceId/relaunch (#593)", () => {
+  it("forwards profile + attribution; 202 / 409 / 501", async () => {
+    const seen: SliceLeverInput[] = [];
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestRelaunch: async (input) => {
+        seen.push(input);
+        return input.sliceId === "nopr" ? { ok: false, status: 409, error: "no PR" } : { ok: true, requested: true };
+      },
+    });
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/slices/s1/relaunch?profile=march", payload: { operator: "ana" } })).statusCode).toBe(202);
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1", operator: "ana" });
+      expect((await app.inject({ method: "POST", url: "/slices/nopr/relaunch", payload: { profile: "march" } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/relaunch?profile=march", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect(seen).toHaveLength(2);
+      expect((await bare.inject({ method: "POST", url: "/slices/s1/relaunch", payload: { profile: "march" } })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+});
+
+describe("POST /slices/:sliceId/review-threads/resend (#593)", () => {
+  function ctxWithResend(seen: ResendThreadsInput[]): LoopHttpContext {
+    return {
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      resendReviewThreads: async (input) => {
+        seen.push(input);
+        return input.threadIds?.includes("gone")
+          ? { ok: false, status: 400, error: "unknown or resolved review thread(s)" }
+          : { ok: true, delivered: true, threadIds: input.threadIds ?? ["t1", "t2"] };
+      },
+    };
+  }
+
+  it("200s on delivery, normalizing thread ids (numbers, dupes); omitted = all", async () => {
+    const seen: ResendThreadsInput[] = [];
+    const app = buildLoopServer(ctxWithResend(seen));
+    try {
+      const all = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march" } });
+      expect(all.statusCode).toBe(200);
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1" });
+      const some = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds: [12, "12", " t3 "], operator: "ana" } });
+      expect(some.statusCode).toBe(200);
+      expect(seen[1]).toEqual({ profile: "march", sliceId: "s1", threadIds: ["12", "t3"], operator: "ana" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s a malformed threadIds without calling the runtime, and maps an unknown thread to 400", async () => {
+    const seen: ResendThreadsInput[] = [];
+    const app = buildLoopServer(ctxWithResend(seen));
+    try {
+      for (const threadIds of [[], "t1", [""], [{}]]) {
+        const res = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds } });
+        expect(res.statusCode).toBe(400);
+      }
+      expect(seen).toHaveLength(0);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds: ["gone"] } })).statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("resendStillCurrent (#593)", () => {
+  it("records only when neither a requeue nor a relaunch happened during the send", () => {
+    const slice = { worker_session_id: "old" };
+    // Unchanged: same warm entry, same steward.
+    expect(resendStillCurrent(slice, slice, "old", 0)).toBe(true);
+    // Requeue: the warm entry was replaced (or dropped) under the same id.
+    expect(resendStillCurrent({ worker_session_id: "old" }, slice, "old", 0)).toBe(false);
+    expect(resendStillCurrent(undefined, slice, "old", 0)).toBe(false);
+    // Relaunch: the same entry, but relaunch.apply swapped the steward in place
+    // after the old session received the message.
+    const relaunched = { worker_session_id: "old" };
+    relaunched.worker_session_id = "fresh";
+    expect(resendStillCurrent(relaunched, relaunched, "old", 0)).toBe(false);
+    // Relaunch still running (session removed, launch awaited, not yet rebound).
+    const relaunching = { worker_session_id: "old", relaunch_in_progress: true };
+    expect(resendStillCurrent(relaunching, relaunching, "old", 0)).toBe(false);
+    // A relaunch attempt started and ended during the send (even a failed one).
+    const bumped = { worker_session_id: "old", relaunch_generation: 1 };
+    expect(resendStillCurrent(bumped, bumped, "old", 0)).toBe(false);
+  });
+});
+
+describe("resolveResendTarget (#593)", () => {
+  const thread = (id: string, over: Record<string, unknown> = {}) => ({ id, comment_ids: [`${id}-c1`, `${id}-c2`], ...over });
+  const observed = { number: 9, unresolved_threads: [thread("t1"), thread("t2", { last_comment_is_march: true, needs_response: false })] };
+  const slice = { stage: "pr-in-fix", worker_session_id: "w1", pr: { number: 9 } };
+
+  it("takes every unresolved thread when none are named — including ones babysit would skip", () => {
+    const r = resolveResendTarget(slice, observed);
+    expect(r).toMatchObject({ ok: true, prNumber: 9, sessionId: "w1", threadIds: ["t1", "t2"], commentIds: ["t1-c1", "t1-c2", "t2-c1", "t2-c2"] });
+  });
+
+  it("picks the named threads, in order, and 400s an unknown/resolved one", () => {
+    expect(resolveResendTarget(slice, observed, ["t2"])).toMatchObject({ ok: true, threadIds: ["t2"], commentIds: ["t2-c1", "t2-c2"] });
+    expect(resolveResendTarget(slice, observed, ["t1", "zz"])).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("zz") });
+  });
+
+  it("falls back to the warm record when the fold has no PR observation", () => {
+    const warm = { ...slice, unresolved_threads: [thread("t9")] };
+    expect(resolveResendTarget(warm, undefined)).toMatchObject({ ok: true, prNumber: 9, threadIds: ["t9"] });
+  });
+
+  it("409s a merged slice, no PR, no unresolved threads, or no steward session", () => {
+    expect(resolveResendTarget({ ...slice, stage: "merged" }, observed)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget({ stage: "pr-open", worker_session_id: "w1" }, undefined)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget(slice, { number: 9, unresolved_threads: [] })).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget({ ...slice, worker_session_id: null }, observed)).toMatchObject({ ok: false, status: 409, error: expect.stringContaining("relaunch") });
   });
 });

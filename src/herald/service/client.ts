@@ -77,6 +77,10 @@ export interface HeraldClientOptions {
   /** Bearer token for the break-glass `POST /admin/events` endpoint (#265).
    *  Defaults to `MARCH_HERALD_ADMIN_TOKEN`; only the admin path reads it. */
   readonly adminToken?: string;
+  /** Operator bearer sent on {@link HeraldClient.append} (#593), which Herald
+   *  requires for operator-request event types when it has the token set.
+   *  Defaults to `MARCH_LEGATE_OPERATOR_TOKEN`. */
+  readonly operatorToken?: string;
 }
 
 /**
@@ -91,6 +95,7 @@ export class HeraldClient {
   private readonly traceparent?: string;
   private readonly timeoutMs: number;
   private readonly adminToken?: string;
+  private readonly operatorToken?: string;
 
   constructor(options: HeraldClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? resolveHeraldUrl(options.env);
@@ -99,6 +104,8 @@ export class HeraldClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.adminToken =
       options.adminToken ?? ((options.env ?? process.env).MARCH_HERALD_ADMIN_TOKEN?.trim() || undefined);
+    this.operatorToken =
+      options.operatorToken ?? ((options.env ?? process.env).MARCH_LEGATE_OPERATOR_TOKEN?.trim() || undefined);
   }
 
   private headers(json: boolean, extra?: Record<string, string>): Record<string, string> {
@@ -148,7 +155,12 @@ export class HeraldClient {
 
   /** Append a transition event (the legate's write path; Herald assigns seq). */
   async append(input: { type: string; [k: string]: unknown }): Promise<HeraldEvent> {
-    const { status, body } = await this.request("POST", "/events", { source: "legate", ...input });
+    const { status, body } = await this.request(
+      "POST",
+      "/events",
+      { source: "legate", ...input },
+      this.operatorToken ? { authorization: `Bearer ${this.operatorToken}` } : undefined,
+    );
     if (status !== 201) {
       throw new HeraldClientError(bodyError(body, `herald POST /events failed (${status})`));
     }

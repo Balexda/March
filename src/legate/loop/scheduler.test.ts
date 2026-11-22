@@ -32,10 +32,12 @@ describe("createScheduler", () => {
     const tick = vi.fn(() => d.promise);
     const s = createScheduler({ tick, onTickError: vi.fn(), intervalSeconds: 60 });
     const first = s.runOnce();   // starts, blocks on the deferred
-    await s.runOnce();           // guard active → returns immediately, no second tick
+    expect(s.ticking).toBe(true);
+    await expect(s.runOnce()).resolves.toBe(false); // guard active → skipped, no second tick
     expect(tick).toHaveBeenCalledTimes(1);
     d.resolve();
-    await first;
+    await expect(first).resolves.toBe(true);
+    expect(s.ticking).toBe(false);
     // Guard released: a later tick runs.
     await s.runOnce();
     expect(tick).toHaveBeenCalledTimes(2);
@@ -46,7 +48,7 @@ describe("createScheduler", () => {
     const tick = vi.fn().mockRejectedValueOnce(new Error("tick boom")).mockResolvedValue(undefined);
     const s = createScheduler({ tick, onTickError, intervalSeconds: 60 });
     // safeTick must resolve (not reject) even though onTickError threw...
-    await expect(s.runOnce()).resolves.toBeUndefined();
+    await expect(s.runOnce()).resolves.toBe(true);
     expect(onTickError).toHaveBeenCalledTimes(1);
     // ...and the guard must have been released, so a later tick still runs.
     await s.runOnce();

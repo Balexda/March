@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
+import { bearerMatches } from "../../shared/bearer.js";
 import {
   outcomeFromStatus,
   recordHeraldRequest,
@@ -15,8 +16,8 @@ import { selfBotLogin } from "../profiles/merge-policy.js";
 import { reviewWaitMs } from "../profiles/review-config.js";
 import type { ProfileStore } from "../profiles/store.js";
 import { projectReviewStates } from "./state-projection.js";
-import type { EventStore } from "./store.js";
-import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
+import type { AppendAttribution, EventStore } from "./store.js";
+import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType, type OperatorSliceAction } from "../events.js";
 
 /** Snapshot of the server's last observe tick, surfaced on `/status`. */
 export interface ObserveStatus {
@@ -43,6 +44,27 @@ export interface RoutesOptions {
 
 /** Env var gating the break-glass `POST /admin/events` endpoint (#265). */
 export const HERALD_ADMIN_TOKEN_ENV = "MARCH_HERALD_ADMIN_TOKEN";
+
+/** The Legate operator token (#593). When set on Herald too, `POST /events`
+ *  requires it as a bearer for the operator-request event types below. */
+export const OPERATOR_TOKEN_ENV = "MARCH_LEGATE_OPERATOR_TOKEN";
+
+/**
+ * Event types that ask the legate to act (#593): an operator request, or the
+ * legate's own recovery-ladder transitions of the same type. Merge-now skips the
+ * review and CI gates, so these must not be writable by anyone who can reach
+ * Herald when the operator token is configured. Only the legate writes them, and
+ * its Herald client sends the token on every append.
+ */
+export const OPERATOR_REQUEST_TYPES: ReadonlySet<string> = new Set([
+  "slice.merge.requested",
+  "slice.relaunch.requested",
+  "slice.requeue.requested",
+  "slice.recovery.requested",
+  "dispatch.paused",
+  "dispatch.resumed",
+  "legate.tick.requested",
+]);
 
 /** Extract a `Bearer <token>` value from an Authorization header, or null. */
 function bearerToken(header: string | string[] | undefined): string | null {
@@ -78,6 +100,12 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.requeue.requested",
   "slice.requeue.refused",
   "retry.counted",
+  "slice.merge.requested",
+  "slice.relaunch.requested",
+  "slice.operator.refused",
+  "legate.tick.requested",
+  "dispatch.paused",
+  "dispatch.resumed",
 ]);
 
 /** Slice-keyed event types that require a non-empty `sliceId`. */
@@ -95,7 +123,13 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.escalated",
   "slice.requeue.requested",
   "slice.requeue.refused",
+  "slice.merge.requested",
+  "slice.relaunch.requested",
+  "slice.operator.refused",
 ]);
+
+/** The operator slice levers `slice.operator.refused` may name (#593). */
+const OPERATOR_SLICE_ACTIONS: readonly OperatorSliceAction[] = ["merge", "relaunch"];
 
 /** Transition event types whose schema carries an optional steward `sessionId`. */
 const SESSION_ID_TYPES: ReadonlySet<string> = new Set([
@@ -113,8 +147,34 @@ function parseNonNegInt(raw: unknown, fallback: number): number | null {
 }
 
 export type EventValidation =
-  | { readonly ok: true; readonly input: AppendEventInput }
+  | { readonly ok: true; readonly input: AppendEventInput; readonly attribution?: AppendAttribution }
   | { readonly ok: false; readonly error: string };
+
+/** Bounds on the operator attribution carried by `POST /events` (#593). */
+export const MAX_ATTRIBUTION_OPERATOR = 128;
+export const MAX_ATTRIBUTION_NOTE = 1000;
+
+/**
+ * Parse the optional `attribution: {operator?, note?}` object on a `POST /events`
+ * body (#593). Nested (not top-level) so it can never collide with an event-body
+ * field of the same name (e.g. `slice.requeue.requested.operator`). Returns the
+ * parsed attribution (undefined when absent/empty) or an error string.
+ */
+function parseAttribution(raw: unknown): { attribution?: AppendAttribution } | { error: string } {
+  if (raw === undefined) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "attribution must be an object." };
+  const { operator, note } = raw as Record<string, unknown>;
+  if (operator !== undefined && (typeof operator !== "string" || operator.length > MAX_ATTRIBUTION_OPERATOR)) {
+    return { error: `attribution.operator must be a string of at most ${MAX_ATTRIBUTION_OPERATOR} characters.` };
+  }
+  if (note !== undefined && (typeof note !== "string" || note.length > MAX_ATTRIBUTION_NOTE)) {
+    return { error: `attribution.note must be a string of at most ${MAX_ATTRIBUTION_NOTE} characters.` };
+  }
+  const op = typeof operator === "string" ? operator.trim() : "";
+  const nt = typeof note === "string" ? note.trim() : "";
+  if (!op && !nt) return {};
+  return { attribution: { ...(op ? { operator: op } : {}), ...(nt ? { note: nt } : {}) } };
+}
 
 function isUtcTimestamp(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
@@ -128,8 +188,15 @@ function isUtcTimestamp(value: unknown): value is string {
  * legate write-path, and Herald's own observation events are appended by the
  * observer directly to the store (never over HTTP), so a client must not be able
  * to spoof Herald-authored observation events.
+ *
+ * An optional `attribution: {operator?, note?}` (#593) names the operator who
+ * asked for this transition; it is stripped from the payload and returned
+ * separately so the store stamps it on the envelope (never folded).
  */
-export function validateEvent(body: Record<string, unknown>): EventValidation {
+export function validateEvent(rawBody: Record<string, unknown>): EventValidation {
+  const { attribution: rawAttribution, ...body } = rawBody;
+  const parsedAttribution = parseAttribution(rawAttribution);
+  if ("error" in parsedAttribution) return { ok: false, error: parsedAttribution.error };
   const type = body.type;
   if (typeof type !== "string" || !EVENT_TYPES.has(type as EventType)) {
     return { ok: false, error: `unknown event type "${String(type)}".` };
@@ -229,6 +296,23 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       }
     }
   }
+  if (type === "slice.merge.requested" &&
+      (typeof body.prNumber !== "number" || !Number.isSafeInteger(body.prNumber) || body.prNumber < 1)) {
+    return { ok: false, error: `event "slice.merge.requested" requires a positive integer prNumber.` };
+  }
+  if (type === "steward.relaunched" && body.requestSeq !== undefined &&
+      (typeof body.requestSeq !== "number" || !Number.isSafeInteger(body.requestSeq))) {
+    return { ok: false, error: `event "steward.relaunched" requestSeq must be an integer.` };
+  }
+  if (type === "slice.operator.refused" &&
+      (!OPERATOR_SLICE_ACTIONS.includes(body.action as OperatorSliceAction) || typeof body.reason !== "string" ||
+        (body.requestSeq !== undefined && (typeof body.requestSeq !== "number" || !Number.isSafeInteger(body.requestSeq))))) {
+    return { ok: false, error: `event "slice.operator.refused" requires action (${OPERATOR_SLICE_ACTIONS.join("|")}), a string reason and an optional integer requestSeq.` };
+  }
+  if ((type === "legate.tick.requested" || type === "dispatch.paused" || type === "dispatch.resumed") &&
+      body.reason !== undefined && typeof body.reason !== "string") {
+    return { ok: false, error: `event "${type}" reason must be a string.` };
+  }
   if (type === "review.backoff") {
     const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt } = body;
     if ((reviewer !== "coderabbit" && reviewer !== "copilot") ||
@@ -251,7 +335,11 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       return { ok: false, error: "invalid review request PR, reviewer, headSha, UTC timestamp or reason." };
     }
   }
-  return { ok: true, input: { ...(body as object), source: "legate" } as AppendEventInput };
+  return {
+    ok: true,
+    input: { ...(body as object), source: "legate" } as AppendEventInput,
+    ...(parsedAttribution.attribution ? { attribution: parsedAttribution.attribution } : {}),
+  };
 }
 
 export async function registerRoutes(
@@ -342,7 +430,16 @@ export async function registerRoutes(
       reply.code(400);
       return { error: validation.error };
     }
-    const event = store.append(validation.input);
+    // Operator requests need the operator bearer when the token is set (#593).
+    // Read per request, like the admin gate, so it tracks the live env.
+    const operatorToken = env[OPERATOR_TOKEN_ENV]?.trim();
+    if (operatorToken && OPERATOR_REQUEST_TYPES.has(String(validation.input.type))) {
+      if (!bearerMatches(request.headers["authorization"], operatorToken)) {
+        reply.code(401);
+        return { error: `event "${String(validation.input.type)}" requires the operator bearer token.` };
+      }
+    }
+    const event = store.append(validation.input, undefined, validation.attribution);
     reply.code(201);
     return event;
   });

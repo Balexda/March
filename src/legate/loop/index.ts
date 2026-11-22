@@ -7,7 +7,13 @@ import {
   configureLoopRuntime,
   getLoopSnapshot,
   requeueSlice,
+  requestMerge,
+  requestRecovery,
+  requestRelaunch,
+  requestTick,
+  resendReviewThreads,
   respondToEscalation,
+  setDispatchPaused,
   startLoopRuntime,
 } from "./runtime.js";
 import { startLoopHttpServer } from "./http.js";
@@ -71,7 +77,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
     env.MARCH_LEGATE_LOOP_HOST?.trim() ||
     (env.MARCH_LEGATE_CONTAINER === "1" ? "0.0.0.0" : "127.0.0.1");
   const server = await startLoopHttpServer(
-    { startedAtMs, getSnapshot: getLoopSnapshot, respondToEscalation, requeueSlice },
+    { startedAtMs, getSnapshot: getLoopSnapshot, respondToEscalation, requeueSlice, requestRecovery, requestMerge, requestRelaunch, resendReviewThreads, requestTick, setDispatchPaused, env },
     port,
     host,
   );

@@ -66,6 +66,14 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     escalated_by_reason: t.escalatedByReason,
     pr_blocker_counts: t.prBlockerCounts,
     babysit_actions_by_kind: t.babysitActionsByKind,
+    // Operator pause (#593): /status + the dispatch-paused gauge read these.
+    dispatch_paused: out.state?.dispatchPaused ? true : false,
+    ...(out.state?.dispatchPaused
+      ? {
+          dispatch_paused_since: out.state.dispatchPaused.ts,
+          ...(out.state.dispatchPaused.reason ? { dispatch_paused_reason: out.state.dispatchPaused.reason } : {}),
+        }
+      : {}),
     ...(t.dispatchDecisionCounts ? { dispatch_decision_counts: t.dispatchDecisionCounts } : {}),
   };
 }
@@ -87,6 +95,13 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   for (const a of out.results.requeue?.actions ?? []) {
     event(meta.processor_events_path, { paired_legate: meta.paired_legate, ...a });
     log("[" + ts + "] " + a.action + " " + a.slice_id + (a.operator ? " (by " + a.operator + ")" : "") + ": " + (a.detail || ""));
+  }
+  // Operator merge-now (#593): its actions are full event objects (kind
+  // "operator-merge"; a refusal or failed merge is an `operator-merge-refused`
+  // action, so its failures list is not logged twice).
+  for (const a of out.results.mergeNow?.actions ?? []) {
+    event(meta.processor_events_path, { paired_legate: meta.paired_legate, ...a });
+    log("[" + ts + "] " + a.action + " " + a.slice_id + ": " + (a.detail || ""));
   }
   // cleanup actions are already full event objects.
   for (const cleanup of out.results.cleanup.actions) {
