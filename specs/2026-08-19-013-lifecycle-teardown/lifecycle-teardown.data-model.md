@@ -45,16 +45,50 @@ Validation rules:
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `sessionId` | string | Yes | Archive directory key. |
-| `recordSnapshot` | JSON object | Yes | Registry snapshot written as `record.json`. |
+| `recordSnapshot` | JSON object | Yes | **Pre-teardown** registry snapshot of the spawn and steward rows, written once as `record.json`. No `torndownAt`; never rewritten on retry (FR-008). |
+| `attempts` | TeardownAttempt[] | Yes | Append-only `teardown.ndjson`, one started/finished pair per attempt (FR-008a). |
 | `containerLog` | text | No | Written as `container.log` when logs are available. |
-| `artifacts` | file set | No | Only known structured extraction artifact(s), not full worktree contents. |
+| `artifacts` | file set | No | Only the known structured extraction artifact, not full worktree contents (layout below). |
 | `warnings` | string[] | No | Archive-source failures carried into TeardownResult warnings. |
+
+Archive layout (`~/.march/brood/archive/<sessionId>/`):
+
+```text
+record.json                    # pre-teardown snapshot, write-once
+teardown.ndjson                # append-only attempt log (TeardownAttempt entries)
+container.log                  # when logs are readable
+artifacts/extraction-result.json  # registry extractionResult, when present (succeeded or failed)
+artifacts/spawn.patch          # patch.patchText, succeeded results only, sha256-verified
+```
+
+The extraction artifact is sourced from the registry's `extractionResult` (validated with `parseExtractionResult`), never from the worktree. A malformed or absent result is a missing optional source (warning). A registry `patchText` that doesn't match its own `patch.sha256` is a malformed source: Brood records a warning and writes no `spawn.patch`. A written `spawn.patch` that doesn't read back matching `patch.sha256` is a sink failure.
 
 Validation rules:
 - Archive creation runs before artifact deletion.
+- `record.json` is written only when absent, so the first attempt's pre-teardown state survives every retry.
 - Archive content MUST NOT include a recursive copy of the worktree.
 - Missing logs or extraction artifacts (optional *sources*) do not block later cleanup.
 - Failure of the *sink* — archive directory creation or any archive write (`record.json`, `container.log`, extraction artifact) — aborts teardown before any destructive step (FR-007a). Readable sources that fail to write are sink failures, not missing sources.
+
+### 3a) TeardownAttempt (`teardown_attempt`)
+
+One line of `teardown.ndjson`. Each attempt writes a `started` entry and, when it completes, a `finished` entry with the same `attempt`.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `attempt` | integer | Yes | 1-based, monotonically increasing per archive. |
+| `event` | `started \| finished` | Yes | Entry type. |
+| `at` | ISO timestamp | Yes | `startedAt` / `finishedAt`. |
+| `request` | `{ force, kill, reason? }` | `started` only | The TeardownRequest as received. |
+| `steps` | TeardownStep[] | `finished` only | Ordered step outcomes, identical to the response. |
+| `warnings` | string[] | `finished` only | Identical to the response. |
+| `status` | SessionStatus | `finished` only | `torndown` or `tearing-down`. |
+
+Validation rules:
+- Entries are appended, never rewritten or truncated.
+- A `started` entry with no matching `finished` entry is an interrupted attempt (crash or deadline); it reads as partial, never as completed.
+- The latest `finished` entry's `status` agrees with the registry row's status; `torndown` there is the archive-side record of completed cleanup.
+- The archive sink failure of FR-007a that prevents writing `record.json` also prevents the `started` entry; that attempt is visible only in the response, the trace, and the row's unchanged status.
 
 ### 4) TeardownStep (`teardown_step`)
 
@@ -102,6 +136,7 @@ Validation rules:
 |------|----|-------------|-------|
 | SessionRecord | SessionRecord | 1:0..1 | Steward row may point to parent spawn via `parentId`. |
 | SessionRecord | TeardownArchive | 1:0..1 | Archive created for teardown target before cleanup. |
+| TeardownArchive | TeardownAttempt | 1:N | One started/finished pair per teardown attempt. |
 | TeardownRequest | TeardownResult | 1:1 | One request produces one ordered result. |
 | TeardownResult | TeardownStep | 1:N | Steps appear in logical teardown order. |
 | SessionRecord | StewardRemovalResult | 1:0..1 | Present when a steward row is associated with the teardown group. |

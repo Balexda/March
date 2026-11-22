@@ -125,7 +125,7 @@ removeWorkspace(
 Graceful and immediate teardown are **two separate operations** so the archive can run between them (FR-006a):
 
 - **`stopSpawn`** (target, FR-004): stops the container gracefully and leaves it present, so its final logs and structured output stay readable for the archive. It MUST NOT remove the container. A provider that cannot stop gracefully MUST report `stopped: false` (or throw) rather than silently removing. Skipped when the request includes `kill`.
-- **`removeSpawn`** (shipped): removes the container immediately. Brood calls it only after the archive succeeds. Called without a prior `stopSpawn`, this is the `kill` path (FR-005). Today it is the only operation: the host provider runs `docker rm -f` unconditionally, so every teardown is immediate (SD-004).
+- **`removeSpawn`** (shipped): removes the container immediately. Brood calls it only after the archive succeeds. It MUST throw on any failure other than "no such container" and MUST verify the container is gone before returning, so teardown can report a failed `container` step (FR-012b). The current host provider swallows every failure; the never-throws helper stays only on dispatch rollback. Called without a prior `stopSpawn`, this is the `kill` path (FR-005). Today it is the only operation: the host provider runs `docker rm -f` unconditionally, so every teardown is immediate (SD-004).
 
 #### Outputs
 
@@ -209,6 +209,8 @@ writeTeardownArchive(
   artifactPaths: string[],
   warnings: string[]
 }
+
+appendTeardownAttempt(sessionId: string, entry: TeardownAttempt): void
 ```
 
 #### Inputs
@@ -223,9 +225,9 @@ writeTeardownArchive(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `recordJsonPath` | string | Path to the archived registry snapshot. |
+| `recordJsonPath` | string | Path to the pre-teardown registry snapshot. Written only when absent (FR-008). |
 | `containerLogPath` | string | Path to archived logs when written. |
-| `artifactPaths` | string[] | Known structured extraction artifacts copied. |
+| `artifactPaths` | string[] | `artifacts/extraction-result.json` and, for succeeded results, `artifacts/spawn.patch` (FR-010). |
 | `warnings` | string[] | Missing/unreadable optional sources. |
 
 #### Error Conditions
