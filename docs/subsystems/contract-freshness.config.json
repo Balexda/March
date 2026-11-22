@@ -75,6 +75,13 @@
       "publicSourcePaths": [
         "src/tessera/**"
       ]
+    },
+    {
+      "name": "triage",
+      "contractPath": "docs/subsystems/triage/contract.md",
+      "publicSourcePaths": [
+        "src/triage/verdict.ts"
+      ]
     }
   ]
 }

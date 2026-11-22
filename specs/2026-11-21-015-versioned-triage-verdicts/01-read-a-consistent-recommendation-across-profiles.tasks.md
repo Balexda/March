@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Define the shared v1 verdict and rubric**
+- [x] **Define the shared v1 verdict and rubric**
 
   Define the verdict vocabulary in the triage domain using the data model and rubric for AS 1.1 and AS 1.2. Keep the rubric revision independent of the wire schema version.
 
@@ -24,7 +24,7 @@
   - All profiles use the same v1 vocabulary of eight outcomes, three confidence levels, and three needs-definition grades. The verdict type expresses the conditional needs-definition details.
   - The published rubric describes the outcomes, confidence levels, and grades, including when questions and support requests resolve to `close` or `needs-definition`. Recommender execution and calibration belong to the later recommender milestone.
 
-- [ ] **Validate the complete candidate before it becomes eligible for writes**
+- [x] **Validate the complete candidate before it becomes eligible for writes**
 
   Add the verdict validation boundary in the triage domain for AS 1.3. Emit the validation failure through the existing observability subsystem in accordance with [operating philosophy rule 3](../../docs/operating-philosophy.md#3-failures-are-clean-exits-not-hangs).
 
@@ -33,7 +33,7 @@
   - Reject malformed JSON, unsupported versions, duplicate or unknown keys, invalid types and values, and missing fields. Return a field or document diagnostic with no eligible verdict on failure, and emit an errored span when tracing is enabled.
   - Exercise the same corpus for march and smithycli. Cover all eight outcomes, all three confidence levels and grades, all five contract rejection fixtures, and the additional invalid cases above.
 
-- [ ] **Expose the Smithy destination for each build outcome**
+- [x] **Expose the Smithy destination for each build outcome**
 
   Surface the named destination from validated build verdicts for AS 1.4. Document the validation and recommendation surfaces in the owning subsystem contract.
 
