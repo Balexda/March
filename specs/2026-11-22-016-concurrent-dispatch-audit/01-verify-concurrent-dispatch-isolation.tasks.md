@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Publish the resource audit with executable isolation evidence**
+- [x] **Publish the [resource audit](concurrent-dispatch-resource-audit.md) with executable isolation evidence**
 
   Document the CLI path in `src/cli/program.ts` and the Hatchery path in `src/hatchery/spawn-handoff.ts`, following their allocation and cleanup calls into Spawn, Castra, and Brood. Pair the audit with one `@l2 @deterministic @ci` scenario in the existing cassette run (`npm run test:l2-cassette`).
 
