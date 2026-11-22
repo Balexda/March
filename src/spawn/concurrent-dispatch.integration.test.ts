@@ -12,14 +12,20 @@ import { listSpawnRecords, loadSpawnRecord } from "../brood/spawn-index.js";
 import { spawnOutputPath, spawnRecordDir, spawnRecordPath } from "../brood/spawn-record.js";
 
 const cli = fileURLToPath(new URL("../../dist/cli.js", import.meta.url));
+// A cold CI runner's daemon can take several seconds to answer, so allow a
+// generous probe and keep the failure reason for the assertion message.
+let dockerProbeError = "";
 const dockerAvailable = (() => {
   try {
     execFileSync("docker", ["info", "--format", "{{.OSType}}"], {
-      timeout: 5_000,
-      stdio: "ignore",
+      timeout: 60_000,
+      stdio: "pipe",
     });
     return true;
-  } catch {
+  } catch (error) {
+    dockerProbeError = error instanceof Error ? error.message : String(error);
+    // Also log it: some reporter versions crash before printing assertion text.
+    console.error(`docker probe failed: ${dockerProbeError}`);
     return false;
   }
 })();
@@ -27,7 +33,7 @@ const dockerAvailable = (() => {
 it.skipIf(!process.env.CI && !dockerAvailable)(
   "keeps two overlapping CLI dispatches independently attributable",
   async () => {
-    expect(dockerAvailable, "The concurrent dispatch fixture requires a running Docker daemon").toBe(true);
+    expect(dockerAvailable, `The concurrent dispatch fixture requires a running Docker daemon: ${dockerProbeError}`).toBe(true);
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "march-concurrent-")));
     const daemon = path.basename(root).toLowerCase();
     const repo = path.join(root, "repo");
