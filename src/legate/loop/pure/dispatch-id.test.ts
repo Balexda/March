@@ -11,6 +11,9 @@ import {
   dispatchItemKey,
   dispatchSliceId,
   dispatchTitle,
+  legacyCutBranch,
+  legacyCutSliceId,
+  MAX_SEMANTIC_STEM,
   sliceActionKey,
   slugifyDispatchPart,
   smithyVerb,
@@ -22,6 +25,7 @@ describe("dispatch-id pure helpers", () => {
     expect(slugifyDispatchPart("")).toBe("item");
     expect(slugifyDispatchPart("", "fallback")).toBe("fallback");
     expect(slugifyDispatchPart("a".repeat(80)).length).toBe(56);
+    expect(slugifyDispatchPart("a".repeat(80), "item", Infinity).length).toBe(80);
   });
 
   it("strips the smithy. command prefix", () => {
@@ -88,5 +92,90 @@ describe("dispatch-id pure helpers", () => {
     expect(JSON.parse(dispatchItemKey(item))).toEqual({ command: "smithy.cut", arguments: ["a"], path: "p" });
     const slice = { command: "smithy.cut", arguments: ["a"], artifact_path: "p" };
     expect(dispatchItemKey(item)).toBe(sliceActionKey(slice));
+  });
+
+  // #599: the semantic stem used to be cut to 56 characters, dropping the row
+  // suffix at its end, so different rows of a long-named plan file shared one id.
+  describe("long artifact slugs keep the row suffix (#599)", () => {
+    const SLUG50 = "automatic-retry-handling-for-review-feedback-loops";
+    const SLUG56 = "structured-review-feedback-with-automatic-retry-handling";
+    const forgeItem = (slug: string, row: string, slice: string) => ({
+      parent_path: `docs/specs/${slug}.tasks.md`,
+      parent_row_id: row,
+      next_action: { command: "smithy.forge", arguments: [`docs/specs/${slug}.tasks.md`, slice] },
+    });
+
+    it("fixtures are the issue's 50- and 56-character slugs", () => {
+      expect(SLUG50).toHaveLength(50);
+      expect(SLUG56).toHaveLength(56);
+    });
+
+    it.each([SLUG50, SLUG56])("forge rows of %s get distinct, full ids", (slug) => {
+      const rows: [string, string][] = [["US1", "1"], ["US1", "2"], ["US2", "1"], ["US3", "4"]];
+      const ids = rows.map(([row, slice]) => dispatchSliceId(forgeItem(slug, row, slice)));
+      expect(ids).toEqual([
+        `${slug}-us1-s1-forge`,
+        `${slug}-us1-s2-forge`,
+        `${slug}-us2-s1-forge`,
+        `${slug}-us3-s4-forge`,
+      ]);
+      expect(new Set(ids).size).toBe(rows.length);
+      expect(dispatchBranch(forgeItem(slug, "US3", "4"))).toBe(`smithy/forge/${slug}-us3-s4`);
+    });
+
+    it("cut / mark / render keep their suffixes too", () => {
+      const cut = (row: string, slice: string) => ({
+        parent_path: `docs/specs/${SLUG56}.spec.md`,
+        parent_row_id: row,
+        next_action: { command: "smithy.cut", arguments: [`docs/specs/${SLUG56}.spec.md`, slice] },
+      });
+      expect(dispatchSliceId(cut("US1", "1"))).toBe(`${SLUG56}-us1-s1-cut`);
+      expect(dispatchSliceId(cut("US2", "1"))).toBe(`${SLUG56}-us2-s1-cut`);
+
+      const mark = (row: string, feature: string) => ({
+        parent_path: `docs/rfcs/${SLUG56}.features.md`,
+        parent_row_id: row,
+        next_action: { command: "smithy.mark", arguments: [`docs/rfcs/${SLUG56}.features.md`, feature] },
+      });
+      expect(dispatchSliceId(mark("M1", "1"))).toBe(`${SLUG56}-m1-f1-mark`);
+      expect(dispatchSliceId(mark("M1", "2"))).toBe(`${SLUG56}-m1-f2-mark`);
+
+      const render = (milestone: string) => ({
+        next_action: { command: "smithy.render", arguments: [`docs/rfcs/${SLUG56}.rfc.md`, milestone] },
+      });
+      expect(dispatchSliceId(render("1"))).toBe(`${SLUG56}-m1-render`);
+      expect(dispatchSliceId(render("2"))).toBe(`${SLUG56}-m2-render`);
+    });
+
+    it("legacyCutSliceId / legacyCutBranch give the old 56-character id, shared by siblings", () => {
+      expect(legacyCutSliceId(forgeItem(SLUG56, "US1", "1"))).toBe(`${SLUG56}-forge`);
+      expect(legacyCutSliceId(forgeItem(SLUG56, "US3", "4"))).toBe(`${SLUG56}-forge`);
+      expect(legacyCutBranch(forgeItem(SLUG56, "US2", "1"))).toBe(`smithy/forge/${SLUG56}`);
+      expect(legacyCutSliceId(forgeItem(SLUG50, "US1", "2"))).toBe(`${SLUG50}-us1-s-forge`);
+    });
+
+    it("legacy helpers are null when the id never changed", () => {
+      const short = forgeItem("short-name", "US1", "1");
+      expect(legacyCutSliceId(short)).toBeNull();
+      expect(legacyCutBranch(short)).toBeNull();
+      expect(legacyCutSliceId({ path: "x", next_action: { command: "smithy.mark", arguments: ["1"] } })).toBeNull();
+    });
+
+    it(`caps stems over ${MAX_SEMANTIC_STEM} characters, keeping the row suffix and a slug hash`, () => {
+      const huge = "a".repeat(200);
+      const hugeB = "a".repeat(199) + "b"; // same long prefix, different slug
+      const id1 = dispatchIdentity(forgeItem(huge, "US1", "1")).stem;
+      const id2 = dispatchIdentity(forgeItem(huge, "US2", "1")).stem;
+      const idB = dispatchIdentity(forgeItem(hugeB, "US1", "1")).stem;
+      expect(id1).toHaveLength(MAX_SEMANTIC_STEM);
+      expect(id1).toMatch(/-[0-9a-f]{6}-us1-s1$/);
+      expect(id2).toMatch(/-us2-s1$/);
+      expect(id1).not.toBe(idB);
+      expect(dispatchSliceId(forgeItem(huge, "US1", "1"))).toBe(dispatchSliceId(forgeItem(huge, "US1", "1")));
+    });
+
+    it("is deterministic", () => {
+      expect(dispatchSliceId(forgeItem(SLUG56, "US2", "1"))).toBe(dispatchSliceId(forgeItem(SLUG56, "US2", "1")));
+    });
   });
 });
