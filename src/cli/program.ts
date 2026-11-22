@@ -1462,7 +1462,13 @@ leverOptions(
   try {
     const profileName = await resolveSliceProfile(opts.profile, "resend threads for");
     if (!profileName) return;
-    const threadIds = (opts.thread ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
+    const threadIds = (opts.thread ?? []).map((t) => t.trim());
+    // A blank --thread must not fall through to "every unresolved thread".
+    if (threadIds.some((t) => t.length === 0)) {
+      process.stderr.write("--thread values must be non-empty (omit --thread to re-send every unresolved thread).\n");
+      process.exitCode = ERROR;
+      return;
+    }
     const result = await postLever<{ threadIds?: string[] }>(
       `/slices/${encodeURIComponent(id)}/review-threads/resend`,
       { profile: profileName, ...(threadIds.length > 0 ? { threadIds } : {}), ...leverAttribution(opts) },
@@ -1486,15 +1492,27 @@ function profileLeverOptions(cmd: Command): Command {
 }
 
 /** Run one profile-level lever (#593) against the legate and print its outcome. */
-async function runProfileLever(route: string, verb: string, opts: LeverOpts, done: (targets: string) => string): Promise<void> {
+async function runProfileLever(
+  route: string,
+  verb: string,
+  opts: LeverOpts,
+  done: (targets: string, result: { started?: boolean; note?: string }) => string,
+): Promise<void> {
   const profileName = opts.profile?.trim();
-  const result = await postLever<{ targets?: string[] }>(
+  // An explicitly blank --profile (e.g. an unset "$PROFILE") must not widen the
+  // lever to every profile; only an omitted --profile means all of them.
+  if (opts.profile !== undefined && !profileName) {
+    process.stderr.write("--profile must be non-empty (omit it to target every registered profile).\n");
+    process.exitCode = ERROR;
+    return;
+  }
+  const result = await postLever<{ targets?: string[]; started?: boolean; note?: string }>(
     route,
     { ...(profileName ? { profile: profileName } : {}), ...leverAttribution(opts) },
     verb,
   );
   if (!result) return;
-  console.log(done((result.targets ?? []).join(", ") || "(none)"));
+  console.log(done((result.targets ?? []).join(", ") || "(none)", result));
   process.exitCode = SUCCESS;
 }
 
@@ -1504,7 +1522,11 @@ profileLeverOptions(
     .description("Run a legate tick now instead of waiting for the interval. Refused while a tick is already in flight. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
 ).action(async (opts: LeverOpts) => {
   commandHandled = true;
-  await runProfileLever("/tick", "tick", opts, (targets) => `Tick started (recorded for: ${targets}).`);
+  await runProfileLever("/tick", "tick", opts, (targets, result) =>
+    result.started === false
+      ? `Tick request recorded for: ${targets}, but no tick started: ${result.note ?? "a tick was already in progress."}`
+      : `Tick started (recorded for: ${targets}).`,
+  );
 });
 
 profileLeverOptions(
