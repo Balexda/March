@@ -103,7 +103,7 @@ export type EventBody =
   // ── Transition events (legate; emitted from PR2) ────────────────────────
   /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
    *  id, persisted so the legate's completion poll survives a restart. */
-  | { type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string; item?: unknown }
+  | ({ type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string } & SliceActionKey)
   /**
    * Hatchery launched the steward and learned the slice↔session↔spawn pairing
    * (#213). Hatchery is the single integration point that holds all three ids, so
@@ -121,7 +121,7 @@ export type EventBody =
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
-  | { type: "slice.recovery.dispatched"; sliceId: string; branch?: string; item?: unknown }
+  | ({ type: "slice.recovery.dispatched"; sliceId: string; branch?: string } & SliceActionKey)
   /**
    * Operator-triggered request to recover an escalated slice (#238). Unlike
    * `slice.recovery.dispatched` (the loop's own bounded auto-recovery, #211), this
@@ -291,8 +291,21 @@ export type HandledFeedback = {
   headSha?: string;
 };
 
+/**
+ * The smithy action a slice was dispatched for (#653): the legate's dedup key
+ * (`command` + `arguments` + `artifactPath`). Carried on `slice.dispatched` /
+ * `slice.recovery.dispatched` and stored on the slice so a cold-start rebuild can
+ * still tell sibling plan rows apart; optional because events from before #653
+ * don't carry it.
+ */
+export interface SliceActionKey {
+  command?: string;
+  arguments?: string[];
+  artifactPath?: string;
+}
+
 /** Per-slice projected state — observed facts merged with legate-owned stage. */
-export interface SliceState {
+export interface SliceState extends SliceActionKey {
   sliceId: string;
   /** Legate-owned stage, from the legate's transition events (undefined before
    *  the slice's first stage transition). */
@@ -574,6 +587,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if ("worktreePath" in event && event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       if ("sessionId" in event && event.sessionId !== undefined) slice.sessionId = event.sessionId;
       if ("jobId" in event && event.jobId !== undefined) slice.jobId = event.jobId;
+      // The action key (#653): set only when present so a pre-#653 event never
+      // clobbers a known key; a fresh dispatch carrying one overwrites it.
+      if (event.command !== undefined) slice.command = event.command;
+      if (event.arguments !== undefined) slice.arguments = [...event.arguments];
+      if (event.artifactPath !== undefined) slice.artifactPath = event.artifactPath;
       slice.archived = false;
       delete slice.recovered; // a fresh dispatch re-establishes the slice (#238)
       delete slice.recoveryRung; // …and ends any graduated-recovery walk (#412)

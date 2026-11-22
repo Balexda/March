@@ -563,9 +563,9 @@ describe("legacy cut slice ids do not block sibling rows (#599)", () => {
     expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
   });
 
-  // After a restart the working state is rebuilt from the Herald fold, which keeps
-  // id + branch but not the action key (rebuildWorkingState), so an old-id entry
-  // cannot say which row it was for.
+  // After a restart the working state is rebuilt from the Herald fold. A slice
+  // dispatched before #653 has no action key there (only id + branch), so an
+  // old-id entry cannot say which row it was for. (With the key, see sense.test.ts.)
   describe("entries rebuilt without an action key (cold start)", () => {
     const rebuiltArchive = (terminal_state: string | null) => ({
       pr_number: 1, pr_url: null, branch: `smithy/forge/${SLUG}`, terminal_state,

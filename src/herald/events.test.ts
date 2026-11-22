@@ -81,6 +81,34 @@ describe("reduce / fold", () => {
     expect(next.slices.s1.stewardReport).toEqual({ status: "working", summary: undefined, classified: true });
   });
 
+  it("slice.dispatched / slice.recovery.dispatched store the slice action key (#653)", () => {
+    seq = 0;
+    const key = { command: "smithy.forge", arguments: ["docs/a/us1.tasks.md", "1"], artifactPath: "docs/a/us1.tasks.md" };
+    for (const type of ["slice.dispatched", "slice.recovery.dispatched"]) {
+      const state = foldEvents([ev({ type, sliceId: "s1", branch: "feature/a", ...key })]);
+      expect(state.slices.s1).toMatchObject(key);
+    }
+    // A later event without the key (a pre-#653 legate) keeps the known one…
+    const kept = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", jobId: "job-1", ...key }),
+      ev({ type: "slice.dispatched", sliceId: "s1", jobId: "job-2" }),
+    ]);
+    expect(kept.slices.s1).toMatchObject(key);
+    // …a fresh dispatch carrying a different key overwrites it…
+    const other = { command: "smithy.forge", arguments: ["docs/a/us2.tasks.md", "1"], artifactPath: "docs/a/us2.tasks.md" };
+    const overwritten = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", ...key }),
+      ev({ type: "slice.dispatched", sliceId: "s1", ...other }),
+    ]);
+    expect(overwritten.slices.s1).toMatchObject(other);
+    // …and the rung-3 tombstone drops it.
+    const tombstoned = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", ...key }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 }),
+    ]);
+    expect(tombstoned.slices.s1?.command).toBeUndefined();
+  });
+
   it("slice.dispatched sets stage to hatchery-pending and clears any escalation (#255)", () => {
     seq = 0;
     // The job-bearing dispatch event itself means the slice is hatchery-pending, so a

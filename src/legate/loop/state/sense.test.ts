@@ -13,7 +13,7 @@ import {
 } from "./sense.js";
 import type { LoopMeta } from "../meta.js";
 import { emptySystemState, reduce, type HeraldEvent, type SliceState, type SystemState } from "../../../herald/events.js";
-import { liveSpawnCount } from "../pure/slice.js";
+import { dispatchableReady, liveSpawnCount } from "../pure/slice.js";
 
 const meta = { worker_group: "legate-workers", repo: { name: "march", path: "/repo" } } as unknown as LoopMeta;
 
@@ -410,6 +410,68 @@ describe("rebuildWorkingState", () => {
     // Same primitive the tick uses to seed the budget — the archived + escalated
     // (terminal) slices don't hold a live spawn slot; the three in-flight ones do.
     expect(liveSpawnCount(raw)).toBe(3);
+  });
+
+  it("restores the slice action key on live and archived slices (#653)", () => {
+    const key = { command: "smithy.forge", arguments: ["docs/a/us1.tasks.md", "1"], artifactPath: "docs/a/us1.tasks.md" };
+    const sys = foldedState({
+      slices: {
+        live: { sliceId: "live", stage: "implementing", branch: "b-l", ...key },
+        done: { sliceId: "done", stage: "merged", archived: true, branch: "b-d", pr: { number: 2, state: "MERGED" }, ...key },
+        // Dispatched before #653: no key in the fold, rebuilt as before.
+        old: { sliceId: "old", stage: "implementing", branch: "b-o" },
+      },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    const restored = { command: "smithy.forge", arguments: ["docs/a/us1.tasks.md", "1"], artifact_path: "docs/a/us1.tasks.md" };
+    expect(raw.slices.live).toMatchObject(restored);
+    expect(raw.archived_slices.done).toMatchObject({ ...restored, terminal_state: "MERGED" });
+    expect(raw.slices.old).not.toHaveProperty("command");
+    expect(raw.slices.old).not.toHaveProperty("artifact_path");
+  });
+});
+
+// #653: a pre-#599 cut id shared by sibling rows is only ambiguous after a restart
+// when the fold lost the action key. With the key on the dispatch event, a rebuilt
+// old-id entry blocks only the row it ran for.
+describe("cold-start dedup of pre-#599 cut ids with the action key in the fold (#653)", () => {
+  const SLUG = "structured-review-feedback-with-automatic-retry-handling";
+  const SPEC = `docs/specs/${SLUG}/${SLUG}.spec.md`;
+  const OLD_CUT_ID = `${SLUG}-forge`;
+  const row = (rowId: string, slice: string) => {
+    const tasks = `docs/specs/${SLUG}/${rowId.toLowerCase()}.tasks.md`;
+    return {
+      path: tasks, parent_path: SPEC, parent_row_id: rowId,
+      next_action: { command: "smithy.forge", arguments: [tasks, slice] },
+    };
+  };
+  const ran = row("US1", "1");
+  const all = [ran, row("US1", "2"), row("US2", "1"), row("US3", "4")];
+  const envelope = { source: "legate", profile: "p", id: "e" } as const;
+  const dispatched = {
+    ...envelope, seq: 1, ts: "2026-11-21T00:00:00Z", type: "slice.dispatched", sliceId: OLD_CUT_ID,
+    branch: `smithy/forge/${SLUG}`, jobId: "job-1",
+    command: ran.next_action.command, arguments: ran.next_action.arguments, artifactPath: ran.path,
+  } as HeraldEvent;
+  const fold = (events: HeraldEvent[]) => rebuildWorkingState(events.reduce(reduce, emptySystemState()), meta);
+
+  it("a live rebuilt old-id slice holds only the row it ran", () => {
+    expect(dispatchableReady(fold([dispatched]), all)).toEqual(all.slice(1));
+  });
+
+  it("an escalated rebuilt old-id archive holds only the row it ran", () => {
+    const raw = fold([
+      dispatched,
+      { ...envelope, seq: 2, ts: "2026-11-21T00:01:00Z", type: "slice.escalated", sliceId: OLD_CUT_ID, reason: "needs_human_judgement" } as HeraldEvent,
+      { ...envelope, seq: 3, ts: "2026-11-21T00:02:00Z", type: "slice.archived", sliceId: OLD_CUT_ID } as HeraldEvent,
+    ]);
+    expect(raw.archived_slices[OLD_CUT_ID]).toBeDefined();
+    expect(dispatchableReady(raw, all)).toEqual(all.slice(1));
+  });
+
+  it("without the key (dispatched before #653) the old id still blocks every sibling", () => {
+    const { command: _c, arguments: _a, artifactPath: _p, ...keyless } = dispatched as any;
+    expect(dispatchableReady(fold([keyless as HeraldEvent]), all)).toEqual([]);
   });
 });
 

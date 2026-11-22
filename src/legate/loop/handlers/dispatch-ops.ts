@@ -24,6 +24,7 @@ import type { DispatchIoDeps } from "./dispatch-io.js";
 import {
   actionArguments,
   actionCommandLine,
+  dispatchActionKeyFields,
   dispatchBranch,
   dispatchIdentity,
   dispatchTitle,
@@ -269,7 +270,11 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
     });
     // Persist the job id in the fold so the completion poll survives a restart
     // (rebuildWorkingState restores slice.hatchery.job_id from slice.dispatched).
-    deps.emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: launched.jobId });
+    // The action key rides along (#653) so a rebuild can tell sibling rows apart.
+    deps.emitTransition({
+      type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: launched.jobId,
+      ...dispatchActionKeyFields(item),
+    });
   } catch (err: any) {
     const error = err?.message || String(err);
     // #173: if the launch collided with a branch that already has this slice's
@@ -349,7 +354,9 @@ export async function recoverDispatch(
   const key = recoveryAttemptKey(sliceId);
   state.transient_retry_counts[key] = attempt;
   deps.emitTransition({ type: "retry.counted", key, count: attempt });
-  deps.emitTransition({ type: "slice.recovery.dispatched", sliceId, branch: dispatchBranch(item) });
+  deps.emitTransition({
+    type: "slice.recovery.dispatched", sliceId, branch: dispatchBranch(item), ...dispatchActionKeyFields(item),
+  });
   deps.log("[" + ts + "] auto-recovery re-dispatch " + sliceId + " (attempt " + attempt + "/" + DISPATCH_RECOVERY_LIMIT + ")");
 
   const out = await launchDispatch(state, ts, item, sliceId, deps);
