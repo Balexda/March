@@ -91,8 +91,10 @@ export interface LoopState {
   relaunchRequests?: { sliceId: string; seq: number }[];
   /**
    * Set while an operator has paused fresh dispatch for this profile (#593),
-   * read from the fold every tick. The coordinator skips the dispatch handler;
-   * every other handler keeps running.
+   * read from the fold every tick. The dispatch handler still runs: it drains
+   * pending Hatchery jobs and records their failures, then launches and
+   * re-dispatches nothing (its queue rows read `paused`). Every other handler
+   * keeps running.
    */
   dispatchPaused?: { seq: number; ts: string; reason?: string };
 }
