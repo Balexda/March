@@ -28,21 +28,21 @@ The [CLI dispatcher](../../src/cli/program.ts#L2679) allocates a Git branch and 
 
 ## Follow-up PR tracking
 
-Each open entry records an ownership check a separate fix PR must establish. The CLI scenario keeps its isolation assertions and uses the ordinary success path.
+Each open entry records an ownership check a separate fix PR must establish, tracked by the linked issue. The CLI scenario keeps its isolation assertions and uses the ordinary success path.
 
-| ID | Open follow-up PR scope | Failing ownership check |
-| --- | --- | --- |
-| CD-01 | Reserve dispatch identity across workers sharing a home or daemon before allocating ID-derived resources. | A Git ref in one repository does not establish ownership of the same ID in another repository, home, or daemon. Hatchery has no equivalent ID reservation. |
-| CD-02 | Bind worktree failure rollback to the creating Git registration. | After the existence check, another linked worktree can occupy the path. The fallback accepts a linked-worktree marker without matching it to the new ref and repository. |
-| CD-03 | Refuse to replace a claimed Docker tag and roll back a verified build. | Build and rollback use a tag without verifying that it belongs to this attempt. |
-| CD-04 | Remove containers only using the resource ID acquired by the attempt. | Docker rejects a duplicate name but failed-create cleanup can remove the existing container by that name. |
-| CD-05 | Gate record deletion and failure transitions on successful ownership acquisition. | `EEXIST` preserves the file at creation, then the CLI catch can delete it or the Hatchery catch can mark it failed. |
-| CD-06 | Publish initial records as whole files with exclusive acquisition and serialize updates for each owner. | Initial create can expose partial JSON. Sibling staging is not exclusive, and an update can overwrite a competing transition or replace a record recreated since its read. |
-| CD-07 | Publish output and forensic files under verified attempt ownership. | A truncating write accepts a pre-existing output or manifest path without checking who created it. |
-| CD-08 | Bind Castra attach and branch self-heal to a specific live launch owner. | A flattened basename is insufficient to establish session identity. Ancestry/PR safety does not establish that an existing branch and worktree have no active steward. |
-| CD-09 | Reject conflicting or stale Brood registrations with an attempt identity check. | Upsert merges by ID without verifying that new artifact pointers originate from the same attempt. |
-| CD-10 | Require attempt ownership when updating the Herald slice correlation. | Publishing the slice ID and resource pointers does not establish that the dispatch is the current attempt for that slice. |
-| CD-11 | Bind steward hook context to the launch, expire it by session liveness rather than age alone, and guard expiration against replacement. | The sidecar keys on path without validating the launch identity. Age-based unlink does not check that the session has ended, so a live steward older than the 14-day TTL loses its sidecar. Unlink also does not verify the file is still the one whose mtime was checked. |
+| ID | Open follow-up PR scope | Failing ownership check | Tracking |
+| --- | --- | --- | --- |
+| CD-01 | Reserve dispatch identity across workers sharing a home or daemon before allocating ID-derived resources. | A Git ref in one repository does not establish ownership of the same ID in another repository, home, or daemon. Hatchery has no equivalent ID reservation. | [#686](https://github.com/Balexda/March/issues/686) |
+| CD-02 | Bind worktree failure rollback to the creating Git registration. | After the existence check, another linked worktree can occupy the path. The fallback accepts a linked-worktree marker without matching it to the new ref and repository. | [#687](https://github.com/Balexda/March/issues/687) |
+| CD-03 | Refuse to replace a claimed Docker tag and roll back a verified build. | Build and rollback use a tag without verifying that it belongs to this attempt. | [#688](https://github.com/Balexda/March/issues/688) |
+| CD-04 | Remove containers only using the resource ID acquired by the attempt. | Docker rejects a duplicate name but failed-create cleanup can remove the existing container by that name. | [#689](https://github.com/Balexda/March/issues/689) |
+| CD-05 | Gate record deletion and failure transitions on successful ownership acquisition. | `EEXIST` preserves the file at creation, then the CLI catch can delete it or the Hatchery catch can mark it failed. | [#690](https://github.com/Balexda/March/issues/690) |
+| CD-06 | Publish initial records as whole files with exclusive acquisition and serialize updates for each owner. | Initial create can expose partial JSON. Sibling staging is not exclusive, and an update can overwrite a competing transition or replace a record recreated since its read. | [#691](https://github.com/Balexda/March/issues/691) |
+| CD-07 | Publish output and forensic files under verified attempt ownership. | A truncating write accepts a pre-existing output or manifest path without checking who created it. | [#692](https://github.com/Balexda/March/issues/692) |
+| CD-08 | Bind Castra attach and branch self-heal to a specific live launch owner. | A flattened basename is insufficient to establish session identity. Ancestry/PR safety does not establish that an existing branch and worktree have no active steward. | [#693](https://github.com/Balexda/March/issues/693) |
+| CD-09 | Reject conflicting or stale Brood registrations with an attempt identity check. | Upsert merges by ID without verifying that new artifact pointers originate from the same attempt. | [#694](https://github.com/Balexda/March/issues/694) |
+| CD-10 | Require attempt ownership when updating the Herald slice correlation. | Publishing the slice ID and resource pointers does not establish that the dispatch is the current attempt for that slice. | [#695](https://github.com/Balexda/March/issues/695) |
+| CD-11 | Bind steward hook context to the launch, expire it by session liveness rather than age alone, and guard expiration against replacement. | The sidecar keys on path without validating the launch identity. Age-based unlink does not check that the session has ended, so a live steward older than the 14-day TTL loses its sidecar. Unlink also does not verify the file is still the one whose mtime was checked. | [#696](https://github.com/Balexda/March/issues/696) |
 
 ## CI evidence
 
