@@ -605,6 +605,11 @@ export async function apply(
     // is refused even if the relaunch removed the session and then failed to launch.
     slice.relaunch_in_progress = true;
     slice.relaunch_generation = (typeof slice.relaunch_generation === "number" ? slice.relaunch_generation : 0) + 1;
+    // An operator relaunch that removed the live steward but never rebinds a
+    // replacement must still retire the removed steward's Brood row (the Castra
+    // DELETE doesn't touch Brood, and reconcileBrood only runs on success).
+    let removedPrior = "";
+    let rebound = false;
     try {
 
       // Operator relaunch (#593): REPLACE a still-live steward — remove its session
@@ -616,6 +621,7 @@ export async function apply(
           try {
             await ctx.castra.removeSession({ profile: ctx.meta.profile, sessionId: prior, pruneWorktree: false, traceKey: d.sliceId });
             dropSession(state, prior);
+            removedPrior = prior;
           } catch (err) {
             const detail = "removing the live steward " + prior + " failed: " + errMsg(err);
             recordFailure(d, detail);
@@ -740,6 +746,7 @@ export async function apply(
       });
 
       slice.worker_session_id = newSessionId;
+      rebound = true;
       slice.worker_title = d.launchTitle;
       slice.worktree_path = liveWorktree;
       slice.last_action = ctx.ts;
@@ -777,6 +784,18 @@ export async function apply(
       });
     } finally {
       delete slice.relaunch_in_progress;
+      if (removedPrior && !rebound && ctx.broodRetire) {
+        // Best-effort, like reconcileBrood: Brood must not report the removed
+        // steward as active. Same retire as the shared-worktree success path.
+        try {
+          const retired = await ctx.broodRetire(removedPrior);
+          if (!retired.ok && !retired.notTracked) {
+            ctx.log(`relaunch ${d.sliceId}: Brood retire of removed steward ${removedPrior} failed: ${retired.detail}`);
+          }
+        } catch (err) {
+          ctx.log(`relaunch ${d.sliceId}: Brood retire of removed steward ${removedPrior} failed: ${errMsg(err)}`);
+        }
+      }
     }
   }
 

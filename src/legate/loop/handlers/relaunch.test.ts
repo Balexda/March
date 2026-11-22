@@ -451,8 +451,11 @@ describe("operator relaunch (#593)", () => {
     }) as any;
     const slice = state.slices.s;
     const before = relaunchGeneration(slice); // resend captured this, then awaited its send
+    c.broodRetire = vi.fn(async () => ({ ok: true }) as any);
     await apply(assess(state), c, state, deps);
     expect(c.castra.removeSession).toHaveBeenCalled();
+    // The removed steward's Brood row is retired even though no replacement launched.
+    expect(c.broodRetire).toHaveBeenCalledWith("live");
     // The relaunch is over and the removed session is still bound, but the
     // generation moved, so the resend's late return refuses to record.
     expect(slice.relaunch_in_progress).toBeUndefined();
@@ -527,11 +530,18 @@ describe("operator relaunch (#593)", () => {
   });
 
   it("un-escalates an escalated slice and ignores the self-heal backoff", async () => {
+    // An ACTIVE backoff window: a real tick time, a deadline after it, and a prior
+    // attempt (coolingDown needs all three).
+    const ts = "2026-11-21T00:00:00.000Z";
     const raw = {
       slices: { s: eligibleSlice({ stage: "escalated", escalated_reason: "needs_human_judgement" }) },
-      relaunch_backoff_until: { s: Number.MAX_SAFE_INTEGER },
+      relaunch_backoff_until: { s: Date.parse(ts) + 60 * 60_000 },
+      transient_retry_counts: { "relaunch-steward:s": 1 },
     };
-    const state = loopState({ raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 3 }] });
+    // Without the request the auto path holds the slice while it cools down…
+    expect(assess(loopState({ ts, raw, slices: raw.slices })).filter((x) => x.sliceId === "s")).toEqual([]);
+    // …and the operator request bypasses that same backoff.
+    const state = loopState({ ts, raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 3 }] });
     const [d] = assess(state);
     expect(d).toMatchObject({ mode: "operator", unescalateStage: "pr-open" });
     const c = ctx(() => ({ sessionId: "fresh" }));
