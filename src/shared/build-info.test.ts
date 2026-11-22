@@ -10,12 +10,12 @@ const RFC3339 = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
 describe("buildInfo", () => {
   it("populates fields from env and trims them", () => {
     const b = buildInfo("herald", {
-      env: { MARCH_GIT_SHA: " abc123 ", MARCH_GIT_DESCRIBE: "v0.1.2-3-gabc", MARCH_BUILD_TIME: "2026-11-20T07:00:41Z" },
+      env: { MARCH_GIT_SHA: " B0E80D6E8D448E0B3A4165E79578DA9763325E6F ", MARCH_GIT_DESCRIBE: "v0.1.2-3-gabc", MARCH_BUILD_TIME: "2026-11-20T07:00:41Z" },
     });
     expect(b).toMatchObject({
       service: "herald",
       describe: "v0.1.2-3-gabc",
-      commit: "abc123",
+      commit: "b0e80d6e8d448e0b3a4165e79578da9763325e6f",
       built_at: "2026-11-20T07:00:41Z",
     });
   });
@@ -27,6 +27,13 @@ describe("buildInfo", () => {
       expect(b.commit).toBeNull();
       expect(b.built_at).toBeNull();
     }
+  });
+
+  it("returns null for a malformed commit or build time", () => {
+    const b = buildInfo("herald", { env: { MARCH_GIT_SHA: "abc123", MARCH_GIT_DESCRIBE: "anything", MARCH_BUILD_TIME: "invalid" } });
+    expect(b.commit).toBeNull();
+    expect(b.built_at).toBeNull();
+    expect(b.describe).toBe("anything");
   });
 
   it("reports CLI_VERSION and echoes the service", () => {
