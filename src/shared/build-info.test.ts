@@ -36,6 +36,15 @@ describe("buildInfo", () => {
     expect(b.describe).toBe("anything");
   });
 
+  it("returns null for an out-of-range build time and keeps valid ones", () => {
+    for (const bad of ["2026-99-99T99:99:99Z", "2026-13-01T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:60:00Z", "2026-01-01T00:00:60Z"]) {
+      expect(buildInfo("herald", { env: { MARCH_BUILD_TIME: bad } }).built_at).toBeNull();
+    }
+    for (const ok of ["2028-02-29T23:59:59Z", "2026-11-20T07:00:41.123Z"]) {
+      expect(buildInfo("herald", { env: { MARCH_BUILD_TIME: ok } }).built_at).toBe(ok);
+    }
+  });
+
   it("reports CLI_VERSION and echoes the service", () => {
     const b = buildInfo("legate", { env: {} });
     expect(b.version).toBe(CLI_VERSION);
