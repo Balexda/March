@@ -524,7 +524,9 @@ function sliceTarget(
   if (!rt) {
     return { ok: false, result: { ok: false, status: 404, error: `unknown profile "${input.profile}".`, profiles: [...runtimes.keys()] } };
   }
-  const slice = rt.workingState?.slices?.[input.sliceId];
+  const slices = rt.workingState?.slices;
+  // Own entries only: `__proto__` / `constructor` must not resolve to an inherited object.
+  const slice = slices && Object.hasOwn(slices, input.sliceId) ? slices[input.sliceId] : undefined;
   if (!slice || typeof slice !== "object") {
     return { ok: false, result: { ok: false, status: 404, profile: input.profile, sliceId: input.sliceId, error: `unknown slice "${input.sliceId}".` } };
   }

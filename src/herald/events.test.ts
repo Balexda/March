@@ -624,6 +624,22 @@ describe("operator profile levers (#593)", () => {
 });
 
 describe("operator merge-now fold (#593)", () => {
+  it("a merge/relaunch request for __proto__ or constructor never writes onto Object.prototype", () => {
+    seq = 0;
+    const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
+    const out = foldEvents(
+      [
+        ev({ type: "slice.merge.requested", sliceId: "__proto__", prNumber: 1 }),
+        ev({ type: "slice.relaunch.requested", sliceId: "constructor" }),
+      ],
+      base,
+    );
+    expect(({} as any).mergeRequested).toBeUndefined();
+    expect((Object as any).relaunchRequested).toBeUndefined();
+    expect(out.slices.s1!.mergeRequested).toBeUndefined();
+    expect(out.slices.s1!.relaunchRequested).toBeUndefined();
+  });
+
   it("slice.merge.requested records a pending merge; the merged stage or a refusal clears it", () => {
     seq = 0;
     const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);

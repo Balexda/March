@@ -488,6 +488,13 @@ function sliceOf(state: SystemState, sliceId: string): SliceState {
   return (state.slices[sliceId] ??= { sliceId });
 }
 
+/** A slice the fold holds as an OWN entry. A plain-object lookup of `__proto__`
+ *  or `constructor` returns an inherited value, and writing a pending request
+ *  onto it would pollute every slice (#593). */
+function ownSlice(state: SystemState, sliceId: string): SliceState | undefined {
+  return Object.hasOwn(state.slices, sliceId) ? state.slices[sliceId] : undefined;
+}
+
 /** The PR number on an observed PR snapshot (the `queryPrForBabysit` shape), or
  *  null when the snapshot carries none (`undefined` / `{skipped}` / `{error}`). */
 export function prSnapshotNumber(pr: unknown): number | null {
@@ -757,7 +764,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       break;
     }
     case "slice.requeue.requested": {
-      const slice = state.slices[event.sliceId];
+      const slice = ownSlice(state, event.sliceId);
       // Requeue only acts on a slice the fold knows; a request for an unknown or
       // already-tombstoned slice is a no-op (nothing to discard).
       if (!slice || slice.recovered) break;
@@ -771,25 +778,25 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       break;
     }
     case "slice.requeue.refused": {
-      const slice = state.slices[event.sliceId];
+      const slice = ownSlice(state, event.sliceId);
       if (slice) delete slice.requeueRequested;
       break;
     }
     case "slice.merge.requested": {
-      const slice = state.slices[event.sliceId];
+      const slice = ownSlice(state, event.sliceId);
       // Like requeue: only a slice the fold knows (and has not tombstoned).
       if (!slice || slice.recovered) break;
       slice.mergeRequested = { seq: event.seq, prNumber: event.prNumber };
       break;
     }
     case "slice.relaunch.requested": {
-      const slice = state.slices[event.sliceId];
+      const slice = ownSlice(state, event.sliceId);
       if (!slice || slice.recovered) break;
       slice.relaunchRequested = { seq: event.seq };
       break;
     }
     case "slice.operator.refused": {
-      const slice = state.slices[event.sliceId];
+      const slice = ownSlice(state, event.sliceId);
       // Settle only the request this refusal names: one appended while the
       // refused attempt was in flight stays pending. (No requestSeq → legacy,
       // settles whatever is pending.)
