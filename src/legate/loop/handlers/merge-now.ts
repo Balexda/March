@@ -84,11 +84,13 @@ export async function apply(
     slice_id: sliceId,
     pr_number: prNumber,
   });
-  const refuse = (d: MergeNowDecision, reason: string) => {
+  // `stage` is the bounded march.failure_stage on the errored execution span:
+  // precondition (refused before acting), read (live PR lookup), merge (gh merge).
+  const refuse = (d: MergeNowDecision, reason: string, stage: "precondition" | "read" | "merge" = "precondition") => {
     handledSeqs(state.raw)[d.sliceId] = d.request.seq;
     res.mutated = true;
     ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "merge", reason, requestSeq: d.request.seq });
-    res.actions.push({ ...base(d.sliceId, d.request.prNumber), action: "operator-merge-refused", detail: reason });
+    res.actions.push({ ...base(d.sliceId, d.request.prNumber), action: "operator-merge-refused", detail: reason, failure_stage: stage });
   };
 
   for (const d of decisions) {
@@ -105,7 +107,7 @@ export async function apply(
     try {
       live = await deps.readPr(state.repoPath, prNumber, d.sliceId);
     } catch (err: any) {
-      refuse(d, `reading PR #${prNumber} failed: ${err?.message ?? String(err)}`);
+      refuse(d, `reading PR #${prNumber} failed: ${err?.message ?? String(err)}`, "read");
       res.failures.push({ slice_id: d.sliceId, error: `read PR #${prNumber}: ${err?.message ?? String(err)}` });
       continue;
     }
@@ -130,7 +132,7 @@ export async function apply(
       result = { merged: false, error: err?.message ?? String(err) };
     }
     if (!result.merged) {
-      refuse(d, `merging PR #${prNumber} failed: ${result.error ?? "unknown error"}`);
+      refuse(d, `merging PR #${prNumber} failed: ${result.error ?? "unknown error"}`, "merge");
       res.failures.push({ slice_id: d.sliceId, error: `merge PR #${prNumber}: ${result.error ?? "unknown error"}` });
       continue;
     }

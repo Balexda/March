@@ -214,6 +214,7 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
         "march.action": action,
         ...(event.pr_number != null ? { "march.pr_number": Number(event.pr_number) } : {}),
         ...(action !== "operator-merge" && event.detail ? { "march.error": String(event.detail) } : {}),
+        ...(action !== "operator-merge" ? { "march.failure_stage": String(event.failure_stage ?? "precondition") } : {}),
       },
     });
   } else if (event.kind === "steward_relaunch") {

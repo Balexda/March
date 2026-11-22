@@ -69,11 +69,15 @@ describe("emitActionEventSpan", () => {
     const emit = vi.fn();
     emitActionEventSpan({ kind: "operator-merge", slice_id: "s", action: "operator-merge", pr_number: 42 }, emit);
     emitActionEventSpan({ kind: "operator-merge", slice_id: "s", action: "operator-merge-refused", pr_number: 42, detail: "PR #42 has merge conflicts" }, emit);
+    emitActionEventSpan({ kind: "operator-merge", slice_id: "s", action: "operator-merge-refused", pr_number: 42, detail: "merging failed", failure_stage: "merge" }, emit);
     expect(emit.mock.calls.map((c) => [c[0].name, c[0].traceKey, c[0].root, c[0].error])).toEqual([
       ["legate.operator-merge", "s", false, false],
       ["legate.operator-merge", "s", false, true],
+      ["legate.operator-merge", "s", false, true],
     ]);
-    expect(emit.mock.calls[1][0].attributes).toMatchObject({ "march.pr_number": 42, "march.error": "PR #42 has merge conflicts" });
+    expect(emit.mock.calls[0][0].attributes["march.failure_stage"]).toBeUndefined();
+    expect(emit.mock.calls[1][0].attributes).toMatchObject({ "march.pr_number": 42, "march.error": "PR #42 has merge conflicts", "march.failure_stage": "precondition" });
+    expect(emit.mock.calls[2][0].attributes).toMatchObject({ "march.failure_stage": "merge" });
   });
 
   it("emits a legate.ghost-cleanup span keyed by the session id (no slice_id)", () => {
