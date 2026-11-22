@@ -756,6 +756,27 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
     );
   }
 
+  // The tick may have requeued/relaunched the slice during the send, replacing
+  // its warm entry with a new incarnation under the same id. Recording now would
+  // mark the old comment ids handled on the replacement, so refuse to record.
+  if (rt.workingState?.slices?.[input.sliceId] !== slice) {
+    return finishOperatorAction(
+      "resend_threads",
+      input,
+      {
+        ok: false,
+        status: 409,
+        profile: input.profile,
+        sliceId: input.sliceId,
+        delivered: true,
+        threadIds,
+        commentIds,
+        error: `delivered to session ${sessionId}, but the slice was replaced while sending — not recorded against the new incarnation.`,
+      },
+      { "march.failure_stage": "incarnation" },
+    );
+  }
+
   // Record it like babysit's review-fix so dedup, the round cap and the bounded
   // post-dispatch nudge all see this dispatch.
   const ts = now();
