@@ -1,5 +1,5 @@
 /**
- * @l0 @deterministic @ci
+ * @l1 @deterministic @ci
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -28,6 +28,7 @@ function run(cwd, env = {}) {
     cwd,
     env: { ...base, ...env },
     encoding: "utf8",
+    timeout: 10_000,
   });
 }
 

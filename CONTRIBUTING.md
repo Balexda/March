@@ -406,7 +406,7 @@ Before publishing a new version:
 1. All automated tests pass: `npm test` completes the sequential fail-fast aggregate deterministic PR gate over `npm run test:l0`, `npm run test:l1`, `npm run test:l2-cassette`, and `npm run test:l3-cassette`
 2. Agent tests (A1–A5) verified in a Claude Code session
 3. Human tests (H1–H2) verified in an interactive terminal
-4. Trigger the **Release** workflow (`.github/workflows/publish.yml`) with both test gate checkboxes checked and the `bump` input set (`patch`, `minor` or `major`; default `patch`). It creates the version commit, the `v<version>` tag and the GitHub Release first. npm publish runs last and is opt-in via the `publish_npm` input (default off)
+4. Trigger the **Release** workflow (`.github/workflows/publish.yml`) with `branch` set to `main` (the default; the tag, version commit and GitHub Release land on whichever branch you name, and step 5 deploys from `main`), both test gate checkboxes checked, and the `bump` input set (`patch`, `minor` or `major`; default `patch`). It creates the version commit, the `v<version>` tag and the GitHub Release first. npm publish runs last and is opt-in via the `publish_npm` input (default off)
 5. After the release, from up-to-date `main`, run `npm run deploy:local` to rebuild and roll the local stack
 
 See **[docs/testing-strategy.md § Cost policy](docs/testing-strategy.md#6-cost-policy)** for the principles, and the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) for the sequencing — scheduled stochastic runs and cassette refresh interact with the release flow once those milestones land.
