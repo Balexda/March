@@ -170,7 +170,6 @@ function classify(state: LoopState, sliceId: string, requested: boolean): Recove
   // once that budget is spent — a stopped steward is never "healthy".
   const sessionErrored = sessionPresent && isDeadSessionStatus(snap.status);
   const sessionHealthy = sessionPresent && !isDeadSessionStatus(snap.status);
-  const sessionGone = !sessionPresent;
 
   // Walk complete: the slice is no longer escalated and has a live steward —
   // babysit drives it from here. Idempotent / cold-start-safe (re-derived every
@@ -217,10 +216,13 @@ function classify(state: LoopState, sliceId: string, requested: boolean): Recove
     }
     // No errored session to recover in place (vanished, or alive-but-escalated):
     // rung 0 has nothing to do — go straight to the relaunch rung.
-    return relaunchRung(state, sliceId, slice, sessionGone, fresh);
+    return relaunchRung(state, sliceId, slice, !sessionHealthy, fresh);
   }
 
-  return relaunchRung(state, sliceId, slice, sessionGone, fresh);
+  // A listed-but-dead session (`error`/`stopped`) is as unavailable as a vanished
+  // one for the exhausted-relaunch descent, so the ladder still reaches
+  // confirm/nuke instead of re-preparing forever (#587).
+  return relaunchRung(state, sliceId, slice, !sessionHealthy, fresh);
 }
 
 /**

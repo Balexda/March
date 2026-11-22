@@ -398,3 +398,32 @@ describe("recovery: stopped steward sessions (#587)", () => {
     expect(d).toMatchObject({ action: "free-and-relaunch", removeSessionId: "w1", emitRung: 1 });
   });
 });
+
+describe("recovery: exhausted relaunch rung with a listed dead session (#587)", () => {
+  it("descends to confirm-relaunch instead of re-preparing forever", () => {
+    const state = withSession(
+      loopState({
+        raw: {
+          slices: { s1: { stage: "pr-open", recovery_rung: 1, branch: "feature/a", worker_session_id: "w1", pr: { number: 7 } } },
+          transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+        },
+      }),
+      "w1",
+      "stopped",
+    );
+    const [d] = assess(state);
+    expect(d).toMatchObject({ action: "confirm-relaunch", emitRung: 2 });
+  });
+
+  it("still completes for a live session", () => {
+    const state = withSession(
+      loopState({
+        raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, worker_session_id: "w1", pr: { number: 7 } } } },
+      }),
+      "w1",
+      "waiting",
+    );
+    const [d] = assess(state);
+    expect(d.action).toBe("complete");
+  });
+});
