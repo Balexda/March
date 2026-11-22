@@ -108,6 +108,11 @@ const DEFAULTS = {
   statusPollMs: 500,
 } as const;
 
+/** Is `group` the given group or one of its subgroups (`<group>/...`)? */
+function inGroup(group: string, scope: string): boolean {
+  return group === scope || group.startsWith(scope + "/");
+}
+
 /** Which sessions a sweep targets, honoring group/excludeGroups. `error` is
  *  always eligible; `stopped` only under explicit `sessionIds` targeting. */
 export function selectRecoverable(
@@ -122,7 +127,9 @@ export function selectRecoverable(
     // group is also given, both must match.
     if (ids) {
       if (s.status !== ERROR_STATUS && s.status !== STOPPED_STATUS) return false;
-      return ids.has(s.sessionId) && (!options.group || s.group === options.group);
+      // The group restriction also admits its subgroups (`legate-workers/forge`),
+      // matching how the legate classifies worker sessions.
+      return ids.has(s.sessionId) && (!options.group || inGroup(s.group, options.group));
     }
     if (s.status !== ERROR_STATUS) return false;
     if (options.group) return s.group === options.group;

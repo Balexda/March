@@ -303,3 +303,20 @@ describe("stopped sessions (#587)", () => {
     expect(report.recovered[0]).toMatchObject({ outcome: "still_error", finalStatus: "stopped" });
   });
 });
+
+describe("explicit-id group scope includes subgroups (#587)", () => {
+  it("admits a targeted session in a subgroup of the requested group, not a sibling group", () => {
+    const sessions = [
+      view({ sessionId: "sub", status: "stopped", group: "legate-workers/forge" }),
+      view({ sessionId: "base", status: "error", group: "legate-workers" }),
+      view({ sessionId: "other", status: "error", group: "legate-workers-x" }),
+    ];
+    expect(
+      selectRecoverable(sessions, {
+        profile: "p",
+        group: "legate-workers",
+        sessionIds: ["sub", "base", "other"],
+      }).map((s) => s.sessionId),
+    ).toEqual(["sub", "base"]);
+  });
+});
