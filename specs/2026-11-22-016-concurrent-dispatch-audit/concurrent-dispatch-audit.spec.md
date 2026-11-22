@@ -42,7 +42,7 @@ As a March operator, I want evidence that two dispatches can share a repository 
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | Verify isolation between concurrent dispatches | — | — |
+| US1 | Verify isolation between concurrent dispatches | — | specs/2026-11-22-016-concurrent-dispatch-audit/01-verify-concurrent-dispatch-isolation.tasks.md |
 
 ## Requirements
 
