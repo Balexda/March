@@ -259,6 +259,11 @@ function ensureInstruments(meter: Meter): void {
   // Zero baseline so rate() shows the first hit instead of waiting for a second.
   reviewRateLimits.add(0, { reviewer: "coderabbit" });
   reviewRateLimits.add(0, { reviewer: "copilot" });
+  // Zero baseline for every operator lever/outcome pair, so increase() shows the
+  // first request instead of waiting for a second (#593).
+  for (const action of OPERATOR_ACTIONS) {
+    for (const outcome of ["accepted", "refused"] as const) operatorActions.add(0, { action, outcome });
+  }
   // Owned PR-label reconciliations (march:opened / march:needs-human), by bounded
   // `label`, `op` and `outcome`.
   prLabels = meter.createCounter("march.legate.pr_labels", {
@@ -669,16 +674,18 @@ export function recordReviewRateLimit(reviewer: "coderabbit" | "copilot"): void 
 }
 
 /** The bounded operator lever names (#593) — a metric label, keep it closed. */
-export type OperatorAction =
-  | "recover"
-  | "respond"
-  | "requeue"
-  | "merge"
-  | "relaunch"
-  | "resend_threads"
-  | "tick"
-  | "pause"
-  | "resume";
+export const OPERATOR_ACTIONS = [
+  "recover",
+  "respond",
+  "requeue",
+  "merge",
+  "relaunch",
+  "resend_threads",
+  "tick",
+  "pause",
+  "resume",
+] as const;
+export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /** Count one operator lever request (#593). No-op when telemetry is disabled. */
 export function recordOperatorAction(action: OperatorAction, outcome: "accepted" | "refused"): void {
