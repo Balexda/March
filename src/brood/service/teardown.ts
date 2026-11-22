@@ -203,12 +203,15 @@ export async function teardownSession(
     return { id: primary.id, status: "torndown", steps, warnings };
   }
 
-  // Older in-progress rows lack a recorded decision. Require force when
-  // their pre-teardown state is unknown. The registry write precedes archiving.
+  // A stored force decision holds until teardown completes, even if a
+  // lifecycle PATCH has since moved the row out of `tearing-down`. Older
+  // in-progress rows lack a recorded decision; require force when their
+  // pre-teardown state is unknown. The registry write precedes archiving.
   const requiresForce =
     spawn &&
     (spawn.status === "running" ||
       spawn.status === "created" ||
+      spawn.teardownRequiresForce === true ||
       (spawn.status === "tearing-down" && spawn.teardownRequiresForce !== false));
   if (requiresForce && !request.force) {
     rejectTeardown(

@@ -286,6 +286,31 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     store.close();
   });
 
+  it("keeps requiring force after a lifecycle update moves an interrupted forced teardown out of tearing-down", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running" });
+    const failing = recordingDeps(homeDir, {
+      removeSteward: async () => ({ outcome: "failed", detail: "Castra unavailable", removedIds: [] }),
+    });
+    try {
+      const first = await teardownSession(store, spawnId, { force: true }, failing.deps);
+      expect(first.status).toBe("tearing-down");
+      store.update(spawnId, { status: "stopped" });
+      const rec = recordingDeps(homeDir);
+      const before = store.list();
+      await expect(teardownSession(store, stewardId, {}, rec.deps))
+        .rejects.toBeInstanceOf(BroodConflictError);
+      expect(store.list()).toEqual(before);
+      expect(rec.calls).toEqual([]);
+      expect((await teardownSession(store, spawnId, { force: true }, rec.deps)).status)
+        .toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
   it("preserves force admission and cleanup rationale across restart without an archive", async () => {
     const homeDir = makeHome();
     const store = new SessionStore({ homeDir });

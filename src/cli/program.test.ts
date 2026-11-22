@@ -280,6 +280,14 @@ describe("march CLI", () => {
           code: 1, stdout: "", stderr: expect.stringContaining(diagnostic),
         });
       }
+      for (const [id, diagnostic] of [
+        ["pending", "Pass force"], ["missing", "is not tracked by Brood"],
+      ] as const) {
+        const failed = await runTeardown(url, id, "--json").catch((err) => err);
+        expect(failed.code).toBe(1);
+        expect(JSON.parse(failed.stdout).error).toContain(diagnostic);
+        expect(failed.stderr).toContain(diagnostic);
+      }
       expect(store.list()).toEqual(before);
       expect(calls).toEqual([]);
       expect(fs.existsSync(broodArchiveDir("live", homeDir))).toBe(false);

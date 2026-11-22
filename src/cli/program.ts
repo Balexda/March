@@ -2308,9 +2308,9 @@ brood
           // transient Brood outage). Exit non-zero so the caller (the legate
           // loop) defers and retries rather than archiving the slice over an
           // orphaned steward/container/worktree.
-          process.stderr.write(
-            `Session "${id}" is not tracked by Brood; cannot confirm teardown.\n`,
-          );
+          const message = `Session "${id}" is not tracked by Brood; cannot confirm teardown.`;
+          if (opts.json) console.log(JSON.stringify({ error: message }));
+          process.stderr.write(message + "\n");
           process.exitCode = ERROR;
           return;
         }
@@ -2318,6 +2318,7 @@ brood
           err instanceof BroodClientError
             ? err.message
             : (err as Error).message;
+        if (opts.json) console.log(JSON.stringify({ error: message }));
         process.stderr.write(message + "\n");
         process.exitCode = ERROR;
       }
