@@ -58,7 +58,7 @@ As an operator, I want one list of attachable names and tracked spawns so I can 
 ### Edge Cases
 
 - A tracked spawn ID takes precedence over an equal attach name, regardless of spawn status. `march brood sessions` lists such a name as unavailable. This feature defines no alternative selector, so the session cannot be attached by that name until it is renamed.
-- Target disappearance between resolution and attachment produces the same failure as an unavailable target. Attachment uses exact matching.
+- Target disappearance between resolution and attachment produces the same failure as an unavailable target. Attachment uses the stable session ID resolved by Castra, not the name, so a replacement session with the same name is never attached.
 - A healthy tmux installation with no running session server or no eligible sessions yields an empty interactive inventory. Missing tmux or a permission failure is an inventory error.
 
 ## Dependency Order
@@ -76,7 +76,7 @@ As an operator, I want one list of attachable names and tracked spawns so I can 
 
 - **FR-001 (US1, US2)**: The operator documentation MUST define `march/<name>`, the host-terminal requirement, and the `<name>` argument accepted by `march brood attach`.
 - **FR-002 (US1)**: The CLI MUST reject tracked spawn IDs before interactive attachment. If it cannot check whether the input is a spawn ID, it MUST fail before handoff.
-- **FR-003 (US1)**: The CLI MUST delegate lookup of an exact live interactive target to Castra and hand the operator's terminal to that target. Detach MUST leave the target running.
+- **FR-003 (US1)**: The CLI MUST delegate lookup of an exact live interactive target to Castra and hand the operator's terminal to that target by its stable session ID. Detach MUST leave the target running.
 - **FR-004 (US1, US2)**: Lookup and inventory calls MUST have bounded failure paths and actionable diagnostics. Successful attachment lasts until normal detach or termination of the terminal session.
 - **FR-005 (US2)**: The CLI MUST present Castra's live `march/` inventory and Brood's tracked spawn results in a single read-only view. The view MUST distinguish a successful empty result from an unavailable source. It MUST mark interactive names that collide with tracked spawn IDs as unavailable.
 
