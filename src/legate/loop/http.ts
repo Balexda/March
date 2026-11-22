@@ -189,10 +189,11 @@ function readTarget(request: FastifyRequest): { profile: string; sliceId: string
   const query = (request.query ?? {}) as Record<string, string | undefined>;
   const body = (request.body ?? {}) as Record<string, unknown>;
   const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
-  const profile =
-    (typeof body.profile === "string" && body.profile.length > 0 && body.profile) ||
-    (typeof query.profile === "string" && query.profile.length > 0 && query.profile) ||
-    "";
+  // Validate every supplied profile before picking one: a malformed body value
+  // must not fall through to `?profile=` (or widen a profile lever to all).
+  const valid = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+  const malformed = (body.profile !== undefined && !valid(body.profile)) || (query.profile !== undefined && !valid(query.profile));
+  const profile = malformed ? "" : valid(body.profile) ? body.profile : valid(query.profile) ? query.profile : "";
   return { profile, sliceId, body };
 }
 

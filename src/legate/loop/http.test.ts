@@ -702,6 +702,9 @@ describe("profile levers: tick / pause / resume (#593)", () => {
       expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { profile: 123 } })).statusCode).toBe(400);
       expect((await app.inject({ method: "POST", url: "/dispatch/resume", payload: { profile: "" } })).statusCode).toBe(400);
       expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=", payload: {} })).statusCode).toBe(400);
+      // Every supplied profile is validated: a bad body value can't fall back to ?profile=.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=march", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=", payload: { profile: "march" } })).statusCode).toBe(400);
       // Over Herald's attribution limits: refused before the lever runs.
       expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: "x".repeat(129) } })).statusCode).toBe(400);
       expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { reason: "x".repeat(1001) } })).statusCode).toBe(400);
@@ -765,6 +768,8 @@ describe("POST /slices/:sliceId/relaunch (#593)", () => {
       expect((await app.inject({ method: "POST", url: "/slices/s1/relaunch?profile=march", payload: { operator: "ana" } })).statusCode).toBe(202);
       expect(seen[0]).toEqual({ profile: "march", sliceId: "s1", operator: "ana" });
       expect((await app.inject({ method: "POST", url: "/slices/nopr/relaunch", payload: { profile: "march" } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/relaunch?profile=march", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect(seen).toHaveLength(2);
       expect((await bare.inject({ method: "POST", url: "/slices/s1/relaunch", payload: { profile: "march" } })).statusCode).toBe(501);
     } finally {
       await app.close();
