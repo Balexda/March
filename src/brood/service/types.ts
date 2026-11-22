@@ -121,6 +121,9 @@ export interface SessionRecord {
   exitCode?: number;
   /** Human-readable failure context (closes the dropped-error gap in spawn-record). */
   failureReason?: string;
+  teardownReason?: string;
+  /** Durable admission decision for an in-progress teardown. */
+  teardownRequiresForce?: boolean;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -164,6 +167,8 @@ export interface RegisterSessionInput {
 
 /** Mutable fields accepted on a lifecycle update. Only defined keys are applied. */
 export interface UpdateSessionInput {
+  teardownReason?: string;
+  teardownRequiresForce?: boolean;
   status?: SessionStatus;
   containerId?: string;
   imageId?: string;
@@ -189,11 +194,11 @@ export interface ListSessionsFilter {
 
 /** Body of `POST /sessions/:id/teardown`. */
 export interface TeardownRequest {
-  /** Tear down even a `running` session. */
+  /** Permit teardown of a created or running spawn and protected retries. */
   force?: boolean;
-  /** SIGKILL the container immediately instead of `docker stop` then `rm`. */
+  /** Explicit kill mode. Currently rejected as unsupported. */
   kill?: boolean;
-  /** Operator-supplied reason, recorded as `failureReason`. */
+  /** Operator-supplied reason, recorded as `teardownReason`. */
   reason?: string;
 }
 

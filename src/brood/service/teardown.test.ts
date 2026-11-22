@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { broodArchiveDir, SessionStore } from "./store.js";
@@ -285,6 +286,81 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     store.close();
   });
 
+  it("keeps requiring force after a lifecycle update moves an interrupted forced teardown out of tearing-down", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running" });
+    const failing = recordingDeps(homeDir, {
+      removeSteward: async () => ({ outcome: "failed", detail: "Castra unavailable", removedIds: [] }),
+    });
+    try {
+      const first = await teardownSession(store, spawnId, { force: true }, failing.deps);
+      expect(first.status).toBe("tearing-down");
+      store.update(spawnId, { status: "stopped" });
+      const rec = recordingDeps(homeDir);
+      const before = store.list();
+      await expect(teardownSession(store, stewardId, {}, rec.deps))
+        .rejects.toBeInstanceOf(BroodConflictError);
+      expect(store.list()).toEqual(before);
+      expect(rec.calls).toEqual([]);
+      expect((await teardownSession(store, spawnId, { force: true }, rec.deps)).status)
+        .toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves force admission and cleanup rationale across restart without an archive", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running", failureReason: "original failure" });
+    const archive = broodArchiveDir(spawnId, homeDir);
+    fs.mkdirSync(path.dirname(archive), { recursive: true });
+    fs.writeFileSync(archive, "blocks archive directory creation");
+    const unavailable = recordingDeps(homeDir, {
+      removeSteward: async () => ({ outcome: "failed", detail: "Castra unavailable", removedIds: [] }),
+    });
+    try {
+      const first = await teardownSession(store, spawnId, {
+        force: true, reason: "operator cleanup",
+      }, unavailable.deps);
+      expect(first.status).toBe("tearing-down");
+      expect(first.steps[0]).toMatchObject({ step: "archive", outcome: "failed" });
+      expect(fs.existsSync(path.join(archive, "record.json"))).toBe(false);
+    } finally {
+      store.close();
+    }
+
+    const restarted = new SessionStore({ homeDir });
+    const rec = recordingDeps(homeDir);
+    try {
+      const before = restarted.list();
+      await expect(teardownSession(restarted, stewardId, {
+        reason: "rejected overwrite",
+      }, rec.deps)).rejects.toBeInstanceOf(BroodConflictError);
+      expect(restarted.list()).toEqual(before);
+      expect(rec.calls).toEqual([]);
+      fs.unlinkSync(archive);
+      expect((await teardownSession(restarted, stewardId, { force: true }, rec.deps)).status)
+        .toBe("torndown");
+    } finally {
+      restarted.close();
+    }
+
+    const reopened = new SessionStore({ homeDir });
+    try {
+      expect(reopened.get(spawnId)).toMatchObject({
+        status: "torndown",
+        failureReason: "original failure",
+        teardownReason: "operator cleanup",
+      });
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("writes a record snapshot + container log to the archive dir", async () => {
     const home = makeHome();
     const store = new SessionStore({ dbPath: ":memory:" });
@@ -390,6 +466,34 @@ describe.skipIf(!sqliteAvailable)("teardownSession tracing", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     initOtel({});
+  });
+
+  it("ends rejected teardown spans with errors under the inbound parent", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running" });
+    const traceId = "12345678901234567890123456789012";
+    const spanId = "1234567890123456";
+    const { deps } = recordingDeps(makeHome(), { traceparent: `00-${traceId}-${spanId}-01` });
+    try {
+      await expect(teardownSession(store, "missing", {}, deps)).rejects.toThrow(/No session/);
+      await expect(teardownSession(store, stewardId, {}, deps)).rejects.toThrow(/Pass force/);
+      await expect(teardownSession(store, spawnId, { kill: true, force: true }, deps))
+        .rejects.toThrow(/unsupported/);
+      expect(created.map((span) => span.attributes["march.teardown.outcome"]))
+        .toEqual(["not-found", "conflict", "unsupported-mode"]);
+      for (const span of created) {
+        expect(span.name).toBe("brood.teardown");
+        expect(span.ended).toBe(true);
+        expect(span.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span.spanContext().traceId).toBe(traceId);
+        expect(span.parentSpanContext?.spanId).toBe(spanId);
+      }
+    } finally {
+      store.close();
+    }
   });
 
   it("child-spans each reclamation sub-step under brood.teardown with an outcome", async () => {
