@@ -15,7 +15,7 @@
 
 ### Tasks
 
-- [ ] **Enforce teardown admission across retries**
+- [x] **Enforce teardown admission across retries**
 
   Apply the force guard in Brood before registry changes or cleanup. Resolve steward requests to the owning spawn before applying the guard. Cover AS 1.2–1.4 at the service boundary.
 
@@ -26,7 +26,7 @@
   - A valid forced request proceeds without confirmation. Reject explicit kill requests before cleanup, even with force, until Brood supports distinct stop modes. Report the existing removal behavior accurately.
   - New rejection paths emit errored teardown spans and honor inbound trace context.
 
-- [ ] **Preserve cleanup reasons on lifecycle records**
+- [x] **Preserve cleanup reasons on lifecycle records**
 
   Persist the accepted request's cleanup reason through Brood's registry path for AS 1.5. Keep the failure diagnostic available to existing readers.
 
@@ -35,7 +35,7 @@
   - A failed session keeps its original `failureReason` alongside the cleanup reason. A retry without a reason preserves the recorded reason.
   - Existing records without cleanup reasons remain readable. Rejected requests leave existing reasons intact.
 
-- [ ] **Report teardown results through the CLI**
+- [x] **Report teardown results through the CLI**
 
   Keep `march brood teardown <id>` backed by the Brood client for AS 1.1–1.4. Align help and affected subsystem contracts with the supported flags, rejections, and result shape.
 

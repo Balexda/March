@@ -37,6 +37,14 @@ export class BroodConflictError extends Error {
   }
 }
 
+/** Brood cannot honor the requested teardown mode. Routes map this to 400. */
+export class BroodUnsupportedModeError extends Error {
+  constructor() {
+    super("Explicit kill mode is unsupported. Omit kill to use immediate container removal.");
+    this.name = "BroodUnsupportedModeError";
+  }
+}
+
 /** Side-effecting operations, injectable so teardown is unit-testable. */
 export interface TeardownDeps {
   /**
@@ -138,10 +146,17 @@ export async function teardownSession(
   const d = resolveDeps(deps);
   const target = store.get(id);
   if (!target) {
-    throw new BroodNotFoundError(`No session with id "${id}".`);
-  }
-  if (target.status === "torndown") {
-    return { id: target.id, status: "torndown", steps: [], warnings: [] };
+    const span = startBroodSpan({
+      name: "brood.teardown",
+      key: id,
+      traceparent: deps.traceparent,
+      attributes: { "march.session.id": id },
+    });
+    rejectTeardown(
+      span,
+      "not-found",
+      new BroodNotFoundError(`No session with id "${id}".`),
+    );
   }
 
   // Resolve the spawn<->steward group. The spawn row carries the canonical
@@ -162,17 +177,6 @@ export async function teardownSession(
   // `primary` owns the worktree/branch/container; fall back to the target row.
   const primary: SessionRecord = spawn ?? target;
 
-  // Refuse to tear down a still-live spawn container without `force`.
-  if (
-    spawn &&
-    (spawn.status === "running" || spawn.status === "created") &&
-    !request.force
-  ) {
-    throw new BroodConflictError(
-      `Spawn "${spawn.id}" is ${spawn.status}; pass force to tear it down.`,
-    );
-  }
-
   const steps: TeardownStep[] = [];
   const warnings: string[] = [];
   const startMs = Date.now();
@@ -191,10 +195,36 @@ export async function teardownSession(
     },
   });
 
+  if (request.kill) {
+    rejectTeardown(span, "unsupported-mode", new BroodUnsupportedModeError());
+  }
+  if (primary.status === "torndown" && (!steward || steward.status === "torndown")) {
+    span.end();
+    return { id: primary.id, status: "torndown", steps, warnings };
+  }
+
+  // Older in-progress rows lack a recorded decision. Require force when
+  // their pre-teardown state is unknown. The registry write precedes archiving.
+  const requiresForce =
+    spawn &&
+    (spawn.status === "running" ||
+      spawn.status === "created" ||
+      (spawn.status === "tearing-down" && spawn.teardownRequiresForce !== false));
+  if (requiresForce && !request.force) {
+    rejectTeardown(
+      span,
+      "conflict",
+      new BroodConflictError(
+        `Spawn "${spawn.id}" is ${spawn.status}. Pass force to tear it down.`,
+      ),
+    );
+  }
+
   // Mark the group as tearing-down so a concurrent reader sees the transition.
   store.update(primary.id, {
     status: "tearing-down",
-    ...(request.reason ? { failureReason: request.reason } : {}),
+    teardownReason: request.reason,
+    teardownRequiresForce: requiresForce,
   });
   if (steward && steward.id !== primary.id) {
     store.update(steward.id, { status: "tearing-down" });
@@ -230,7 +260,11 @@ export async function teardownSession(
     if (spawn) {
       try {
         d.substrate.removeSpawn(spawn.id);
-        steps.push({ step: "container", outcome: "ok" });
+        steps.push({
+          step: "container",
+          outcome: "ok",
+          detail: "immediate removal attempted",
+        });
       } catch (err) {
         steps.push({
           step: "container",
@@ -393,6 +427,16 @@ export async function teardownSession(
   });
 
   return { id: primary.id, status: finalStatus, steps, warnings };
+}
+
+function rejectTeardown(
+  span: BroodChildSpan,
+  outcome: "not-found" | "unsupported-mode" | "conflict",
+  error: Error,
+): never {
+  span.setAttributes({ "march.teardown.outcome": outcome });
+  span.end({ error: true });
+  throw error;
 }
 
 function message(err: unknown): string {

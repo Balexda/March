@@ -26,6 +26,7 @@ import {
 import {
   BroodConflictError,
   BroodNotFoundError,
+  BroodUnsupportedModeError,
   teardownSession,
 } from "./teardown.js";
 import type {
@@ -569,6 +570,10 @@ export async function registerRoutes(
       }
       if (err instanceof BroodConflictError) {
         reply.code(409);
+        return { error: err.message };
+      }
+      if (err instanceof BroodUnsupportedModeError) {
+        reply.code(400);
         return { error: err.message };
       }
       reply.code(500);

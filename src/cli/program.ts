@@ -2264,15 +2264,16 @@ brood
 brood
   .command("teardown <id>")
   .description(
-    "Tear down a session (container, steward, worktree, branch) via Brood",
+    "Tear down a session via Brood, with immediate container removal",
   )
-  .option("--force", "Tear down even a running spawn")
-  .option("--kill", "SIGKILL the container instead of graceful stop")
-  .option("--reason <reason>", "Reason recorded on the torn-down session")
+  .option("--force", "Permit teardown of a created or running spawn and protected retries")
+  .option("--kill", "Request explicit kill mode (currently unsupported by Brood)")
+  .option("--reason <reason>", "Record a cleanup reason on the session")
+  .option("--json", "Print the service result as JSON")
   .action(
     async (
       id: string,
-      opts: { force?: boolean; kill?: boolean; reason?: string },
+      opts: { force?: boolean; kill?: boolean; reason?: string; json?: boolean },
     ) => {
       commandHandled = true;
       const { BroodClient, BroodClientError, BroodNotFoundError } = await import(
@@ -2284,15 +2285,20 @@ brood
           kill: opts.kill,
           reason: opts.reason,
         });
-        for (const step of result.steps) {
-          console.log(
-            `${step.step}: ${step.outcome}${step.detail ? ` (${step.detail})` : ""}`,
-          );
+        if (opts.json) {
+          console.log(JSON.stringify(result));
+        } else {
+          console.log(`${result.id}: ${result.status}`);
+          for (const step of result.steps) {
+            console.log(
+              `${step.step}: ${step.outcome}${step.detail ? ` (${step.detail})` : ""}`,
+            );
+          }
+          for (const warning of result.warnings) {
+            process.stderr.write(`warning: ${warning}\n`);
+          }
         }
-        for (const warning of result.warnings) {
-          process.stderr.write(`warning: ${warning}\n`);
-        }
-        process.exitCode = SUCCESS;
+        process.exitCode = result.status === "torndown" ? SUCCESS : ERROR;
       } catch (err) {
         if (err instanceof BroodNotFoundError) {
           // A 404 means Brood has no record of this session — NOT that cleanup

@@ -12,7 +12,8 @@ import { promisify } from "node:util";
 import Fastify from "fastify";
 import { registerRoutes } from "../brood/service/routes.js";
 import { sqliteAvailable } from "../brood/service/sqlite.js";
-import { SessionStore } from "../brood/service/store.js";
+import { broodArchiveDir, SessionStore } from "../brood/service/store.js";
+import { teardownSession } from "../brood/service/teardown.js";
 import { registerProfileRoutes } from "../herald/profiles/routes.js";
 import { buildServer as buildHeraldServer } from "../herald/service/server.js";
 import { ProfileStore } from "../herald/profiles/store.js";
@@ -216,6 +217,113 @@ describe("march CLI", () => {
       expect(result.stdout).toContain(flag);
     }
   });
+
+  it.skipIf(!sqliteAvailable)("renders real Brood teardown results and admission errors", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const app = Fastify();
+    const homeDir = makeTmpDir();
+    const calls: string[] = [];
+    let defer = false;
+    const runTeardown = (url: string, id: string, ...flags: string[]) =>
+      execFileAsync(process.execPath, [CLI_PATH, "brood", "teardown", id, ...flags], {
+        env: { ...process.env, HOME: homeDir, MARCH_BROOD_URL: url },
+        timeout: 5000,
+      });
+
+    let url: string;
+    try {
+      for (const [id, status] of [
+        ["stopped", "stopped"], ["deferred", "failed"],
+        ["live", "running"], ["pending", "created"],
+      ] as const) {
+        store.register({
+          id, kind: "spawn", status, repoPath: "/repo",
+          worktreePath: `/wt/${id}`, branch: `topic/${id}`,
+        });
+        store.register({ id: `${id}-steward`, kind: "steward", parentId: id });
+      }
+      store.update("deferred", { failureReason: "spawn failed" });
+      await registerRoutes(app, {
+        store,
+        teardown: (id, request, traceparent) => teardownSession(store, id, request, {
+          homeDir, traceparent,
+          pathExists: () => true,
+          substrate: {
+            removeSpawn: (spawnId) => { calls.push(spawnId); },
+            removeWorkspace: () => ({ worktreeRemoved: true, branchDeleted: true }),
+          },
+          removeSteward: async () => defer
+            ? { outcome: "failed", detail: "Castra unavailable", removedIds: [] }
+            : { outcome: "removed", removedIds: ["steward"] },
+        }),
+      });
+      url = await app.listen({ host: "127.0.0.1", port: 0 });
+
+      const before = store.list();
+      for (const [id, payload, statusCode] of [
+        ["pending", {}, 409], ["live", {}, 409], ["live-steward", {}, 409],
+        ["live", { force: true, kill: true, reason: "rejected" }, 400],
+        ["missing", {}, 404],
+      ] as const) {
+        const rejected = await app.inject({
+          method: "POST", url: `/sessions/${id}/teardown`, payload,
+        });
+        expect(rejected.statusCode).toBe(statusCode);
+      }
+      for (const [id, flags, diagnostic] of [
+        ["pending", [], "Pass force"],
+        ["live-steward", [], "Pass force"],
+        ["live", ["--force", "--kill"], "kill mode is unsupported"],
+        ["missing", [], "is not tracked by Brood"],
+      ] as const) {
+        await expect(runTeardown(url, id, ...flags)).rejects.toMatchObject({
+          code: 1, stdout: "", stderr: expect.stringContaining(diagnostic),
+        });
+      }
+      expect(store.list()).toEqual(before);
+      expect(calls).toEqual([]);
+      expect(fs.existsSync(broodArchiveDir("live", homeDir))).toBe(false);
+
+      const completed = await runTeardown(url, "stopped");
+      expect(completed.stdout.trim().split("\n")).toEqual([
+        "stopped: torndown", "archive: ok", "container: ok (immediate removal attempted)",
+        "steward: ok", "worktree: ok", "branch: ok",
+      ]);
+      expect(completed.stderr).toBe("");
+
+      const forced = await runTeardown(url, "live-steward", "--force", "--json", "--reason", "operator cleanup");
+      expect(JSON.parse(forced.stdout)).toEqual({
+        id: "live", status: "torndown", warnings: [],
+        steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
+          expect.objectContaining({ step, outcome: "ok" })),
+      });
+      expect(store.get("live")?.teardownReason).toBe("operator cleanup");
+
+      defer = true;
+      await expect(runTeardown(url, "deferred", "--reason", "reclaim failed spawn")).rejects.toMatchObject({
+        code: 1, stdout: expect.stringContaining("deferred: tearing-down"),
+        stderr: expect.stringContaining("warning: steward removal failed: Castra unavailable"),
+      });
+      const deferred = await runTeardown(url, "deferred", "--json").catch((err) => err);
+      expect(deferred.code).toBe(1);
+      expect(deferred.stderr).toBe("");
+      expect(JSON.parse(deferred.stdout)).toMatchObject({
+        id: "deferred", status: "tearing-down",
+        steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
+          expect.objectContaining({ step })),
+        warnings: ["steward removal failed: Castra unavailable"],
+      });
+      expect(store.get("deferred")).toMatchObject({
+        failureReason: "spawn failed", teardownReason: "reclaim failed spawn",
+      });
+    } finally {
+      await app.close();
+      store.close();
+    }
+    await expect(runTeardown(url, "live")).rejects.toMatchObject({
+      code: 1, stdout: "", stderr: expect.stringContaining("Could not reach the brood service"),
+    });
+  }, 15000);
 
   it.skipIf(!sqliteAvailable)("lists service-owned Brood read views", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });

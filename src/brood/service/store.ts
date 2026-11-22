@@ -55,6 +55,8 @@ const COLUMNS = [
   "image_id",
   "exit_code",
   "failure_reason",
+  "teardown_reason",
+  "teardown_requires_force",
   "created_at",
   "updated_at",
   "started_at",
@@ -80,6 +82,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   image_id             TEXT,
   exit_code            INTEGER,
   failure_reason       TEXT,
+  teardown_reason      TEXT,
+  teardown_requires_force INTEGER,
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL,
   started_at           TEXT,
@@ -149,6 +153,7 @@ function rowToRecord(row: SqliteRow): SessionRecord {
     ["backend", "backend"],
     ["imageId", "image_id"],
     ["failureReason", "failure_reason"],
+    ["teardownReason", "teardown_reason"],
     ["startedAt", "started_at"],
     ["stoppedAt", "stopped_at"],
     ["torndownAt", "torndown_at"],
@@ -158,6 +163,9 @@ function rowToRecord(row: SqliteRow): SessionRecord {
     if (value != null) {
       (record as unknown as Record<string, unknown>)[field] = value;
     }
+  }
+  if (row.teardown_requires_force != null) {
+    record.teardownRequiresForce = row.teardown_requires_force === 1;
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
   if (typeof row.extraction_result_json === "string") {
@@ -187,6 +195,8 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
     record.imageId ?? null,
     record.exitCode ?? null,
     record.failureReason ?? null,
+    record.teardownReason ?? null,
+    record.teardownRequiresForce == null ? null : Number(record.teardownRequiresForce),
     record.createdAt,
     record.updatedAt,
     record.startedAt ?? null,
@@ -231,6 +241,12 @@ export class SessionStore implements SessionRepository {
       .all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "extraction_result_json")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN extraction_result_json TEXT;");
+    }
+    if (!columns.some((column) => column.name === "teardown_reason")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN teardown_reason TEXT;");
+    }
+    if (!columns.some((column) => column.name === "teardown_requires_force")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN teardown_requires_force INTEGER;");
     }
     const row = this.db
       .prepare("SELECT version FROM schema_meta LIMIT 1")
