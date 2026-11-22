@@ -125,10 +125,15 @@ This follows the [March vision](../../vision.md) and
 (operator at most 128 characters, note at most 1000) on any event (#593).
 Herald strips it from the payload and stamps `operator`/`note` on the event
 envelope without the `admin` flag. The fields come back on `GET /events` and
-are absent on the loop's own events. The reducer never reads them. The object
-is nested so it cannot collide with an event-body field of the same name, such
-as `slice.requeue.requested.operator`. Legate uses it for every operator lever
-it relays.
+are absent on the loop's own events. The request is nested so a client can send
+it beside an event-body field of the same name. The stored payload keeps the body
+field, but the returned event is flat, so an envelope `operator` replaces a body
+`operator` there. This affects only `slice.requeue.requested`, whose body
+`operator` (from #605) predates attribution: its folded
+`requeueRequested.operator` is therefore the envelope value whenever attribution
+is present. Legate fills both from the same operator input. The reducer reads no
+other attribution field. Legate uses attribution for every operator lever it
+relays.
 
 The operator levers add these event types:
 
