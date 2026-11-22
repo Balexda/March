@@ -169,3 +169,80 @@ describe("castra-recover apply", () => {
     expect(res.actions).toEqual([]);
   });
 });
+
+describe("castra-recover stopped stewards (#587)", () => {
+  const slices = (over: Record<string, any> = {}) => ({
+    "slice-a": { stage: "pr-open", worker_session_id: "w1", pr: { number: 7 } },
+    ...over,
+  });
+
+  it("targets a stopped session that stewards a live pr-open slice", () => {
+    const state = loopState([sess("w1", "stopped")], { raw: { slices: slices() } });
+    expect(assess(state)).toEqual({ group: "legate-workers", sessionIds: ["w1"] });
+  });
+
+  it("targets a stopped steward behind an escalated slice", () => {
+    const state = loopState([sess("w1", "stopped")], {
+      raw: { slices: slices({ "slice-a": { stage: "escalated", worker_session_id: "w1" } }) },
+    });
+    expect(assess(state)).toEqual({ group: "legate-workers", sessionIds: ["w1"] });
+  });
+
+  it("ignores a stopped session no live slice depends on", () => {
+    expect(assess(loopState([sess("w9", "stopped")], { raw: { slices: slices() } }))).toBeNull();
+    // Terminal / archived slices don't count either.
+    const done = loopState([sess("w1", "stopped")], {
+      raw: { slices: slices({ "slice-a": { stage: "merged", worker_session_id: "w1" } }) },
+    });
+    expect(assess(done)).toBeNull();
+    const archived = loopState([sess("w1", "stopped")], {
+      raw: { slices: slices({ "slice-a": { stage: "pr-open", worker_session_id: "w1", archived: true } }) },
+    });
+    expect(assess(archived)).toBeNull();
+  });
+
+  it("throttles a stopped steward at the attempt cap", () => {
+    const state = loopState([sess("w1", "stopped")], {
+      raw: { slices: slices(), castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS } },
+    });
+    expect(assess(state)).toBeNull();
+  });
+
+  it("marks a still-stopped steward recovery_pending while under budget", async () => {
+    const state = loopState([sess("w1", "stopped")], { raw: { slices: slices() } });
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "stopped" })],
+    }));
+    await apply(assess(state), c, state);
+    expect(state.sessionsById!.get("w1").recovery_pending).toBe(true);
+    expect((state.raw as any).castra_recover_attempts.w1).toBe(1);
+  });
+});
+
+describe("castra-recover: unconfirmed stopped at the cap (#587)", () => {
+  it("keeps a stopped session pending on the tick it hit the cap, so relaunch waits a tick", async () => {
+    const state = loopState([sess("w1", "stopped")], {
+      raw: {
+        slices: { "slice-a": { stage: "pr-open", worker_session_id: "w1" } },
+        castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS - 1 },
+      },
+    });
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "stopped" })],
+    }));
+    await apply(assess(state), c, state);
+    expect((state.raw as any).castra_recover_attempts.w1).toBe(MAX_RECOVER_ATTEMPTS);
+    expect(state.sessionsById!.get("w1").recovery_pending).toBe(true);
+  });
+
+  it("still clears pending for an errored session at the cap so babysit can escalate", async () => {
+    const state = loopState([sess("w1", "error")], {
+      raw: { castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS - 1 } },
+    });
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "error" })],
+    }));
+    await apply(assess(state), c, state);
+    expect(state.sessionsById!.get("w1").recovery_pending).toBeUndefined();
+  });
+});

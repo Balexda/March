@@ -180,6 +180,27 @@ describe("coordinator runTick", () => {
     expect(out.tick.strandedCount).toBe(1);
   });
 
+  it("counts a steward whose session is listed but stopped/errored as stranded (#587)", async () => {
+    const state = makeState();
+    state.raw.slices = {
+      stopped: { stage: "pr-open", worker_session_id: "w-stopped" },
+      errored: { stage: "pr-in-fix", worker_session_id: "w-err" },
+      healthy: { stage: "pr-open", worker_session_id: "w-ok" },
+    } as any;
+    state.slices = state.raw.slices;
+    state.sessions = [
+      { id: "w-stopped", group: "legate-workers", status: "stopped" },
+      { id: "w-err", group: "legate-workers", status: "error" },
+      { id: "w-ok", group: "legate-workers", status: "waiting" },
+    ] as any;
+    state.sessionsById = new Map(state.sessions.map((s: any) => [s.id, s]));
+    state.perSlice = {};
+
+    const out = await runTick(deps(state));
+
+    expect(out.tick.strandedCount).toBe(2);
+  });
+
   it("drives the dispatch completion + selection seams", async () => {
     const state = makeState();
     const d = deps(state);

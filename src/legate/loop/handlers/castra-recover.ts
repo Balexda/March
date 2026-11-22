@@ -1,6 +1,7 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
+import { STEWARD_STAGES } from "../pure/slice.js";
 
 /**
  * Castra session recovery (#castra-recover). After a host reboot the worker
@@ -13,6 +14,17 @@ import { isWorkerSession } from "../pure/session.js";
  * from summary" picker (`POST /v1/sessions/recover`), then reflects the
  * recovered statuses back into THIS tick's snapshot so the later handlers see
  * live sessions rather than re-escalating ones the loop just fixed.
+ *
+ * Stopped stewards (#587): after a long host pause agent-deck can report a
+ * steward as `stopped` rather than `error`. Such a session is still LISTED, so
+ * relaunch treats it as present and babysit can't reach it — the PR behind it
+ * stalls. This handler also restarts a `stopped` worker session, but ONLY one
+ * that is the `worker_session_id` of a live slice (steward stage or escalated):
+ * a stopped session nothing depends on may have been stopped on purpose. Castra
+ * only restarts stopped sessions on explicit id targeting, which this sweep
+ * always uses. Same budget/throttle as errored ones; once it is spent, relaunch
+ * replaces the stopped steward (it ignores a stopped session not marked
+ * `recovery_pending`).
  *
  * Throttle: a session that stays errored after a restart (`still_error`) must
  * not be restart-stormed every tick. Each restart attempt is counted in the
@@ -39,6 +51,23 @@ export interface CastraRecoverDecision {
   readonly sessionIds: string[];
 }
 
+/** Slice stages whose stopped steward is worth restarting (#587). */
+function backsLiveSlice(stage: unknown): boolean {
+  return typeof stage === "string" && (STEWARD_STAGES.has(stage) || stage === "escalated");
+}
+
+/** Ids of the sessions currently stewarding a live slice. */
+function liveSliceSessionIds(state: LoopState): Set<string> {
+  const ids = new Set<string>();
+  for (const slice of Object.values(state.slices ?? {}) as any[]) {
+    if (!slice || typeof slice !== "object" || slice.archived || slice.recovered) continue;
+    if (!backsLiveSlice(slice.stage)) continue;
+    const sid = slice.worker_session_id;
+    if (typeof sid === "string" && sid.length > 0) ids.add(sid);
+  }
+  return ids;
+}
+
 /** The per-session attempt-count map kept on the in-memory working state. */
 function attemptCounts(state: LoopState): Record<string, number> {
   const raw = state.raw as { castra_recover_attempts?: Record<string, number> } | undefined;
@@ -47,15 +76,20 @@ function attemptCounts(state: LoopState): Record<string, number> {
 
 /**
  * Pure: decide whether to run a recovery sweep this tick. Returns a decision
- * only when at least one errored worker session is still under the attempt cap;
+ * only when at least one errored worker session (or stopped steward of a live
+ * slice, #587) is still under the attempt cap;
  * `null` otherwise (no errored workers, workers unavailable, or all stuck
  * sessions exhausted their budget).
  */
 export function assess(state: LoopState): CastraRecoverDecision | null {
   if (!Array.isArray(state.sessions)) return null;
   const counts = attemptCounts(state);
+  const stewarding = liveSliceSessionIds(state);
   const errored = state.sessions.filter(
-    (s) => isWorkerSession(s, state.workerGroup) && s?.status === "error" && s?.id,
+    (s) =>
+      isWorkerSession(s, state.workerGroup) &&
+      s?.id &&
+      (s?.status === "error" || (s?.status === "stopped" && stewarding.has(String(s.id)))),
   );
   if (errored.length === 0) return null;
   const attemptable = errored.filter((s) => (counts[s.id] ?? 0) < MAX_RECOVER_ATTEMPTS);
@@ -122,8 +156,14 @@ export async function apply(
       // While recovery still has budget for a stuck session, mark it so babysit
       // (the next handler) defers its worker-error escalation until the cap is
       // exhausted — a slow restart / missed picker shouldn't cry wolf on attempt 1.
+      // A stopped session that wasn't confirmed live stays pending for THIS tick
+      // even at the cap, so relaunch only replaces it on the next tick's fresh
+      // observation — never on the same tick a restart may just have worked but
+      // couldn't be observed (#587). (babysit ignores stopped workers, so this
+      // never suppresses an escalation.)
       if (snap) {
-        if (!left && (counts[r.sessionId] ?? 0) < MAX_RECOVER_ATTEMPTS) {
+        const stoppedUnconfirmed = !left && snap.status === "stopped";
+        if (stoppedUnconfirmed || (!left && (counts[r.sessionId] ?? 0) < MAX_RECOVER_ATTEMPTS)) {
           snap.recovery_pending = true;
         } else {
           delete snap.recovery_pending;

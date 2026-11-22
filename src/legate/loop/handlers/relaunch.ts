@@ -5,6 +5,7 @@ import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import {
   backoffMs,
   parseMs,
@@ -69,6 +70,19 @@ import {
  * (carrying `recovery_rung`) keeps the old bounded, every-tick, not-rate-limited
  * behavior so `march legate recover` stays prompt and walks to the nuke on
  * `relaunchRetryKey >= RELAUNCH_LIMIT`.
+ *
+ * STOPPED stewards (#587): a session agent-deck still LISTS but reports
+ * `stopped` (tmux gone, e.g. after a long host pause) is as dead as a vanished
+ * one — no babysit message can reach it. castra-recover (earlier in the tick)
+ * restarts it in place first and marks it `recovery_pending` while its restart
+ * budget lasts; relaunch leaves such a session alone. Only once that budget is
+ * CONFIRMED spent (`castra_recover_attempts[id] >= MAX_RECOVER_ATTEMPTS`, and the
+ * session isn't pending from this tick's sweep) does relaunch treat the stopped
+ * session as gone — a merely stale `stopped` observation never authorizes it:
+ * it drops the stale session first (`removeSession`, worktree NOT pruned — the
+ * documented manual workaround, automated) so it can't keep holding the
+ * worktree, then re-attaches a fresh steward as usual. `error` sessions keep
+ * their own path (castra-recover → babysit escalation → recovery ladder).
  *
  * Brood reconciliation AT THE SOURCE (#308): a relaunch mints a NEW session id
  * (the prior one vanished) and may land on a NEW worktree, but it only used to
@@ -167,6 +181,9 @@ export interface RelaunchDecision {
   /** auto only: more backoff-eligible candidates existed than the AIMD rate R
    *  allowed this tick — a clean sweep should additively increase R. */
   readonly autoRateLimited?: boolean;
+  /** The steward's session is still listed but `stopped` with its in-place
+   *  restart budget spent (#587): drop it (worktree preserved) before launching. */
+  readonly removeStaleSessionId?: string;
 }
 
 /** Side-effect seams for apply — injectable so the git/fs writes are testable. */
@@ -220,7 +237,7 @@ function baseDecision(
   slice: any,
   attempt: number,
   worktreesParent: string,
-): Omit<RelaunchDecision, "mode" | "unescalateStage" | "autoRateLimited"> {
+): Omit<RelaunchDecision, "mode" | "unescalateStage" | "autoRateLimited" | "removeStaleSessionId"> {
   const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
   const bareBranch = rawBranch.replace(/^feature\//, "");
   const featureBranch = "feature/" + bareBranch;
@@ -249,9 +266,17 @@ export function assess(state: LoopState): RelaunchDecision[] {
   const repoPath = state.repoPath;
   if (typeof repoPath !== "string" || repoPath.length === 0) return [];
 
+  // Listed worker sessions count as live, EXCEPT a `stopped` one whose in-place
+  // restart budget is confirmed spent and that this tick's sweep didn't just
+  // touch (#587): that one is dead and recorded so apply() can drop it first.
+  const recoverAttempts: Record<string, number> = state.raw?.castra_recover_attempts ?? {};
   const liveSessionIds = new Set<string>();
+  const staleStoppedIds = new Set<string>();
   for (const s of state.sessions) {
-    if (isWorkerSession(s, state.workerGroup) && typeof s?.id === "string") liveSessionIds.add(s.id);
+    if (!isWorkerSession(s, state.workerGroup) || typeof s?.id !== "string") continue;
+    const budgetSpent = (recoverAttempts[s.id] ?? 0) >= MAX_RECOVER_ATTEMPTS;
+    if (s.status === "stopped" && budgetSpent && !s.recovery_pending) staleStoppedIds.add(s.id);
+    else liveSessionIds.add(s.id);
   }
   const nowMs = parseMs(state.ts);
   const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
@@ -264,8 +289,14 @@ export function assess(state: LoopState): RelaunchDecision[] {
 
   const ladder: RelaunchDecision[] = [];
   // Auto candidates collected first, then sorted + rate-capped.
-  const autoCandidates: { sliceId: string; slice: any; attempt: number; until: number; unescalateStage?: string }[] =
-    [];
+  const autoCandidates: {
+    sliceId: string;
+    slice: any;
+    attempt: number;
+    until: number;
+    unescalateStage?: string;
+    removeStaleSessionId?: string;
+  }[] = [];
 
   for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
@@ -277,6 +308,9 @@ export function assess(state: LoopState): RelaunchDecision[] {
     // Only act when the steward is actually gone.
     const sessId = slice.worker_session_id;
     if (typeof sessId === "string" && sessId.length > 0 && liveSessionIds.has(sessId)) continue;
+    const removeStaleSessionId =
+      typeof sessId === "string" && staleStoppedIds.has(sessId) ? sessId : undefined;
+    const staleField = removeStaleSessionId ? { removeStaleSessionId } : {};
 
     // The operator's graduated ladder owns slices it is walking (`recovery_rung`):
     // keep the bounded, every-tick behavior so `march legate recover` stays prompt
@@ -285,7 +319,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
       const attempt = retryAttempts(state.raw, RELAUNCH_DOMAIN, sliceId) + 1;
       if (!ELIGIBLE_STAGES.has(slice.stage)) continue;
       if (attempt > RELAUNCH_LIMIT) continue;
-      ladder.push({ ...baseDecision(sliceId, slice, attempt, worktreesParent), mode: "ladder" });
+      ladder.push({ ...baseDecision(sliceId, slice, attempt, worktreesParent), mode: "ladder", ...staleField });
       continue;
     }
 
@@ -315,7 +349,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
     // The pacer's "it's time" gate: the callback fires only once the slice is past
     // its backoff window (a candidate still cooling down is skipped).
     whenDue(state.raw, RELAUNCH_DOMAIN, sliceId, nowMs, (attempt, until) => {
-      autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage });
+      autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage, removeStaleSessionId });
     });
   }
 
@@ -329,6 +363,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
     mode: "auto",
     autoRateLimited,
     ...(c.unescalateStage ? { unescalateStage: c.unescalateStage } : {}),
+    ...(c.removeStaleSessionId ? { removeStaleSessionId: c.removeStaleSessionId } : {}),
   }));
 
   return [...ladder, ...auto];
@@ -521,6 +556,25 @@ export async function apply(
     const parentSpawnId =
       slice.hatchery && typeof slice.hatchery.spawn_id === "string" ? slice.hatchery.spawn_id : "";
 
+    // #587: drop the stale stopped session (worktree/branch/PR preserved) so it
+    // stops holding the worktree and no ghost is left behind. Best-effort — a
+    // failure is noted but never blocks the relaunch.
+    let staleNote = "";
+    if (d.removeStaleSessionId) {
+      try {
+        await ctx.castra.removeSession({
+          profile: ctx.meta.profile,
+          sessionId: d.removeStaleSessionId,
+          pruneWorktree: false,
+          traceKey: d.sliceId,
+        });
+        staleNote = "dropped stopped session " + d.removeStaleSessionId;
+      } catch (err) {
+        staleNote = "could not drop stopped session " + d.removeStaleSessionId + " (" + errMsg(err) + ")";
+        ctx.log(`relaunch ${d.sliceId}: removeSession ${d.removeStaleSessionId} failed: ${errMsg(err)}`);
+      }
+    }
+
     let newSessionId: string | null = null;
     let liveWorktree = d.worktreePath;
     try {
@@ -547,7 +601,7 @@ export async function apply(
     } catch (err) {
       recordFailure(d);
       res.mutated = true;
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err) });
+      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err) + (staleNote ? "; " + staleNote : "") });
       continue;
     }
     if (!newSessionId) {
@@ -595,7 +649,7 @@ export async function apply(
       sessionId: newSessionId,
       detail:
         "re-attached opus steward to PR #" + d.prNumber + " on " + d.featureBranch +
-        " (" + attemptLabel(d) + ")" + (reconcileNote ? "; " + reconcileNote : ""),
+        " (" + attemptLabel(d) + ")" + (staleNote ? "; " + staleNote : "") + (reconcileNote ? "; " + reconcileNote : ""),
     });
   }
 

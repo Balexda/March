@@ -195,7 +195,7 @@ export interface TickResult {
    *  the dispatch alarms key on. */
   dispatchableReadyCount: number;
   /** Slices in a steward stage (implementing/pr-open/…) with NO live worker session
-   *  behind them — adopted-but-steward-less open PRs + crashed-steward slices. They
+   *  (missing, or listed as `error`/`stopped`, #587) behind them — adopted-but-steward-less open PRs + crashed-steward slices. They
    *  look like active "In steward" work but have no resource; surfaced as
    *  `march_legate_slices_stranded`. */
   strandedCount: number;
