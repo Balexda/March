@@ -417,16 +417,16 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(ds)).toEqual(["pr-snapshot", "pr-auto-merge"]);
   });
 
-  it("old-Herald snapshot (no reviews[]) with a proven current-head CodeRabbit approval auto-merges and stamps ready", async () => {
+  it("old-Herald snapshot (no reviews[]) with a current-head CodeRabbit approval does not merge; stamps approval:no-review-evidence", async () => {
     const head = "abc123";
     const state = allClearState({
       coderabbit: { decision: "APPROVED", decision_is_bot: true, decision_commit_sha: head },
     });
     const ds = assess(state);
-    expect(kindsOf(ds)).toEqual(["pr-snapshot", "pr-auto-merge"]);
-    await apply(ds, ctx(), state, deps({ mergePr: vi.fn(async () => ({ ok: true })) as any }));
-    expect(state.slices.s.merge_gate).toBe("ready");
-    expect(state.slices.s.merge_failing).toEqual([]);
+    expect(kindsOf(ds)).toEqual(["pr-snapshot"]);
+    await apply(ds, ctx(), state, deps());
+    expect(state.slices.s.merge_gate).toBe("waiting-approval");
+    expect(state.slices.s.merge_failing).toEqual(["approval:no-review-evidence"]);
   });
 
   it("old-Herald snapshot with a stale CodeRabbit decision sha does not merge; stamps waiting-approval + approval:stale-head", async () => {

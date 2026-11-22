@@ -302,10 +302,9 @@ describe("approvalEvidence", () => {
   const bot = { head_sha: head, coderabbit: cr() };
   const ok = { ok: true, code: null };
 
-  it("accepts a proven coderabbit approval of the head when reviews are absent", () => {
-    expect(approvalEvidence(forge, bot)).toEqual(ok);
-    expect(approvalEvidence(forge, { head_sha: head.toLowerCase(), coderabbit: cr({ decision_commit_sha: head.toUpperCase() }) }))
-      .toEqual(ok);
+  it("does not accept a bot approval without per-review evidence (gate unchanged); explains why", () => {
+    expect(approvalEvidence(forge, bot)).toEqual({ ok: false, code: "approval:no-review-evidence" });
+    expect(approvalSatisfied(forge, bot)).toBe(false);
   });
 
   it("reports stale-head when the approval is for an older commit", () => {
@@ -336,16 +335,6 @@ describe("approvalEvidence", () => {
       expect(approvalEvidence(req, bot)).toEqual({ ok: false, code: "approval:no-review-evidence" });
       expect(approvalEvidence(req, { head_sha: head, human_approval_count: 1 })).toEqual(ok);
       expect(approvalEvidence(req, { head_sha: head })).toEqual({ ok: false, code: "approval:no-review-evidence" });
-    }
-  });
-
-  it("never accepts coderabbit approval when March runs as coderabbit", () => {
-    vi.stubEnv("MARCH_SELF_BOT_LOGIN", "coderabbitai");
-    try {
-      expect(approvalEvidence(forge, bot).ok).toBe(false);
-      expect(approvalSatisfied(forge, bot)).toBe(false);
-    } finally {
-      vi.unstubAllEnvs();
     }
   });
 

@@ -147,7 +147,7 @@ Legate's loop behavior follows the low-touch execution model in `docs/vision.md`
     | `approval:missing` | Per-review evidence exists but holds no eligible approval of the current head. |
     | `approval:stale-head` | An eligible bot approved, but for an older commit than the current head. |
     | `approval:evidence-incomplete` | The observer could not read every review page; approval fails closed. |
-    | `approval:no-review-evidence` | The snapshot has no `reviews` list and no proven approval (legacy human count or current-head CodeRabbit decision). |
+    | `approval:no-review-evidence` | The snapshot has no `reviews` list and no human approval count. A bot approval cannot be verified without per-review evidence, so this usually means the observer is older than the dispatcher: redeploy it. |
     | `changes-requested` | An eligible reviewer's changes-requested verdict stands (or evidence is incomplete). |
     | `merge-state:unknown` | GitHub's merge state is absent or empty. |
     | `merge-state:<status>` | GitHub's merge state is present and not clean, lowercased (for example `merge-state:behind`, `merge-state:blocked`, `merge-state:dirty`). |
