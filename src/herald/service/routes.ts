@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
+import { bearerMatches } from "../../shared/bearer.js";
 import {
   outcomeFromStatus,
   recordHeraldRequest,
@@ -43,6 +44,27 @@ export interface RoutesOptions {
 
 /** Env var gating the break-glass `POST /admin/events` endpoint (#265). */
 export const HERALD_ADMIN_TOKEN_ENV = "MARCH_HERALD_ADMIN_TOKEN";
+
+/** The Legate operator token (#593). When set on Herald too, `POST /events`
+ *  requires it as a bearer for the operator-request event types below. */
+export const OPERATOR_TOKEN_ENV = "MARCH_LEGATE_OPERATOR_TOKEN";
+
+/**
+ * Event types that ask the legate to act (#593): an operator request, or the
+ * legate's own recovery-ladder transitions of the same type. Merge-now skips the
+ * review and CI gates, so these must not be writable by anyone who can reach
+ * Herald when the operator token is configured. Only the legate writes them, and
+ * its Herald client sends the token on every append.
+ */
+export const OPERATOR_REQUEST_TYPES: ReadonlySet<string> = new Set([
+  "slice.merge.requested",
+  "slice.relaunch.requested",
+  "slice.requeue.requested",
+  "slice.recovery.requested",
+  "dispatch.paused",
+  "dispatch.resumed",
+  "legate.tick.requested",
+]);
 
 /** Extract a `Bearer <token>` value from an Authorization header, or null. */
 function bearerToken(header: string | string[] | undefined): string | null {
@@ -407,6 +429,15 @@ export async function registerRoutes(
     if (!validation.ok) {
       reply.code(400);
       return { error: validation.error };
+    }
+    // Operator requests need the operator bearer when the token is set (#593).
+    // Read per request, like the admin gate, so it tracks the live env.
+    const operatorToken = env[OPERATOR_TOKEN_ENV]?.trim();
+    if (operatorToken && OPERATOR_REQUEST_TYPES.has(String(validation.input.type))) {
+      if (!bearerMatches(request.headers["authorization"], operatorToken)) {
+        reply.code(401);
+        return { error: `event "${String(validation.input.type)}" requires the operator bearer token.` };
+      }
     }
     const event = store.append(validation.input, undefined, validation.attribution);
     reply.code(201);

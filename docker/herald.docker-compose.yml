@@ -94,6 +94,10 @@ services:
       # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
       # corrective event, then comment it out again and recreate the container.
       - MARCH_HERALD_ADMIN_TOKEN=${MARCH_HERALD_ADMIN_TOKEN:-}
+      # Operator token (#593), the same value the legate uses: when set, POST
+      # /events requires it as a bearer for operator-request event types (merge /
+      # relaunch / requeue / recovery requests, pause / resume, tick).
+      - MARCH_LEGATE_OPERATOR_TOKEN=${MARCH_LEGATE_OPERATOR_TOKEN:-}
       # Reach castra over the shared `march` network; the bearer token must match
       # castra's. (CASTRA_URL / CASTRA_API_TOKEN are the names the shared
       # CastraClient reads.)

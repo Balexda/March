@@ -325,6 +325,34 @@ describe.skipIf(!sqliteAvailable)("POST /admin/events (#265)", () => {
     note: "legacy slice pre-#213; unstick PR #240",
   });
 
+  it("requires the operator bearer for operator-request events when MARCH_LEGATE_OPERATOR_TOKEN is set (#593)", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_LEGATE_OPERATOR_TOKEN: "op-tok" });
+    const merge = { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 };
+    try {
+      expect((await app.inject({ method: "POST", url: "/events", payload: merge })).statusCode).toBe(401);
+      expect((await app.inject({ method: "POST", url: "/events", payload: merge, headers: { authorization: "Bearer wrong" } })).statusCode).toBe(401);
+      for (const type of ["slice.relaunch.requested", "slice.recovery.requested", "dispatch.paused", "legate.tick.requested"]) {
+        expect((await app.inject({ method: "POST", url: "/events", payload: { type, profile: "march", sliceId: "s1" } })).statusCode).toBe(401);
+      }
+      expect(store.count()).toBe(0);
+      expect((await app.inject({ method: "POST", url: "/events", payload: merge, headers: { authorization: "Bearer op-tok" } })).statusCode).toBe(201);
+      // Observation/transition events that don't ask the legate to act stay open.
+      expect((await app.inject({ method: "POST", url: "/events", payload: { type: "slice.stage.changed", profile: "march", sliceId: "s1", stage: "pr-open" } })).statusCode).toBe(201);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("leaves operator-request events open when MARCH_LEGATE_OPERATOR_TOKEN is unset (#593)", async () => {
+    const { app } = await buildApp(undefined, {});
+    try {
+      const res = await app.inject({ method: "POST", url: "/events", payload: { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 } });
+      expect(res.statusCode).toBe(201);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("404s (invisible) when MARCH_HERALD_ADMIN_TOKEN is unset — not 401", async () => {
     const { app, store } = await buildApp(undefined, {});
     close = async () => { await app.close(); store.close(); };

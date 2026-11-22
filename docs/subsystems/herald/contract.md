@@ -121,6 +121,17 @@ This follows the [March vision](../../vision.md) and
 
 ## Operator attribution
 
+When `MARCH_LEGATE_OPERATOR_TOKEN` is set on Herald (the same value Legate
+uses), `POST /events` requires `Authorization: Bearer <token>` (constant-time
+compare, read per request) for the event types that ask Legate to act:
+`slice.merge.requested`, `slice.relaunch.requested`, `slice.requeue.requested`,
+`slice.recovery.requested`, `dispatch.paused`, `dispatch.resumed` and
+`legate.tick.requested`. Without it they return 401. Merge-now skips the review
+and CI gates, so a caller that can reach Herald must not be able to bypass
+Legate's operator gate by writing the request directly. Every other event type
+stays open, and so do these when the token is unset. Legate's Herald client sends
+the bearer on every append.
+
 `POST /events` accepts an optional `attribution: {operator?, note?}` object
 (operator at most 128 characters, note at most 1000) on any event (#593).
 Herald strips it from the payload and stamps `operator`/`note` on the event
