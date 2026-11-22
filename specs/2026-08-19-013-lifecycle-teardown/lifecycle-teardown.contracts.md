@@ -99,9 +99,15 @@ Traceparent: <optional W3C traceparent>
 #### Signature
 
 ```text
-stopSpawn(spawnId: string, opts?: { stopTimeoutSeconds?: number }): StopSpawnResult   // target, not yet shipped (SD-004)
+type ComputeTarget = {
+  sessionId: string,
+  kind: "spawn" | "legate" | string,   // any kind that launches an ephemeral container
+  containerName: string                 // derived per kind from sessionId; never a shared service container
+}
 
-removeSpawn(spawnId: string): void
+stopCompute(target: ComputeTarget, opts?: { stopTimeoutSeconds?: number }): StopComputeResult   // target, not yet shipped (SD-004)
+
+removeCompute(target: ComputeTarget): void   // shipped today as spawn-only removeSpawn(spawnId)
 
 removeWorkspace(
   repoRoot: string,
@@ -116,23 +122,23 @@ removeWorkspace(
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `spawnId` | string | Yes | Spawn compute identity. Compute is keyed off the session id (the container *name* is derived from it), NOT off the tracked `containerId` — that field feeds log capture only. |
-| `stopTimeoutSeconds` | number | No | `stopSpawn` only. Bound on the graceful stop before escalation, per the enforced-deadline requirement (FR-020a). |
+| `target` | ComputeTarget | Yes | Kind-agnostic compute identity (FR-012a). `containerName` is derived from `sessionId` by a per-kind rule (`spawnContainerName` for spawns), NOT taken from the tracked `containerId`, which feeds log capture only. Brood MUST refuse to build a target that resolves to a shared compose service container. |
+| `stopTimeoutSeconds` | number | No | `stopCompute` only. Bound on the graceful stop before escalation, per the enforced-deadline requirement (FR-020a). |
 | `repoRoot` | absolute path | Yes | Repository root for workspace operations. |
 | `worktreePath` | absolute path | No | Exact worktree path to remove. |
 | `branch` | git ref name | No | Exact branch to delete. |
 
 Graceful and immediate teardown are **two separate operations** so the archive can run between them (FR-006a):
 
-- **`stopSpawn`** (target, FR-004): stops the container gracefully and leaves it present, so its final logs and structured output stay readable for the archive. It MUST NOT remove the container. A provider that cannot stop gracefully MUST report `stopped: false` (or throw) rather than silently removing. Skipped when the request includes `kill`.
-- **`removeSpawn`** (shipped): removes the container immediately. Brood calls it only after the archive succeeds. It MUST throw on any failure other than "no such container" and MUST verify the container is gone before returning, so teardown can report a failed `container` step (FR-012b). The current host provider swallows every failure; the never-throws helper stays only on dispatch rollback. Called without a prior `stopSpawn`, this is the `kill` path (FR-005). Today it is the only operation: the host provider runs `docker rm -f` unconditionally, so every teardown is immediate (SD-004).
+- **`stopCompute`** (target, FR-004): stops the container gracefully and leaves it present, so its final logs and structured output stay readable for the archive. It MUST NOT remove the container. A provider that cannot stop gracefully MUST report `stopped: false` (or throw) rather than silently removing. Skipped when the request includes `kill`.
+- **`removeCompute`** (shipped as spawn-only `removeSpawn`): removes the container immediately. Brood calls it only after the archive succeeds. It MUST throw on any failure other than "no such container" and MUST verify the container is gone before returning, so teardown can report a failed `container` step (FR-012b). The current host provider swallows every failure; the never-throws helper stays only on dispatch rollback. Called without a prior `stopCompute`, this is the `kill` path (FR-005). Today it is the only operation: the host provider runs `docker rm -f` unconditionally, so every teardown is immediate (SD-004).
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `stopped` | boolean | `stopSpawn`: whether the container reached a stopped state within `stopTimeoutSeconds`. |
-| `escalated` | boolean | `stopSpawn`: whether the stop deadline was hit and the provider escalated to a kill. FR-005a forbids reporting a graceful outcome in that case. |
+| `stopped` | boolean | `stopCompute`: whether the container reached a stopped state within `stopTimeoutSeconds`. |
+| `escalated` | boolean | `stopCompute`: whether the stop deadline was hit and the provider escalated to a kill. FR-005a forbids reporting a graceful outcome in that case. |
 | `worktreeRemoved` | boolean | Whether the exact worktree path was removed. |
 | `branchDeleted` | boolean | Whether the exact branch was deleted. |
 
@@ -144,7 +150,8 @@ Graceful and immediate teardown are **two separate operations** so the archive c
 | Substrate failure | Throw or false flag | Brood records failed step/warning. |
 | Broad cleanup requested | Contract violation | Implementations must not enumerate/prune unrelated workspaces. |
 | Call-out exceeds its deadline | Failed step outcome | Every substrate operation MUST be deadline-bounded; a wedged daemon or git lock MUST NOT block the service (FR-020a). |
-| Non-`spawn` row tracking compute | Must be defined, not skipped | A `legate` row with a tracked container MUST have it reclaimed or the teardown refused — never a skipped step plus `torndown` (FR-012a, SD-005). |
+| Non-`spawn` row tracking an ephemeral container | Reclaimed via `removeCompute` | Every ephemeral per-session container is reclaimed; never refused, never a skipped step plus `torndown` (FR-012a). |
+| Target resolves to a shared compose service container | Refused, failed `container` step | Service containers are not session compute (FR-012a). |
 
 ### Castra Steward Removal
 
@@ -251,7 +258,7 @@ appendTeardownAttempt(sessionId: string, entry: TeardownAttempt): void
 | Boundary | Direction | Contract | Failure Mode |
 |----------|-----------|----------|--------------|
 | March CLI -> Brood service | outbound HTTP | `POST /sessions/:id/teardown` | Non-zero client error; no local cleanup fallback. Exits non-zero for any `status != "torndown"`. |
-| Legate loop -> Brood service | outbound HTTP | Same endpoint with trace context, **discriminating on `status`** | Deferred or failed cleanup stays observable in one slice trace and MUST keep the session in loop state until `torndown` (SD-006). |
+| Legate loop -> Brood service | outbound HTTP | Same endpoint with trace context, **discriminating on `status`** | Deferred or failed cleanup stays observable in one slice trace and MUST keep the session in loop state until `torndown` (FR-014b). `broodTeardown` returns `ok` only on `status: torndown`. |
 | Brood service -> SessionRepository | read/write registry | Resolve group, mark `tearing-down`, mark `torndown`, preserve row | Store errors surface as handler failures. |
 | Brood service -> archive filesystem | write before delete | Record/log/artifact snapshot | Unwritable sink aborts teardown before deletion; missing optional source is a warning. |
 | Brood service -> TeardownSubstrate | side-effecting cleanup | Remove tracked compute/workspace artifacts only | Failed or skipped step; no broad pruning. |

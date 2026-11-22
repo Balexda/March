@@ -14,7 +14,7 @@
 | `repoPath` | absolute path | No | Required for worktree and branch cleanup. |
 | `worktreePath` | absolute path | No | Exact path cleanup key; never replaced by broad pruning. |
 | `branch` | git ref name | No | Exact branch cleanup key. |
-| `containerId` | string | No | Source for container **log capture only**. Compute cleanup is keyed off the session `id` (`TeardownSubstrate.removeSpawn(spawn.id)`, which derives the container name) — there is no container-id-based removal path. |
+| `containerId` | string | No | Source for container **log capture only**. Compute cleanup is keyed off the session `id` via a kind-agnostic `ComputeTarget` (`TeardownSubstrate.removeCompute`, which derives the container name per kind) — there is no container-id-based removal path. Applies to every kind that launches an ephemeral container (FR-012a). |
 | `agentDeckSessionId` | string | No | Steward removal target; may be stale and verified through Castra listing. |
 | `profile` | string | No | Castra profile used for steward session lookup/removal. |
 | `group` | string | No | Castra group context when available. |
