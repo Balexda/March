@@ -72,15 +72,12 @@ import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan, recordA
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
-import { reviewFixMessage } from "./pure/messages.js";
+import { resendWithDeps } from "./operator-resend.js";
 // Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
 // shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
 // the LoopSnapshot TYPE from here, so this value import is a one-way edge.
 import {
   resolveRequeueTarget,
-  resolveResendTarget,
-  resendStillCurrent,
-  relaunchGeneration,
   resolveRespondTarget,
   type OperatorActionResult,
   type OperatorFields,
@@ -743,79 +740,14 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
   const target = sliceTarget(input);
   if (!target.ok) return finishOperatorAction("resend_threads", input, target.result);
   const { rt, slice } = target;
-  const refuse = (status: number, error: string) =>
-    finishOperatorAction("resend_threads", input, { ok: false, status, profile: input.profile, sliceId: input.sliceId, error });
   const observed = legateHerald().snapshotFor(input.profile)?.slices?.[input.sliceId]?.pr;
-  const resolved = resolveResendTarget(slice, observed, input.threadIds);
-  if (!resolved.ok) return refuse(resolved.status, resolved.error);
-  const { pr, prNumber, threads, threadIds, commentIds, sessionId } = resolved;
-  const generation = relaunchGeneration(slice);
-  try {
-    await sendAgentDeckMessage(rt.meta, sessionId, reviewFixMessage(pr, threads), input.sliceId);
-  } catch (err: any) {
-    return finishOperatorAction(
-      "resend_threads",
-      input,
-      { ok: false, status: 502, profile: input.profile, sliceId: input.sliceId, error: `failed to deliver /smithy.fix to session ${sessionId}: ${err?.message ?? String(err)} — relaunch the steward and retry.` },
-      { "march.failure_stage": "delivery" },
-    );
-  }
-
-  // The tick may have requeued the slice during the send (a new warm entry under
-  // the same id) or relaunched its steward (a new worker_session_id in place).
-  // Recording now would mark the old comment ids handled for a steward that never
-  // got them, so refuse to record.
-  if (!resendStillCurrent(rt.workingState?.slices?.[input.sliceId], slice, sessionId, generation)) {
-    return finishOperatorAction(
-      "resend_threads",
-      input,
-      {
-        ok: false,
-        status: 409,
-        profile: input.profile,
-        sliceId: input.sliceId,
-        delivered: true,
-        threadIds,
-        commentIds,
-        error: `delivered to session ${sessionId}, but the slice was requeued or its steward relaunched while sending — not recorded; re-send to reach the new steward.`,
-      },
-      { "march.failure_stage": "incarnation" },
-    );
-  }
-
-  // Record it like babysit's review-fix so dedup, the round cap and the bounded
-  // post-dispatch nudge all see this dispatch.
-  const ts = now();
-  const key = ["operator-resend", prNumber, [...commentIds].sort().join(",")].join(":");
-  const seen = new Set<string>((slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)));
-  for (const id of commentIds) seen.add(id);
-  slice.review_fix_seen_comment_ids = [...seen];
-  const rounds: Record<string, number> = slice.review_fix_rounds || (slice.review_fix_rounds = {});
-  for (const id of threadIds) rounds[id] = (rounds[id] || 0) + 1;
-  delete slice.review_fix_escalated_at;
-  if (slice.stage === "pr-open") slice.stage = "pr-in-fix";
-  slice.last_processor_action = "review-fix";
-  slice.last_processor_action_key = key;
-  slice.last_processor_action_at = ts;
-  slice.last_action = ts;
-  slice.last_action_note = `operator re-sent ${threadIds.length} review thread(s) as /smithy.fix`;
-
-  const recorded = await appendOperatorRequest(
-    input,
-    {
-      type: "slice.stage.changed",
-      sliceId: input.sliceId,
-      stage: String(slice.stage),
-      handledFeedback: { kind: "inline", commentIds, dispatchKey: key },
-    },
-    "resend",
-  );
-  const base = { profile: input.profile, sliceId: input.sliceId, delivered: true, threadIds, commentIds };
-  if (recorded) {
-    // Delivered, but the fold did not record it: report the partial outcome.
-    return finishOperatorAction("resend_threads", input, { ...base, ok: false, status: 502, error: `delivered, but ${recorded.error}` }, { "march.failure_stage": "record" });
-  }
-  return finishOperatorAction("resend_threads", input, { ...base, ok: true }, { "march.pr_number": prNumber, "march.threads": threadIds.length });
+  const { result, attributes } = await resendWithDeps(input, slice, observed, {
+    send: (sessionId, message) => sendAgentDeckMessage(rt.meta, sessionId, message, input.sliceId),
+    currentSlice: () => rt.workingState?.slices?.[input.sliceId],
+    record: (event) => appendOperatorRequest(input, event, "resend"),
+    now,
+  });
+  return finishOperatorAction("resend_threads", input, result, attributes);
 }
 
 /**

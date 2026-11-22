@@ -6,6 +6,7 @@ import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import { apply, assess, relaunchBackoffMs, RELAUNCH_BACKOFF_MAX_MS, type RelaunchDeps } from "./relaunch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 import { relaunchGeneration, resendStillCurrent } from "../http.js";
+import { resendWithDeps } from "../operator-resend.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
   return {
@@ -457,6 +458,72 @@ describe("operator relaunch (#593)", () => {
     expect(slice.relaunch_in_progress).toBeUndefined();
     expect(slice.worker_session_id).toBe("live");
     expect(resendStillCurrent(slice, slice, "live", before)).toBe(false);
+  });
+
+  it("resendReviewThreads: a send held across a removal-then-failed-launch relaunch returns 409 and records nothing", async () => {
+    const raw = {
+      slices: {
+        s: eligibleSlice({ worker_session_id: "live", worktree_path: "/wt/s", stage: "pr-open", pr: { number: 9 } }),
+      },
+    };
+    const live = { id: "live", group: "legate-workers" };
+    const state = loopState({
+      raw,
+      slices: raw.slices,
+      sessions: [live],
+      sessionsById: new Map([["live", live]]),
+      relaunchRequests: [{ sliceId: "s", seq: 3 }],
+    });
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/s" }));
+    c.castra.removeSession = vi.fn(async () => ({ removed: true }));
+    c.castra.launchSession = vi.fn(async () => {
+      throw new Error("castra down");
+    }) as any;
+    const slice = state.slices.s;
+    const observed = { number: 9, unresolved_threads: [{ id: "t1", comment_ids: ["c1"] }] };
+
+    // Hold the steward send open until the relaunch has removed the session and
+    // failed to launch a replacement.
+    let delivered!: () => void;
+    const sendHeld = new Promise<void>((r) => (delivered = r));
+    const send = vi.fn(async () => sendHeld);
+    const record = vi.fn(async () => null);
+    const resend = resendWithDeps({ profile: "p", sliceId: "s", threadIds: ["t1"] }, slice, observed, {
+      send,
+      currentSlice: () => state.raw.slices.s,
+      record,
+      now: () => "T",
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith("live", expect.any(String)));
+
+    await apply(assess(state), c, state, deps);
+    expect(c.castra.removeSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "live" }));
+    expect(slice.worker_session_id).toBe("live"); // the removed session is still bound
+    expect(slice.relaunch_in_progress).toBeUndefined();
+
+    delivered();
+    const { result, attributes } = await resend;
+    expect(result).toMatchObject({ ok: false, status: 409, delivered: true, threadIds: ["t1"], commentIds: ["c1"] });
+    expect(attributes).toEqual({ "march.failure_stage": "incarnation" });
+    // Nothing recorded: no handled ids on the warm slice and no feedback event.
+    expect(record).not.toHaveBeenCalled();
+    expect(slice.review_fix_seen_comment_ids).toBeUndefined();
+    expect(slice.review_fix_rounds).toBeUndefined();
+    expect(slice.stage).toBe("pr-open");
+  });
+
+  it("resendReviewThreads records the resend when nothing overlapped it", async () => {
+    const slice: any = eligibleSlice({ worker_session_id: "live", stage: "pr-open", pr: { number: 9 } });
+    const record = vi.fn(async () => null);
+    const { result } = await resendWithDeps(
+      { profile: "p", sliceId: "s" },
+      slice,
+      { number: 9, unresolved_threads: [{ id: "t1", comment_ids: ["c1"] }] },
+      { send: vi.fn(async () => {}), currentSlice: () => slice, record, now: () => "T" },
+    );
+    expect(result).toMatchObject({ ok: true, delivered: true, commentIds: ["c1"] });
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.stage.changed", handledFeedback: expect.objectContaining({ commentIds: ["c1"] }) }));
+    expect(slice.review_fix_seen_comment_ids).toEqual(["c1"]);
   });
 
   it("un-escalates an escalated slice and ignores the self-heal backoff", async () => {
