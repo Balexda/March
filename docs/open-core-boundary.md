@@ -179,6 +179,19 @@ Two concerns must travel on the boundary, or the private layers cannot act safel
   — a personal key silently outranks a Bedrock switch and would leak company code
   to a personal account.
 
+### Issue triage exception
+
+The open engine ships the issue-triage rubric, versioned verdict and label
+vocabulary, and baseline recommender. Smithy is public and March has no judgment
+plugin mechanism today. Revisit this exception when that mechanism exists.
+[PRD decision SD-002](prds/2026-001-issue-triage.prd.md#sd-002--triage-judgment-open-vs-private)
+
+A future plugin can evaluate the same read-only issue context and return a
+candidate through the judgment interface. March validates that candidate against
+the same verdict schema used for the baseline. The deterministic writer owns
+GitHub mutations outside the judgment interface.
+[Versioned triage verdict contract](../specs/2026-11-21-015-versioned-triage-verdicts/versioned-triage-verdicts.contracts.md)
+
 ## Graduation — when a private package earns its own repo
 
 A package leaves the monorepo for its own repo only when it earns one of:

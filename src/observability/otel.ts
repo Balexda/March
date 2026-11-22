@@ -119,9 +119,9 @@ export function initOtel(env: NodeJS.ProcessEnv = process.env): OtelHandle {
   const loggerProvider = new LoggerProvider({
     resource,
     processors: [
-      new BatchLogRecordProcessor(
-        new OTLPLogExporter({ url: `${base}/v1/logs` }),
-      ),
+      new BatchLogRecordProcessor({
+        exporter: new OTLPLogExporter({ url: `${base}/v1/logs` }),
+      }),
     ],
   });
   // Register globally so emitters that resolve a logger via the API (rather

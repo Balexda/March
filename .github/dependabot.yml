@@ -8,6 +8,31 @@ updates:
       - dependencies
       - automated
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 7 is the native compiler and ships no JS compiler API;
+      # src/contracts/public-surface.ts depends on that API (createSourceFile,
+      # createPrinter, the is* guards). Revisit when 7.x exposes a stable API.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # The OpenTelemetry JS 3.x line (sdk-logs/resources/sdk-metrics/core 3.x,
+      # 0.300+ exporters) requires @opentelemetry/api 1.10, while
+      # sdk-trace-base 2.x still pins api <1.10. Mixing the lines fails `npm ci`
+      # with ERESOLVE, so hold OTel on the 2.x / 0.22x line until the whole
+      # set can move to 3.x together in one deliberate migration.
+      - dependency-name: "@opentelemetry/api"
+        versions: [">=1.10.0"]
+      - dependency-name: "@opentelemetry/*-otlp-http"
+        versions: [">=0.300.0"]
+      - dependency-name: "@opentelemetry/api-logs"
+        versions: [">=0.300.0"]
+      - dependency-name: "@opentelemetry/sdk-logs"
+        versions: [">=0.300.0"]
+      - dependency-name: "@opentelemetry/resources"
+        versions: [">=3.0.0"]
+      - dependency-name: "@opentelemetry/sdk-metrics"
+        versions: [">=3.0.0"]
+      - dependency-name: "@opentelemetry/sdk-trace-base"
+        versions: [">=3.0.0"]
     groups:
       minor-and-patch:
         update-types:

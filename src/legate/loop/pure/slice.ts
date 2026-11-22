@@ -1,4 +1,11 @@
-import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
+import {
+  dispatchBranch,
+  dispatchItemKey,
+  dispatchSliceId,
+  legacyCutBranch,
+  legacyCutSliceId,
+  sliceActionKey,
+} from "./dispatch-id.js";
 import { isMarchBotComment } from "../../../observe/march-bot.js";
 import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
@@ -63,7 +70,8 @@ export function isStubArchivedSlice(slice: any): boolean {
 }
 
 /** Which identity matched a blocking slice to a ready item (#592). */
-export type BlockerMatch = "id" | "action_key" | "branch";
+/** `legacy_id`: a pre-#599 cut id or branch, on an entry without an action key. */
+export type BlockerMatch = "id" | "action_key" | "branch" | "legacy_id";
 
 /** The archived slice that holds a ready item back, and how it matched (#592). */
 export interface ArchiveBlocker {
@@ -122,10 +130,33 @@ function archiveBlocker(sliceId: string, slice: any, matchedOn: BlockerMatch): A
   return { sliceId, matchedOn, terminal: archiveTerminal(slice), prNumber: archivePrNumber(slice) };
 }
 
+/** True when the slice carries the action key (`command` etc.). Slices rebuilt
+ *  from the Herald fold on a cold start do not. */
+function hasActionKey(slice: any): boolean {
+  return typeof slice?.command === "string" && slice.command.length > 0;
+}
+
+/**
+ * True when `slice` is keyed by (or on the branch of) the id `item` had before
+ * #599, and carries no action key to tell which row it was for. Sibling rows of a
+ * long-named plan file share that legacy id, so such an entry is ambiguous: the
+ * callers treat it conservatively (block) except where smithy's own state already
+ * settles it (a MERGED archive). An entry WITH an action key is decided by the key.
+ */
+function ambiguousLegacyEntry(slice: any, existingId: string, item: any): boolean {
+  if (!slice || typeof slice !== "object" || hasActionKey(slice)) return false;
+  const legacyId = legacyCutSliceId(item);
+  if (!legacyId) return false;
+  if (existingId === legacyId) return true;
+  const legacyBranch = legacyCutBranch(item);
+  return Boolean(legacyBranch && (slice.branch === legacyBranch || slice.actual_branch === legacyBranch));
+}
+
 /**
  * The archived slice that blocks `item` from a fresh dispatch, or null. A direct
  * id hit on a {@link isStubArchivedSlice stub} is ignored; every archive is then
- * scanned for the same action key or branch. {@link alreadyArchivedSlice} is this
+ * scanned for the same action key or branch, and for a pre-#599 cut id that
+ * cannot be told apart from its siblings (see the loop). {@link alreadyArchivedSlice} is this
  * as a boolean, so the dispatch decisions `/queue` publishes and the selection the
  * dispatcher acts on can never disagree.
  */
@@ -137,6 +168,11 @@ export function findArchiveBlocker(state: any, item: any, sliceId: string): Arch
   const branch = dispatchBranch(item);
   for (const [archivedId, slice] of Object.entries(archived) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
+    // A pre-#599 archive rebuilt without an action key (#599): a MERGED one does
+    // not block (smithy marks the merged row done, and its siblings are not that
+    // work); an escalated/closed one keeps blocking, as the operator decided.
+    if (!isStubArchivedSlice(slice) && archiveTerminal(slice) !== "MERGED" && ambiguousLegacyEntry(slice, archivedId, item))
+      return archiveBlocker(archivedId, slice, "legacy_id");
     if (sliceActionKey(slice) === key) return archiveBlocker(archivedId, slice, "action_key");
     if (slice.branch && slice.branch === branch) return archiveBlocker(archivedId, slice, "branch");
     if (slice.actual_branch && slice.actual_branch === branch) return archiveBlocker(archivedId, slice, "branch");
@@ -176,6 +212,9 @@ export function findLiveBlocker(state: any, item: any, sliceId: string): LiveBlo
     if (existingId === sliceId) return liveBlocker(existingId, slice, "id");
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    // A live pre-#599 slice rebuilt without an action key may be this row's
+    // running worker; block rather than dispatch it twice (#599).
+    if (ambiguousLegacyEntry(slice, existingId, item)) return liveBlocker(existingId, slice, "legacy_id");
     if (slice.original_slice_id === sliceId) return liveBlocker(existingId, slice, "original_id");
     if (sliceActionKey(slice) === key) return liveBlocker(existingId, slice, "action_key");
     if (slice.branch && slice.branch === branch) return liveBlocker(existingId, slice, "branch");
@@ -422,11 +461,36 @@ function otherLiveBlocker(state: any, item: any, sliceId: string): boolean {
     if (existingId === sliceId) continue;
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    if (ambiguousLegacyEntry(slice, existingId, item)) return true;
     if (slice.original_slice_id === sliceId) return true;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === branch) return true;
   }
   return false;
+}
+
+/**
+ * The pre-#599 id of a recoverably escalated slice that belongs to `item`, or
+ * null. The entry belongs to the item when its action key matches, or — rebuilt
+ * without one — when `item` is the only ready item that maps to that legacy id.
+ * With several candidates it is ambiguous and stays blocked (the operator's
+ * `march legate requeue` clears it).
+ */
+function legacyRecoverableId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
+  const legacyId = legacyCutSliceId(item);
+  if (!legacyId) return null;
+  const slice = slices[legacyId];
+  if (!escalatedRecoverable(slice)) return null;
+  if (hasActionKey(slice)) return sliceActionKey(slice) === dispatchItemKey(item) ? legacyId : null;
+  const owners = (ready ?? []).filter((candidate) => legacyCutSliceId(candidate) === legacyId);
+  return owners.length === 1 ? legacyId : null;
+}
+
+/** The id of the recoverable escalation `item` owns: its own slice, else a
+ *  pre-#599 one per {@link legacyRecoverableId}; null when there is none. */
+function recoveryTargetId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
+  const currentId = dispatchSliceId(item);
+  return escalatedRecoverable(slices[currentId]) ? currentId : legacyRecoverableId(slices, item, ready);
 }
 
 /** A still-ready smithy item whose deterministic slice is recoverably escalated
@@ -466,9 +530,10 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const candidates: { item: any; sliceId: string; attempt: number; until: number }[] = [];
   for (const item of ready ?? []) {
-    const sliceId = dispatchSliceId(item);
-    if (!escalatedRecoverable(slices[sliceId])) continue;
-    if (alreadyArchivedSlice(state, item, sliceId)) continue;
+    const currentId = dispatchSliceId(item);
+    const sliceId = recoveryTargetId(slices, item, ready);
+    if (!sliceId) continue;
+    if (alreadyArchivedSlice(state, item, currentId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
     // The pacer's "it's time" gate: the callback fires only once the slice is past
     // its backoff window (a candidate still cooling down is skipped).
@@ -563,11 +628,14 @@ export function classifyReady(state: any, ready: readonly any[] | undefined, now
     const live = findLiveBlocker(state, item, sliceId);
     if (!live) return { ...base, decision: "dispatch" as const };
     const heldBy = { ...live };
-    if (live.sliceId === sliceId && escalatedRecoverable(slices[sliceId]) && !otherLiveBlocker(state, item, sliceId)) {
-      if (due.has(sliceId)) return { ...base, decision: "recovery_due" as const, heldBy };
+    // The item's own recoverable escalation — keyed at its id, or at its pre-#599
+    // id when it owns that entry (#599).
+    const recoveryId = recoveryTargetId(slices, item, ready);
+    if (recoveryId && live.sliceId === recoveryId && !otherLiveBlocker(state, item, recoveryId)) {
+      if (due.has(recoveryId)) return { ...base, decision: "recovery_due" as const, heldBy };
       // Not due: cooling down (retryAt known) or cut by this tick's AIMD rate.
-      const retryAt = coolingDown(state, DISPATCH_RECOVERY_DOMAIN, sliceId, nowMs)
-        ? new Date(backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, sliceId)).toISOString()
+      const retryAt = coolingDown(state, DISPATCH_RECOVERY_DOMAIN, recoveryId, nowMs)
+        ? new Date(backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, recoveryId)).toISOString()
         : undefined;
       return { ...base, decision: "recovery_backoff" as const, heldBy, ...(retryAt ? { retryAt } : {}) };
     }

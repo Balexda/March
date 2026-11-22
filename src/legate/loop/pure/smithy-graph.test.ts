@@ -282,6 +282,33 @@ describe("smithy-graph pure helpers", () => {
     expect(dependencyIds(status, item)).toEqual(["t.md#S0", "other.md#S9"]);
   });
 
+  it("#599: a dependency archived MERGED under an old cut id is satisfied by action key", () => {
+    const tasks = "docs/specs/structured-review-feedback-with-automatic-retry-handling.tasks.md";
+    const status = {
+      graph: {
+        nodes: {
+          [tasks + "#S2"]: { record_path: tasks, row: { depends_on: ["S1"] } },
+          [tasks + "#S1"]: { record_path: tasks, row: { id: "S1" }, status: "in_progress" },
+        },
+      },
+      records: [{ path: tasks, parent_path: tasks, parent_row_id: "US1" }],
+    };
+    const item = { next_action: { command: "smithy.forge", arguments: [tasks, "2"] } };
+    const archivedUnder = (terminal_state: string) => ({
+      archived_slices: {
+        "structured-review-feedback-with-automatic-retry-handling-forge": {
+          command: "smithy.forge",
+          arguments: [tasks, "1"],
+          artifact_path: tasks,
+          terminal_state,
+        },
+      },
+    });
+    expect(dependenciesClear(archivedUnder("MERGED"), status, item)).toBe(true);
+    expect(dependenciesClear(archivedUnder("ESCALATED"), status, item)).toBe(false);
+    expect(dependenciesClear({}, status, item)).toBe(false);
+  });
+
   it("dependenciesClear is true when every dep is satisfied", () => {
     const status = {
       graph: { nodes: { "t.md#S1": { record_path: "t.md", row: { depends_on: ["S0"] } }, "t.md#S0": { status: "done" } } },
