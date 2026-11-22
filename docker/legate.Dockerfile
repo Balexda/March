@@ -56,6 +56,18 @@ RUN npm ci --omit=dev
 # Smithy CLI — the legate runs `smithy status` each tick to find ready work.
 RUN npm install -g @balexda/smithy@0.5.13 && npm cache clean --force
 COPY --from=build /app/dist ./dist
+
+# Build stamp (passed from scripts/build-args.sh; after the dist COPY so the
+# slow layers above stay cached). Empty = unknown.
+ARG MARCH_GIT_SHA=""
+ARG MARCH_GIT_DESCRIBE=""
+ARG MARCH_BUILD_TIME=""
+ENV MARCH_GIT_SHA=$MARCH_GIT_SHA \
+    MARCH_GIT_DESCRIBE=$MARCH_GIT_DESCRIBE \
+    MARCH_BUILD_TIME=$MARCH_BUILD_TIME
+LABEL org.opencontainers.image.revision=$MARCH_GIT_SHA \
+      org.opencontainers.image.version=$MARCH_GIT_DESCRIBE \
+      org.opencontainers.image.created=$MARCH_BUILD_TIME
 # `march` on PATH; a world-writable log dir so the service can write its log
 # file under any runtime uid/gid the compose `user:` selects.
 RUN ln -sf /app/dist/cli.js /usr/local/bin/march \

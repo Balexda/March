@@ -1,4 +1,4 @@
-name: Publish to npm
+name: Release
 
 on:
   workflow_dispatch:
@@ -18,6 +18,20 @@ on:
         required: true
         type: boolean
         default: false
+      bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      publish_npm:
+        description: 'Also publish to npm (after the tag and GitHub Release are created)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: npm-publish
@@ -32,6 +46,15 @@ jobs:
         BRANCH="${{ inputs.branch }}"
         if [[ ! "$BRANCH" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
           echo "::error::Invalid branch name: '$BRANCH'"
+          exit 1
+        fi
+
+    - name: Validate bump type
+      env:
+        BUMP: ${{ inputs.bump }}
+      run: |
+        if [[ ! "$BUMP" =~ ^(patch|minor|major)$ ]]; then
+          echo "::error::Invalid bump type: '$BUMP' (expected patch, minor or major)"
           exit 1
         fi
 
@@ -85,12 +108,11 @@ jobs:
 
     - name: Bump version
       id: version
+      env:
+        BUMP: ${{ inputs.bump }}
       run: |
-        npm version patch -m "release: v%s"
+        npm version "$BUMP" -m "release: v%s"
         echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
-
-    - name: Publish to npm
-      run: npm publish
 
     - name: Push version commit and tag
       run: |
@@ -104,3 +126,7 @@ jobs:
         gh release create "v${{ steps.version.outputs.version }}" \
           --title "v${{ steps.version.outputs.version }}" \
           --generate-notes
+
+    - name: Publish to npm
+      if: ${{ inputs.publish_npm }}
+      run: npm publish

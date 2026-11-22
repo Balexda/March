@@ -39,7 +39,7 @@ describe("statio container artifacts", () => {
     const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string> };
 
     expect(pkg.scripts["build:statio-image"]).toBe(
-      "docker build -t march-statio:latest -f docker/statio.Dockerfile .",
+      "docker build $(sh scripts/build-args.sh) -t march-statio:latest -f docker/statio.Dockerfile .",
     );
     expect(pkg.scripts["build:images"]).toContain("npm run build:statio-image");
   });

@@ -273,6 +273,7 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect(status.last_seq).toBe(1);
     expect(status.slices_observed).toBe(1);
     expect(status.last_observe_duration_ms).toBe(42);
+    expect(status.build.service).toBe("herald");
   });
 
   it("#592: repo.sync.changed is validated, folded, and served per profile on /status", async () => {

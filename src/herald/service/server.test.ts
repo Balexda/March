@@ -24,7 +24,7 @@ describe.skipIf(!sqliteAvailable)("buildServer", () => {
     expect(wired).toBe(store);
     const res = await app.inject({ method: "GET", url: "/healthz" });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: "ok" });
+    expect(res.json()).toMatchObject({ status: "ok", build: { service: "herald" } });
   });
 
   it("serves appended events end-to-end through the app", async () => {

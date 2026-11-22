@@ -16,6 +16,7 @@ import { selfBotLogin } from "../profiles/merge-policy.js";
 import { reviewWaitMs } from "../profiles/review-config.js";
 import type { ProfileStore } from "../profiles/store.js";
 import { projectReviewStates } from "./state-projection.js";
+import { buildInfo } from "../../shared/build-info.js";
 import type { AppendAttribution, EventStore } from "./store.js";
 import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType, type OperatorSliceAction } from "../events.js";
 
@@ -385,7 +386,7 @@ export async function registerRoutes(
     });
   });
 
-  app.get("/healthz", async () => ({ status: "ok" }));
+  app.get("/healthz", async () => ({ status: "ok", build: buildInfo("herald") }));
 
   app.get("/readyz", async (_request, reply) => {
     const finder = isFinderAvailable();
@@ -656,6 +657,7 @@ export async function registerRoutes(
       smithy: def.smithy,
       state_present: def.statePresent,
       state_error: def.stateError,
+      build: buildInfo("herald"),
     };
   });
 }

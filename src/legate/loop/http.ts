@@ -3,6 +3,7 @@ import { bearerMatches } from "../../shared/bearer.js";
 import { threadCommentIds } from "./handlers/babysit.js";
 import type { LoopSnapshot } from "./runtime.js";
 import { releasableArchive } from "./pure/slice.js";
+import { buildInfo } from "../../shared/build-info.js";
 
 /**
  * HTTP API for the profile-agnostic Legate service, built on Fastify. The
@@ -304,13 +305,13 @@ export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<stri
   if (profile) {
     const entry = snap.byProfile[profile];
     if (!entry) return { ok: false, error: `unknown profile "${profile}".`, profiles: snap.profiles };
-    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick), checkout: entry.lastDispatch?.checkout ?? null };
+    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick), checkout: entry.lastDispatch?.checkout ?? null, build: buildInfo("legate", { startedAtMs: ctx.startedAtMs }) };
   }
   const byProfile: Record<string, unknown> = {};
   for (const p of snap.profiles) {
     byProfile[p] = { ...statusForRecord(snap.byProfile[p].lastHeartbeat, tick), checkout: snap.byProfile[p].lastDispatch?.checkout ?? null };
   }
-  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile, build: buildInfo("legate", { startedAtMs: ctx.startedAtMs }) };
 }
 
 /** One escalated task in the /escalations interrogation payload — work needing
@@ -564,6 +565,7 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     pid: process.pid,
     uptime_seconds: Math.round((Date.now() - ctx.startedAtMs) / 1000),
     profiles: ctx.getSnapshot().profiles,
+    build: buildInfo("legate", { startedAtMs: ctx.startedAtMs }),
   }));
 
   app.get("/status", async (request) => {
