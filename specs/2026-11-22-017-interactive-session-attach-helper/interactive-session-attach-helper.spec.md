@@ -51,13 +51,13 @@ As an operator, I want one list of attachable names and tracked spawns so I can 
 
 **Acceptance Scenarios**:
 
-1. **Given** the sources in the independent test are healthy, **When** I run `march brood sessions`, **Then** I see the live `march/` session's attach name alongside the tracked spawn ID with their kinds distinguishable. Unrelated and stale interactive entries are omitted.
+1. **Given** the sources in the independent test are healthy, **When** I run `march brood sessions`, **Then** I see the live `march/` session's attach name alongside the tracked spawn ID with their kinds distinguishable. Unrelated and stale interactive entries are omitted. A live name equal to a tracked spawn ID is shown as unavailable, with the spawn-ID collision as the reason, and is not advertised as attachable.
 2. **Given** there are no live `march/` sessions, **When** I list sessions, **Then** the command succeeds, displays an empty interactive section or message, and preserves the spawn results.
 3. **Given** Castra or the Brood read source fails or times out, **When** I list sessions, **Then** the command exits nonzero, identifies the unavailable source, and labels any available results as partial.
 
 ### Edge Cases
 
-- A tracked spawn ID takes precedence over an equal attach name, regardless of spawn status.
+- A tracked spawn ID takes precedence over an equal attach name, regardless of spawn status. `march brood sessions` lists such a name as unavailable. This feature defines no alternative selector, so the session cannot be attached by that name until it is renamed.
 - Target disappearance between resolution and attachment produces the same failure as an unavailable target. Attachment uses exact matching.
 - A healthy tmux installation with no running session server or no eligible sessions yields an empty interactive inventory. Missing tmux or a permission failure is an inventory error.
 
@@ -78,7 +78,7 @@ As an operator, I want one list of attachable names and tracked spawns so I can 
 - **FR-002 (US1)**: The CLI MUST reject tracked spawn IDs before interactive attachment. If it cannot check whether the input is a spawn ID, it MUST fail before handoff.
 - **FR-003 (US1)**: The CLI MUST delegate lookup of an exact live interactive target to Castra and hand the operator's terminal to that target. Detach MUST leave the target running.
 - **FR-004 (US1, US2)**: Lookup and inventory calls MUST have bounded failure paths and actionable diagnostics. Successful attachment lasts until normal detach or termination of the terminal session.
-- **FR-005 (US2)**: The CLI MUST present Castra's live `march/` inventory and Brood's tracked spawn results in a single read-only view. The view MUST distinguish a successful empty result from an unavailable source.
+- **FR-005 (US2)**: The CLI MUST present Castra's live `march/` inventory and Brood's tracked spawn results in a single read-only view. The view MUST distinguish a successful empty result from an unavailable source. It MUST mark interactive names that collide with tracked spawn IDs as unavailable.
 
 ## Assumptions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
@@ -101,6 +101,6 @@ _None — no specification debt was recorded._
 ## Success Criteria
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-- **SC-001**: From a host terminal, a listed eligible name attaches to exactly one live session and leaves it running on detach.
+- **SC-001**: From a host terminal, a listed name that is not marked unavailable attaches to exactly one live session and leaves it running on detach.
 - **SC-002**: Every tracked spawn ID in the acceptance cases exits nonzero with its logs command, including when an interactive name collides.
 - **SC-003**: Listing combines both sources, omits ineligible targets, succeeds for a healthy empty interactive inventory, and exits nonzero for source failures.
