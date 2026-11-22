@@ -28,7 +28,7 @@ The [CLI dispatcher](../../src/cli/program.ts#L2679) allocates a Git branch and 
 
 ## Follow-up PR tracking
 
-Each open entry records an ownership check a separate fix PR must establish, tracked by the linked issue. The CLI scenario keeps its isolation assertions and uses the ordinary success path.
+Each open entry records an ownership check a separate fix PR must establish. No fix PR exists yet, and this audit ships none. The linked issue tracks each fix until its PR is opened, and that PR closes the issue. The CLI scenario keeps its isolation assertions and uses the ordinary success path.
 
 | ID | Open follow-up PR scope | Failing ownership check | Tracking |
 | --- | --- | --- | --- |
