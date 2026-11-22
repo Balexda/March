@@ -251,6 +251,14 @@ those images is a separate concern:
   aggregate of the `build:<service>-image` scripts), then `march upgrade` to roll
   the containers onto them. **`npm run deploy:local`** chains both — build the CLI
   + the five service images, then recreate.
+- **Build stamp.** The `build:<service>-image` scripts pass
+  `$(sh scripts/build-args.sh)`, which emits `--build-arg MARCH_GIT_SHA`,
+  `MARCH_GIT_DESCRIBE` and `MARCH_BUILD_TIME`. The Dockerfiles turn these into
+  `ENV` plus the OCI labels `org.opencontainers.image.revision|version|created`,
+  and Legate and Herald report them in the `build` object on `/healthz` and
+  `/status` (alongside `version`, `service` and `started_at`). Values that were not
+  supplied show as `null`, never an empty string. Export the variables beforehand
+  to override them.
 - Pulling prebuilt images from a *hosted* registry — so an npm/brew install with
   no source can fetch fresh images rather than only recreate local ones — is
   tracked in **[issue #438](https://github.com/Balexda/March/issues/438)**.
@@ -398,6 +406,7 @@ Before publishing a new version:
 1. All automated tests pass: `npm test` completes the sequential fail-fast aggregate deterministic PR gate over `npm run test:l0`, `npm run test:l1`, `npm run test:l2-cassette`, and `npm run test:l3-cassette`
 2. Agent tests (A1–A5) verified in a Claude Code session
 3. Human tests (H1–H2) verified in an interactive terminal
-4. Trigger the **Publish to npm** workflow with both test gate checkboxes checked
+4. Trigger the **Release** workflow (`.github/workflows/publish.yml`) with `branch` set to `main` (the default; the tag, version commit and GitHub Release land on whichever branch you name, and step 5 deploys from `main`), both test gate checkboxes checked, and the `bump` input set (`patch`, `minor` or `major`; default `patch`). It creates the version commit, the `v<version>` tag and the GitHub Release first. npm publish runs last and is opt-in via the `publish_npm` input (default off)
+5. After the release, from up-to-date `main`, run `npm run deploy:local` to rebuild and roll the local stack
 
 See **[docs/testing-strategy.md § Cost policy](docs/testing-strategy.md#6-cost-policy)** for the principles, and the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) for the sequencing — scheduled stochastic runs and cassette refresh interact with the release flow once those milestones land.

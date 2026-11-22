@@ -226,8 +226,8 @@ handler — the `slice.recovery.requested` (operator) and the ensuing fresh
 
 | Method + path | Purpose |
 |---------------|---------|
-| `GET /healthz` | liveness |
-| `GET /status` | latest heartbeat snapshot (last tick, queue, workers, counts); `?profile=` for one profile |
+| `GET /healthz` | liveness + `build` stamp (service, version, describe, commit, built_at, started_at; unset values are `null`) |
+| `GET /status` | latest heartbeat snapshot (last tick, queue, workers, counts) plus the same `build` stamp; `?profile=` for one profile |
 | `GET /escalations` | escalated slices needing an operator (reason, PR, session, worktree); `?profile=` for one profile |
 | `POST /escalations/:sliceId/respond` | answer (`message`) or acknowledge (`ack:true`) a `steward_awaiting_input` escalation on a live steward |
 | `POST /slices/:sliceId/requeue` | discard the slice's attempt (session, worktree, branch; open PR only with `closePr:true`) and re-dispatch it fresh — works on dead sessions and pending questions ([#588](https://github.com/Balexda/March/issues/588)); 202 + the [`requeue`](./handlers/requeue.ts) handler acts next tick |

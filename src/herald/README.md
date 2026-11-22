@@ -157,13 +157,13 @@ branch-variant PR matching, the `--pending` smithy query).
 
 | Method + path                 | Purpose |
 |-------------------------------|---------|
-| `GET /healthz`                | liveness |
+| `GET /healthz`                | liveness + `build` stamp (service, version, describe, commit, built_at, started_at; unset values are `null`) |
 | `GET /readyz`                 | `git`/`gh`/`smithy` on PATH (+ Castra reachability, best-effort) |
 | `GET /events?after=&limit=`   | **the inbox** — events strictly after a cursor |
 | `POST /events`                | append a transition event (legate write-path; `source` forced to `legate`) |
 | `GET /state?at=`              | current projection, or as-of a `seq` |
 | `GET /state/delta?from=&to=`  | the events that moved state between two points |
-| `GET /status`                 | observe summary (last tick, event count, queue, workers, …) |
+| `GET /status`                 | observe summary (last tick, event count, queue, workers, …) plus the `build` stamp |
 
 Operators get the same views from the CLI: `march herald events` / `march herald
 state`.

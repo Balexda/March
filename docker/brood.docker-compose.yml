@@ -57,6 +57,10 @@ services:
     build:
       context: ..
       dockerfile: docker/brood.Dockerfile
+      args:
+        MARCH_GIT_SHA: "${MARCH_GIT_SHA:-}"
+        MARCH_GIT_DESCRIBE: "${MARCH_GIT_DESCRIBE:-}"
+        MARCH_BUILD_TIME: "${MARCH_BUILD_TIME:-}"
     image: march-brood:latest
     container_name: march-brood
     restart: on-failure

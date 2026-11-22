@@ -874,3 +874,42 @@ describe("resolveResendTarget (#593)", () => {
     expect(resolveResendTarget({ ...slice, worker_session_id: null }, observed)).toMatchObject({ ok: false, status: 409, error: expect.stringContaining("relaunch") });
   });
 });
+
+describe("loop http build stamp (C-BUILD)", () => {
+  const startedAtMs = Date.UTC(2026, 10, 20, 7, 1, 10, 500);
+  const ctx = (): LoopHttpContext => ({ startedAtMs, getSnapshot: () => snapshot() });
+  const expected = { service: "legate", started_at: "2026-11-20T07:01:10Z" };
+
+  it("includes build on /healthz", async () => {
+    const app = buildLoopServer(ctx());
+    try {
+      const res = await app.inject({ method: "GET", url: "/healthz" });
+      expect(res.json().build).toMatchObject(expected);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("includes build on /status (bare and known profile)", async () => {
+    const app = buildLoopServer(ctx());
+    try {
+      const bare = await app.inject({ method: "GET", url: "/status" });
+      expect(bare.json().build).toMatchObject(expected);
+      const one = await app.inject({ method: "GET", url: "/status?profile=smithy" });
+      expect(one.json().build).toMatchObject(expected);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("omits build from the unknown-profile error", async () => {
+    const app = buildLoopServer(ctx());
+    try {
+      const res = await app.inject({ method: "GET", url: "/status?profile=nope" });
+      expect(res.json().ok).toBe(false);
+      expect(res.json()).not.toHaveProperty("build");
+    } finally {
+      await app.close();
+    }
+  });
+});

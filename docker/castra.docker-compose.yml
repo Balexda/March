@@ -39,6 +39,10 @@ services:
     build:
       context: ..
       dockerfile: docker/castra.Dockerfile
+      args:
+        MARCH_GIT_SHA: "${MARCH_GIT_SHA:-}"
+        MARCH_GIT_DESCRIBE: "${MARCH_GIT_DESCRIBE:-}"
+        MARCH_BUILD_TIME: "${MARCH_BUILD_TIME:-}"
     image: march-castra:latest
     container_name: march-castra
     # on-failure (not unless-stopped): the stack must NOT autostart on Docker

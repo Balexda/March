@@ -49,6 +49,10 @@ services:
     build:
       context: ..
       dockerfile: docker/legate.Dockerfile
+      args:
+        MARCH_GIT_SHA: "${MARCH_GIT_SHA:-}"
+        MARCH_GIT_DESCRIBE: "${MARCH_GIT_DESCRIBE:-}"
+        MARCH_BUILD_TIME: "${MARCH_BUILD_TIME:-}"
     image: march-legate:latest
     container_name: march-legate
     restart: on-failure
