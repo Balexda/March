@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildEscalations,
   buildLoopServer,
+  buildSlices,
   buildStatus,
   escalationsForWorkingState,
   resolveRequeueTarget,
@@ -872,5 +873,75 @@ describe("resolveResendTarget (#593)", () => {
     expect(resolveResendTarget({ stage: "pr-open", worker_session_id: "w1" }, undefined)).toMatchObject({ ok: false, status: 409 });
     expect(resolveResendTarget(slice, { number: 9, unresolved_threads: [] })).toMatchObject({ ok: false, status: 409 });
     expect(resolveResendTarget({ ...slice, worker_session_id: null }, observed)).toMatchObject({ ok: false, status: 409, error: expect.stringContaining("relaunch") });
+  });
+});
+
+describe("GET /slices", () => {
+  const since = Date.parse("2026-06-14T08:00:00.000Z");
+  const snap = snapshot({
+    byProfile: {
+      smithy: {
+        lastHeartbeat: heartbeat,
+        workingState: {
+          slices: {
+            "a-forge": {
+              stage: "pr-open", pr: { number: 11 }, merge_gate: "waiting-approval", merge_gate_since: since,
+              pr_blocker: "none", merge_failing: ["approval:stale-head"],
+            },
+            "b-cut": { stage: "pr-open", pr: { number: 12 }, pr_blocker: "ci_failing", merge_gate: "not-ready", merge_failing: ["checks:not-green"] },
+            "c-forge": { stage: "pr-open", pr: { number: 13 } }, // no stamp yet
+            "d-forge": { stage: "implementing" }, // no PR
+          },
+        },
+      },
+    },
+  });
+
+  it("lists PR-bearing slices with gate, since (RFC3339), blocker and failing codes", async () => {
+    const app = buildLoopServer(ctxWith(snap));
+    try {
+      const res = await app.inject({ method: "GET", url: "/slices?profile=smithy" });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({ ok: true, profile: "smithy", count: 3 });
+      expect(body.slices.map((r: any) => r.slice_id)).toEqual(["a-forge", "b-cut", "c-forge"]); // d-forge omitted
+      expect(body.slices[0]).toEqual({
+        slice_id: "a-forge", pr_number: 11, merge_gate: "waiting-approval",
+        merge_gate_since: "2026-06-14T08:00:00.000Z", pr_blocker: null, failing: ["approval:stale-head"],
+      });
+      expect(body.slices[0].merge_gate_since).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+      expect(body.slices[1].pr_blocker).toBe("ci_failing");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a slice without a stamp reports merge_gate null and failing []", () => {
+    const out = buildSlices(ctxWith(snap), "smithy", "c-forge") as any;
+    expect(out.slices).toEqual([
+      { slice_id: "c-forge", pr_number: 13, merge_gate: null, merge_gate_since: null, pr_blocker: null, failing: [] },
+    ]);
+  });
+
+  it("filters by ?slice=", async () => {
+    const app = buildLoopServer(ctxWith(snap));
+    try {
+      const res = await app.inject({ method: "GET", url: "/slices?profile=smithy&slice=b-cut" });
+      expect(res.json().count).toBe(1);
+      expect(res.json().slices[0].slice_id).toBe("b-cut");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("404s an unknown profile", async () => {
+    const app = buildLoopServer(ctxWith(snap));
+    try {
+      const res = await app.inject({ method: "GET", url: "/slices?profile=nope" });
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ ok: false, profiles: ["smithy"] });
+    } finally {
+      await app.close();
+    }
   });
 });

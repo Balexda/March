@@ -4,7 +4,7 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import type { ReviewObservation } from "../../../observe/sense-io.js";
 import { hashText } from "../pure/hash.js";
 import { approvalSatisfied, changesRequestedSatisfied, eligibleReviewer, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { mergeBlocker, mergeVerdict, taskTypeForSlice } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
   clearBackoff,
@@ -730,7 +730,9 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
   // blocked-merge-state / not-ready), the same gate babysit's auto-merge decision
   // uses. The summary tallies this stamp instead of recomputing from the
   // possibly-stale persisted slice.pr (#stack-observability).
-  slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
+  const verdict = mergeVerdict(sliceId, slice, pr, mergePolicy);
+  slice.merge_gate = verdict.gate;
+  slice.merge_failing = verdict.failing;
   // Stamp the complementary merge-BLOCKER (conflicting / owes_review_threads /
   // owes_comments / ci_failing / none) — the not-ready reasons the 3-way gauge
   // collapses away. summarizeSlicesByStage tallies this stamp into the pr_blocker

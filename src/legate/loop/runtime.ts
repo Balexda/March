@@ -43,7 +43,7 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createFoldDeps } from "./state/fold-deps.js";
 import { execLegateGh, LegateGitHubError, requestCopilotReview } from "./clients/github.js";
-import { LABEL_SPECS } from "./pure/pr-labels.js";
+import { LABEL_SPECS, NEEDS_HUMAN_REASON_MARKER } from "./pure/pr-labels.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
@@ -854,6 +854,30 @@ async function commentOnPrGh(repoPath: string, prNumber: number, body: string, s
   await execLegateGh("write", ["pr", "comment", String(prNumber), "--body", body], repoPath, sliceId);
 }
 
+/** Find March's needs-human reason comment (oldest carrying the marker). */
+async function findReasonCommentGh(repoPath: string, prNumber: number): Promise<{ id: number; body: string } | null> {
+  const out = await execLegateGh("read", [
+    "api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues/${prNumber}/comments?per_page=100`,
+  ], repoPath);
+  const pages = JSON.parse(out);
+  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new Error("Incomplete PR comment history");
+  for (const comment of pages.flat()) {
+    if (typeof comment?.body === "string" && comment.body.includes(NEEDS_HUMAN_REASON_MARKER) && Number.isInteger(comment.id)) {
+      return { id: comment.id, body: comment.body };
+    }
+  }
+  return null;
+}
+
+/** Create (no id) or edit the needs-human reason comment. */
+async function upsertReasonCommentGh(repoPath: string, prNumber: number, body: string, existingId?: number): Promise<void> {
+  if (existingId === undefined) {
+    await execLegateGh("write", ["api", "-X", "POST", `repos/{owner}/{repo}/issues/${prNumber}/comments`, "-f", `body=${body}`], repoPath);
+  } else {
+    await execLegateGh("write", ["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${existingId}`, "-f", `body=${body}`], repoPath);
+  }
+}
+
 async function postCodeRabbitTrigger(repoPath: string, prNumber: number, body: string, sliceId: string): Promise<ReviewPostOutcome> {
   try {
     await execLegateGh("write", [
@@ -1134,6 +1158,9 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
       labelPrGh(repoPath, prNumber, label, sliceId),
     removeLabel: (repoPath: string, prNumber: number, label: string, sliceId?: string) =>
       unlabelPrGh(repoPath, prNumber, label, sliceId),
+    findReasonComment: (repoPath: string, prNumber: number) => findReasonCommentGh(repoPath, prNumber),
+    upsertReasonComment: (repoPath: string, prNumber: number, body: string, existingId?: number) =>
+      upsertReasonCommentGh(repoPath, prNumber, body, existingId),
   };
 
   const ioDeps = dispatchIoDeps(meta);

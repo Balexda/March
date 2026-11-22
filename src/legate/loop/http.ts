@@ -543,6 +543,60 @@ export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record
   return { ok: true, profiles: snap.profiles, by_profile: byProfile };
 }
 
+/** One PR-bearing slice's merge verdict, as stamped by babysit's `snapshot()`. */
+export interface SliceMergeRow {
+  slice_id: string;
+  pr_number: number;
+  merge_gate: string | null;
+  /** RFC3339 time the gate last changed, or null when not yet stamped. */
+  merge_gate_since: string | null;
+  pr_blocker: string | null;
+  failing: string[];
+}
+
+/** Rows for every slice with a PR in one working state (pure; testable). */
+export function slicesForWorkingState(workingState: any, sliceId?: string): SliceMergeRow[] {
+  const slices = workingState?.slices;
+  if (!slices || typeof slices !== "object") return [];
+  const out: SliceMergeRow[] = [];
+  for (const [id, s] of Object.entries(slices as Record<string, any>)) {
+    if (sliceId && id !== sliceId) continue;
+    if (!s || typeof s !== "object") continue;
+    const num = s.pr?.number;
+    if (num == null) continue;
+    const since = typeof s.merge_gate_since === "number" && Number.isFinite(s.merge_gate_since)
+      ? new Date(s.merge_gate_since).toISOString()
+      : null;
+    out.push({
+      slice_id: id,
+      pr_number: num,
+      merge_gate: typeof s.merge_gate === "string" ? s.merge_gate : null,
+      merge_gate_since: since,
+      pr_blocker: typeof s.pr_blocker === "string" && s.pr_blocker !== "none" ? s.pr_blocker : null,
+      failing: Array.isArray(s.merge_failing) ? s.merge_failing.map(String) : [],
+    });
+  }
+  return out;
+}
+
+/** Build the /slices payload: each PR-bearing slice's merge gate + failing condition
+ *  codes. Returns null for an unknown profile (the route maps it to 404). */
+export function buildSlices(ctx: LoopHttpContext, profile?: string, sliceId?: string): Record<string, unknown> | null {
+  const snap = ctx.getSnapshot();
+  if (profile) {
+    const entry = Object.hasOwn(snap.byProfile, profile) ? snap.byProfile[profile] : undefined;
+    if (!entry) return null;
+    const slices = slicesForWorkingState(entry.workingState, sliceId);
+    return { ok: true, profile, count: slices.length, slices };
+  }
+  const byProfile: Record<string, unknown> = {};
+  for (const p of snap.profiles) {
+    const slices = slicesForWorkingState(snap.byProfile[p].workingState, sliceId);
+    byProfile[p] = { count: slices.length, slices };
+  }
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+}
+
 /** Build the Fastify app with the loop routes registered. Exported for tests (inject). */
 export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -580,6 +634,19 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     const profile =
       typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
     const body = buildQueue(ctx, profile);
+    if (body) return body;
+    reply.code(404);
+    return { ok: false, error: `unknown profile "${profile}".`, profiles: ctx.getSnapshot().profiles };
+  });
+
+  // Merge verdict per PR-bearing slice: the gate + every failing condition code
+  // (stamped by babysit each tick). `?profile=<p>[&slice=<id>]`.
+  app.get("/slices", async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const slice = typeof query.slice === "string" && query.slice.length > 0 ? query.slice : undefined;
+    const body = buildSlices(ctx, profile, slice);
     if (body) return body;
     reply.code(404);
     return { ok: false, error: `unknown profile "${profile}".`, profiles: ctx.getSnapshot().profiles };

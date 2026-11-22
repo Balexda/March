@@ -143,8 +143,31 @@ interface ReviewEvidence {
   reviews_complete?: boolean;
   head_sha?: string | null;
   reviews?: readonly ReviewObservation[];
-  coderabbit?: { decision_is_bot?: true; decision?: string | null } | null;
+  coderabbit?: { decision_is_bot?: true; decision?: string | null; decision_commit_sha?: string | null } | null;
 }
+
+/**
+ * Why the approval gate failed. Stable machine-readable codes, surfaced by the
+ * legate's merge verdict (`slice.merge_failing`, `GET /slices`) and the
+ * needs-human reason comment.
+ *   - `approval:missing`              — per-review evidence present, no eligible approval on head.
+ *   - `approval:no-review-evidence`   — the observer published no per-review evidence and
+ *                                       no proven bot approval covers the head.
+ *   - `approval:evidence-incomplete`  — the observer could not read every review page.
+ *   - `approval:stale-head`           — the bot approval is for an older commit.
+ */
+export type ApprovalCode =
+  | "approval:missing"
+  | "approval:no-review-evidence"
+  | "approval:evidence-incomplete"
+  | "approval:stale-head";
+
+export const APPROVAL_CODES: readonly ApprovalCode[] = [
+  "approval:missing",
+  "approval:no-review-evidence",
+  "approval:evidence-incomplete",
+  "approval:stale-head",
+];
 
 export function eligibleReviewer(req: ResolvedMergeRequirements, review: ReviewObservation): boolean {
   const login = normalizeBotLogin(review.login);
@@ -158,17 +181,53 @@ export function approvalSatisfied(
   req: ResolvedMergeRequirements,
   pr: ReviewEvidence | null | undefined,
 ): boolean {
-  if (!req.approval) return true;
+  return approvalEvidence(req, pr).ok;
+}
+
+const lowerSha = (sha: unknown): string => (typeof sha === "string" ? sha.toLowerCase() : "");
+
+/**
+ * The single implementation of the approval gate, with the reason it failed.
+ * {@link approvalSatisfied} is `approvalEvidence(...).ok`.
+ *
+ * When the observer published no per-review evidence (`reviews` absent — e.g. an
+ * observer older than the dispatcher), a rule that accepts bot approval still
+ * passes on a PROVEN bot approval of the current head: CodeRabbit's standing
+ * decision is APPROVED, established from the full review list as a bot verdict
+ * (`decision_is_bot`), for exactly `head_sha`, CodeRabbit is allowlisted, and
+ * March is not itself running as CodeRabbit. Rules without bot approval keep the
+ * strict human-only fallback.
+ */
+export function approvalEvidence(
+  req: ResolvedMergeRequirements,
+  pr: ReviewEvidence | null | undefined,
+): { ok: boolean; code: ApprovalCode | null } {
+  if (!req.approval) return { ok: true, code: null };
   // Partial review evidence can hide a later verdict, so it never establishes approval.
-  if (pr?.reviews_complete === false) return false;
+  if (pr?.reviews_complete === false) return { ok: false, code: "approval:evidence-incomplete" };
+  const head = lowerSha(pr?.head_sha);
   if (pr?.reviews) {
-    return pr.reviews.some((review) =>
+    const ok = pr.reviews.some((review) =>
       review.state === "APPROVED" && eligibleReviewer(req, review) &&
       (review.author_kind === "human" ||
         (req.botApproval && !!pr.head_sha && review.commit_sha === pr.head_sha)),
     );
+    if (ok) return { ok: true, code: null };
+    const staleBot = req.botApproval && pr.reviews.some((review) =>
+      review.state === "APPROVED" && review.author_kind === "bot" && eligibleReviewer(req, review) &&
+      !!review.commit_sha && lowerSha(review.commit_sha) !== head);
+    return { ok: false, code: staleBot ? "approval:stale-head" : "approval:missing" };
   }
-  return typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1;
+  const humanOk = typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1;
+  if (!req.botApproval) return humanOk ? { ok: true, code: null } : { ok: false, code: "approval:no-review-evidence" };
+  const cr = pr?.coderabbit;
+  const decisionSha = lowerSha(cr?.decision_commit_sha);
+  const botProven = cr?.decision === "APPROVED" && cr.decision_is_bot === true &&
+    !!head && decisionSha === head &&
+    req.botApprovers.includes(CODERABBIT_LOGIN) && selfBotLogin() !== CODERABBIT_LOGIN;
+  if (botProven || humanOk) return { ok: true, code: null };
+  const stale = cr?.decision === "APPROVED" && !!decisionSha && decisionSha !== head;
+  return { ok: false, code: stale ? "approval:stale-head" : "approval:no-review-evidence" };
 }
 
 export function changesRequestedSatisfied(req: ResolvedMergeRequirements, pr: ReviewEvidence): boolean {

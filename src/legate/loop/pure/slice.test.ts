@@ -30,6 +30,7 @@ import {
   summarizeSlicesByStage,
   countStrandedSlices,
   mergeReadiness,
+  mergeVerdict,
   mergeBlocker,
 } from "./slice.js";
 import { dispatchSliceId } from "./dispatch-id.js";
@@ -263,7 +264,7 @@ describe("slice pure helpers", () => {
 
   it("mergeReadiness is a 3-way over the LIVE pr, honoring the per-task-type merge policy", () => {
     const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
-    const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean" };
+    const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean", head_sha: "head" };
     // #298: cut drops the approval gate by default for EVERY profile, so even an
     // unapproved cut PR with no per-profile policy + clean merge state is ready.
     expect(mergeReadiness("x-cut", slice, clearPr, undefined)).toBe("ready");
@@ -292,13 +293,71 @@ describe("slice pure helpers", () => {
     // UNKNOWN, not a stall → not-ready (no false blocked-merge-state alarm).
     expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: null }, policy)).toBe("not-ready");
     expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: "" }, policy)).toBe("not-ready");
-    expect(mergeReadiness("x-cut", slice, { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0 }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", slice, { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, head_sha: "head" }, policy)).toBe("not-ready");
     // A changes-requested review blocks on the human gate even when approval is relaxed.
     expect(mergeReadiness("x-cut", slice, { ...clearPr, changes_requested_count: 1 }, policy)).toBe("waiting-approval");
     // Not all-clear (failing checks / threads owed / wrong stage) → not-ready.
     expect(mergeReadiness("x-cut", slice, { ...clearPr, checks: "FAIL" }, policy)).toBe("not-ready");
     expect(mergeReadiness("x-cut", slice, { ...clearPr, needs_response_count: 2 }, policy)).toBe("not-ready");
     expect(mergeReadiness("x-cut", { stage: "implementing" }, clearPr, policy)).toBe("not-ready");
+  });
+
+  it("mergeVerdict collects every failing condition and agrees with mergeReadiness", () => {
+    const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
+    const forge = { stage: "pr-open", branch: "feature/smithy/forge/x" };
+    const clear = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean", head_sha: "h" };
+    const policy = { byTaskType: { cut: { approval: false } } } as any;
+    const v = (id: string, sl: any, pr: any, pol?: any) => mergeVerdict(id, sl, pr, pol);
+
+    expect(v("x-cut", slice, clear, policy)).toEqual({ gate: "ready", failing: [] });
+    // not-pr-open is reported alone.
+    expect(v("x-cut", { stage: "implementing" }, { ...clear, checks: "FAIL" }, policy))
+      .toEqual({ gate: "not-ready", failing: ["not-pr-open"] });
+    expect(v("x-cut", null, clear, policy)).toEqual({ gate: "not-ready", failing: ["not-pr-open"] });
+    // One code per condition.
+    expect(v("x-cut", slice, { ...clear, checks: "FAIL" }, policy).failing).toEqual(["checks:not-green"]);
+    expect(v("x-cut", slice, { ...clear, mergeable: "CONFLICTING" }, policy).failing).toEqual(["conflict"]);
+    expect(v("x-cut", slice, { ...clear, needs_response_count: 2 }, policy).failing).toEqual(["threads:owed"]);
+    expect(v("x-cut", slice, { ...clear, needs_response_count: undefined }, policy).failing).toEqual(["threads:owed"]);
+    expect(v("x-cut", slice, { ...clear, changes_requested_count: 1 }, policy))
+      .toEqual({ gate: "waiting-approval", failing: ["changes-requested"] });
+    expect(v("x-cut", slice, { ...clear, merge_state_status: null }, policy))
+      .toEqual({ gate: "not-ready", failing: ["merge-state:unknown"] });
+    expect(v("x-cut", slice, { ...clear, merge_state_status: "BEHIND" }, policy))
+      .toEqual({ gate: "blocked-merge-state", failing: ["merge-state:behind"] });
+    // head_sha missing: never "ready" (babysit's real gate requires it).
+    expect(v("x-cut", slice, { ...clear, head_sha: undefined }, policy))
+      .toEqual({ gate: "not-ready", failing: ["head-sha:missing"] });
+    // Approval codes.
+    expect(v("x-forge", forge, clear).failing).toEqual(["approval:no-review-evidence"]);
+    expect(v("x-forge", forge, clear).gate).toBe("waiting-approval");
+    expect(v("x-forge", forge, { ...clear, reviews: [] }).failing).toEqual(["approval:missing"]);
+    expect(v("x-forge", forge, { ...clear, reviews: [], reviews_complete: false }).failing)
+      .toEqual(["approval:evidence-incomplete", "changes-requested"]);
+    // Multiple at once, in documented order.
+    expect(v("x-forge", forge, { checks: "FAIL", mergeable: "CONFLICTING", needs_response_count: 1, merge_state_status: "DIRTY" }).failing)
+      .toEqual(["checks:not-green", "conflict", "threads:owed", "approval:no-review-evidence", "merge-state:dirty", "head-sha:missing"]);
+  });
+
+  it("mergeReadiness === mergeVerdict(...).gate over a fixture table (parity)", () => {
+    const clear = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean", head_sha: "h" };
+    const policy = { byTaskType: { cut: { approval: false } } } as any;
+    const prs: any[] = [
+      clear, { ...clear, checks: "NONE" }, { ...clear, checks: "FAIL" }, { ...clear, mergeable: "CONFLICTING" },
+      { ...clear, needs_response_count: 3 }, { ...clear, merge_state_status: "BEHIND" }, { ...clear, merge_state_status: "" },
+      { ...clear, head_sha: null }, { ...clear, changes_requested_count: 1 }, { ...clear, human_approval_count: 1 },
+      { ...clear, reviews: [{ login: "a", author_kind: "human", state: "APPROVED", commit_sha: "h" }] },
+      undefined, {},
+    ];
+    const slices: any[] = [
+      { stage: "pr-open", branch: "feature/smithy/cut/x" }, { stage: "pr-open", branch: "feature/smithy/forge/x" },
+      { stage: "pr-in-fix" }, null,
+    ];
+    for (const sl of slices) for (const pr of prs) for (const pol of [undefined, policy]) {
+      for (const id of ["x-cut", "x-forge"]) {
+        expect(mergeReadiness(id, sl, pr, pol)).toBe(mergeVerdict(id, sl, pr, pol).gate);
+      }
+    }
   });
 
   it("summarizeSlicesByStage splits escalated by reason (spawn-failed vs stuck)", () => {

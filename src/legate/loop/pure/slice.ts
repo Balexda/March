@@ -8,7 +8,7 @@ import {
 } from "./dispatch-id.js";
 import { isMarchBotComment } from "../../../observe/march-bot.js";
 import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
-import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalEvidence, changesRequestedSatisfied, resolveMergeRequirements, type ApprovalCode, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
   backoffUntil,
@@ -777,38 +777,103 @@ export function isReadyToMerge(slice: any): boolean {
 export type MergeReadiness = "not-ready" | "ready" | "waiting-approval" | "blocked-merge-state";
 
 /**
- * Classify a slice's merge readiness from the LIVE PR snapshot, mirroring
- * babysit's auto-merge gate EXACTLY (same `resolveMergeRequirements` approval/CR
- * checks + `merge_state_status == clean`). `pr` is the source of the merge fields
- * — pass the freshly observed PR so the verdict reflects what the loop actually
- * sees this tick (babysit stamps it onto `slice.merge_gate` in `snapshot()`); the
- * summary then tallies the stamp rather than recomputing from the possibly-stale
- * persisted `slice.pr`. A missing approval/merge-state field fails its gate
- * (fail-safe — never falsely claims `ready`).
+ * Stable machine-readable reasons a PR-bearing slice is not merging, collected by
+ * {@link mergeVerdict} and stamped onto `slice.merge_failing` by babysit's
+ * `snapshot()`. Exposed by the legate's `GET /slices` route and explained by the
+ * `march:needs-human` reason comment. Do not rename: consumers match on them.
+ *   - `not-pr-open`          — the slice is not at `pr-open` (always reported alone).
+ *   - `checks:not-green`     — CI is neither PASS nor NONE.
+ *   - `conflict`             — the PR conflicts with its base.
+ *   - `threads:owed`         — review threads / comments still owe a response.
+ *   - `approval:*`           — see {@link ApprovalCode}.
+ *   - `changes-requested`    — an eligible reviewer's changes-requested stands.
+ *   - `merge-state:unknown`  — GitHub's merge state is absent (or UNKNOWN).
+ *   - `merge-state:<status>` — GitHub's merge state is present and not clean (e.g. `merge-state:behind`).
+ *   - `head-sha:missing`     — the observed PR carries no head commit, so the loop will not merge.
  */
+export type MergeConditionCode =
+  | "not-pr-open"
+  | "checks:not-green"
+  | "conflict"
+  | "threads:owed"
+  | ApprovalCode
+  | "changes-requested"
+  | "merge-state:unknown"
+  | `merge-state:${string}`
+  | "head-sha:missing";
+
+/**
+ * Classify a slice's merge readiness from the LIVE PR snapshot AND collect every
+ * failing condition, in one pass so the gate and its reasons cannot diverge.
+ * Mirrors babysit's auto-merge gate EXACTLY (same `resolveMergeRequirements`
+ * approval/CR checks + `merge_state_status == clean` + a present `head_sha`).
+ * `pr` is the source of the merge fields — pass the freshly observed PR so the
+ * verdict reflects what the loop actually sees this tick (babysit stamps both
+ * results onto `slice.merge_gate` / `slice.merge_failing` in `snapshot()`); the
+ * summary then tallies the stamp rather than recomputing from the possibly-stale
+ * persisted `slice.pr`. A missing approval/merge-state/head field fails its gate
+ * (fail-safe — never falsely claims `ready`).
+ *
+ * `failing` lists ALL failing conditions (not first-fail), ordered: checks,
+ * conflict, threads, approval, changes-requested, merge state, head sha. A slice
+ * that is not `pr-open` reports `["not-pr-open"]` alone. The gate precedence is:
+ * checks/conflict/threads → `not-ready`; approval/CR → `waiting-approval`; missing
+ * merge state → `not-ready`; non-clean → `blocked-merge-state`; missing head sha →
+ * `not-ready`; else `ready` (`failing` empty).
+ */
+export function mergeVerdict(
+  sliceId: string,
+  slice: any,
+  pr: any,
+  mergePolicy: MergePolicy | undefined,
+): { gate: MergeReadiness; failing: MergeConditionCode[] } {
+  if (!slice || typeof slice !== "object" || slice.stage !== "pr-open") {
+    return { gate: "not-ready", failing: ["not-pr-open"] };
+  }
+  const src = pr ?? {};
+  const failing: MergeConditionCode[] = [];
+  const checksBad = src.checks !== "PASS" && src.checks !== "NONE";
+  if (checksBad) failing.push("checks:not-green");
+  const conflict = src.mergeable === "CONFLICTING";
+  if (conflict) failing.push("conflict");
+  const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
+  const threadsOwed = owed !== 0;
+  if (threadsOwed) failing.push("threads:owed");
+  const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
+  const approval = approvalEvidence(req, src);
+  if (!approval.ok && approval.code) failing.push(approval.code);
+  const crOk = changesRequestedSatisfied(req, src);
+  if (!crOk) failing.push("changes-requested");
+  // A missing/empty merge_state_status (sense-io maps absent → null; also the
+  // case for a cold-start thin slice.pr) is UNKNOWN, not a stall — classify it
+  // not-ready so a partial/restarted observation can't raise a false
+  // blocked-merge-state alarm. Only a present, non-"clean" value is a real stall.
+  const mergeState = src.merge_state_status;
+  const stateUnknown = mergeState == null || mergeState === "";
+  const stateLower = stateUnknown ? "" : String(mergeState).toLowerCase();
+  if (stateUnknown) failing.push("merge-state:unknown");
+  else if (stateLower !== "clean") failing.push(`merge-state:${stateLower}`);
+  const headMissing = !src.head_sha;
+  if (headMissing) failing.push("head-sha:missing");
+
+  let gate: MergeReadiness;
+  if (checksBad || conflict || threadsOwed) gate = "not-ready";
+  else if (!approval.ok || !crOk) gate = "waiting-approval";
+  else if (stateUnknown) gate = "not-ready";
+  else if (stateLower !== "clean") gate = "blocked-merge-state";
+  else if (headMissing) gate = "not-ready";
+  else gate = "ready";
+  return { gate, failing };
+}
+
+/** The merge-readiness gate alone — `mergeVerdict(...).gate`, so they cannot diverge. */
 export function mergeReadiness(
   sliceId: string,
   slice: any,
   pr: any,
   mergePolicy: MergePolicy | undefined,
 ): MergeReadiness {
-  if (!slice || typeof slice !== "object" || slice.stage !== "pr-open") return "not-ready";
-  const src = pr ?? {};
-  if (src.checks !== "PASS" && src.checks !== "NONE") return "not-ready";
-  if (src.mergeable === "CONFLICTING") return "not-ready";
-  const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
-  if (owed !== 0) return "not-ready";
-  const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
-  const approvalOk = approvalSatisfied(req, src);
-  const crOk = changesRequestedSatisfied(req, src);
-  if (!approvalOk || !crOk) return "waiting-approval";
-  // A missing/empty merge_state_status (sense-io maps absent → null; also the
-  // case for a cold-start thin slice.pr) is UNKNOWN, not a stall — classify it
-  // not-ready so a partial/restarted observation can't raise a false
-  // blocked-merge-state alarm. Only a present, non-"clean" value is a real stall.
-  const mergeState = src.merge_state_status;
-  if (mergeState == null || mergeState === "") return "not-ready";
-  return String(mergeState).toLowerCase() === "clean" ? "ready" : "blocked-merge-state";
+  return mergeVerdict(sliceId, slice, pr, mergePolicy).gate;
 }
 
 /**

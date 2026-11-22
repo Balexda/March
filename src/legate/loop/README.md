@@ -85,6 +85,11 @@ The legate owns exactly two labels and never touches any other: `march:opened`
   `escalated`, or its `merge_gate` is `waiting-approval` or
   `blocked-merge-state`; otherwise removed. Dependabot PRs are skipped
   (`dependency-merge` owns the label there). Non-slice PRs have it removed.
+  While wanted, one sticky reason comment (hidden marker
+  `<!-- march:needs-human-reason -->`) says why, from the slice's
+  `merge_failing` codes or `escalated_reason`; it is edited in place and marked
+  `Resolved:` once when the label clears. The per-slice verdict is also served
+  by `GET /slices?profile=<p>[&slice=<id>]`.
 
 Observability: `pr_label` / `pr_label_failure` events, a `legate.pr-label` span
 (on the slice trace when linked), and the `march.legate.pr_labels{label,op,outcome}`

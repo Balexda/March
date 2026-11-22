@@ -3,6 +3,8 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import {
+  APPROVAL_CODES,
+  approvalEvidence,
   approvalSatisfied,
   changesRequestedSatisfied,
   DEFAULT_MERGE_REQUIREMENTS,
@@ -285,5 +287,98 @@ describe("review policy validation", () => {
   it("falls back to the built-in table when stored policy is invalid", () => {
     const invalid = parseMergePolicy('{"byTaskType":{"forge":{"approval":false,"botApprovers":[]}}}');
     expect(resolveMergeRequirements(invalid, "forge")).toEqual(resolveMergeRequirements(undefined, "forge"));
+  });
+});
+
+describe("approvalEvidence", () => {
+  const forge = resolveMergeRequirements(undefined, "forge");
+  const cut = resolveMergeRequirements(undefined, "cut");
+  const mark = resolveMergeRequirements(undefined, "mark");
+  const fix = resolveMergeRequirements(undefined, "fix");
+  const head = "AbC123";
+  const cr = (over: Record<string, unknown> = {}) => ({
+    decision: "APPROVED", decision_is_bot: true as const, decision_commit_sha: head, ...over,
+  });
+  const bot = { head_sha: head, coderabbit: cr() };
+  const ok = { ok: true, code: null };
+
+  it("accepts a proven coderabbit approval of the head when reviews are absent", () => {
+    expect(approvalEvidence(forge, bot)).toEqual(ok);
+    expect(approvalEvidence(forge, { head_sha: head.toLowerCase(), coderabbit: cr({ decision_commit_sha: head.toUpperCase() }) }))
+      .toEqual(ok);
+  });
+
+  it("reports stale-head when the approval is for an older commit", () => {
+    expect(approvalEvidence(forge, { ...bot, head_sha: "newsha" })).toEqual({ ok: false, code: "approval:stale-head" });
+  });
+
+  it("reports no-review-evidence without proven bot data", () => {
+    const none = { ok: false, code: "approval:no-review-evidence" };
+    expect(approvalEvidence(forge, { head_sha: head })).toEqual(none);
+    expect(approvalEvidence(forge, undefined)).toEqual(none);
+    expect(approvalEvidence(forge, { head_sha: head, coderabbit: { decision: "APPROVED", decision_commit_sha: head } }))
+      .toEqual(none);
+    expect(approvalEvidence(forge, { head_sha: head, coderabbit: cr({ decision: "CHANGES_REQUESTED" }) })).toEqual(none);
+  });
+
+  it("reports evidence-incomplete when reviews could not all be read", () => {
+    expect(approvalEvidence(forge, { ...bot, reviews_complete: false }))
+      .toEqual({ ok: false, code: "approval:evidence-incomplete" });
+  });
+
+  it("accepts a human approval count on forge without reviews", () => {
+    expect(approvalEvidence(forge, { head_sha: head, human_approval_count: 1 })).toEqual(ok);
+  });
+
+  it("keeps cut open and mark/fix human-only", () => {
+    expect(approvalEvidence(cut, undefined)).toEqual(ok);
+    for (const req of [mark, fix]) {
+      expect(approvalEvidence(req, bot)).toEqual({ ok: false, code: "approval:no-review-evidence" });
+      expect(approvalEvidence(req, { head_sha: head, human_approval_count: 1 })).toEqual(ok);
+      expect(approvalEvidence(req, { head_sha: head })).toEqual({ ok: false, code: "approval:no-review-evidence" });
+    }
+  });
+
+  it("never accepts coderabbit approval when March runs as coderabbit", () => {
+    vi.stubEnv("MARCH_SELF_BOT_LOGIN", "coderabbitai");
+    try {
+      expect(approvalEvidence(forge, bot).ok).toBe(false);
+      expect(approvalSatisfied(forge, bot)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps the reviews-present path unchanged and codes failures", () => {
+    const review = {
+      login: "coderabbitai", author_kind: "bot", state: "APPROVED", commit_sha: "head",
+      submitted_at: "2026-11-16T12:00:00Z",
+    } as const;
+    const pr = { head_sha: "head", reviews: [review] };
+    expect(approvalEvidence(forge, pr)).toEqual(ok);
+    expect(approvalEvidence(forge, { ...pr, head_sha: "new" })).toEqual({ ok: false, code: "approval:stale-head" });
+    expect(approvalEvidence(forge, { ...pr, reviews: [] })).toEqual({ ok: false, code: "approval:missing" });
+    expect(approvalEvidence(forge, { ...pr, reviews: [{ ...review, state: "COMMENTED" }] }))
+      .toEqual({ ok: false, code: "approval:missing" });
+  });
+
+  it("keeps approvalSatisfied equal to approvalEvidence().ok and codes within the vocabulary", () => {
+    const fixtures = [
+      undefined, { head_sha: head }, bot, { ...bot, head_sha: "new" }, { ...bot, reviews_complete: false },
+      { head_sha: head, human_approval_count: 1 }, { head_sha: "head", reviews: [] },
+    ];
+    for (const req of [forge, cut, mark, fix, DEFAULT_MERGE_REQUIREMENTS]) {
+      for (const pr of fixtures) {
+        const result = approvalEvidence(req, pr);
+        expect(approvalSatisfied(req, pr)).toBe(result.ok);
+        expect(result.ok ? result.code === null : APPROVAL_CODES.includes(result.code!)).toBe(true);
+      }
+    }
+  });
+
+  it("still blocks on a legacy coderabbit CHANGES_REQUESTED verdict without reviews", () => {
+    const blocked = { head_sha: head, coderabbit: cr({ decision: "CHANGES_REQUESTED" }) };
+    expect(changesRequestedSatisfied(forge, blocked)).toBe(false);
+    expect(changesRequestedSatisfied(forge, { head_sha: head })).toBe(true);
   });
 });

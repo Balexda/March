@@ -8,9 +8,12 @@ import {
   PR_LABEL_ADDED_ACTION,
   PR_LABEL_FAILED_ACTION,
   PR_LABEL_REMOVED_ACTION,
+  PR_REASON_POSTED_ACTION,
+  PR_REASON_RESOLVED_ACTION,
+  PR_REASON_UPDATED_ACTION,
   type PrLabelsDeps,
 } from "./pr-labels.js";
-import { NEEDS_HUMAN_LABEL, OPENED_LABEL } from "../pure/pr-labels.js";
+import { needsHumanReasonBody, NEEDS_HUMAN_LABEL, OPENED_LABEL, resolvedReasonBody } from "../pure/pr-labels.js";
 
 const ctx: any = {};
 function mkState(over: any = {}): any {
@@ -115,5 +118,87 @@ describe("pr-labels apply", () => {
     const deps = mkDeps(prs());
     await apply(ctx, mkState({ repoPath: undefined }), deps);
     expect(deps.listOpenPrs).not.toHaveBeenCalled();
+  });
+});
+
+describe("pr-labels reason comment", () => {
+  const slice = { stage: "pr-open", merge_gate: "waiting-approval", merge_failing: ["approval:missing"] };
+  const labelled = () => [{ number: 10, headRefName: "x", labels: [{ name: OPENED_LABEL }, { name: NEEDS_HUMAN_LABEL }] }];
+  const st = (sl: any = slice) => mkState({ slices: { s1: sl } });
+  function reasonDeps(prList: any[], found: { id: number; body: string } | null) {
+    const store = { c: found };
+    const deps = mkDeps(prList, {
+      findReasonComment: vi.fn(async () => store.c),
+      upsertReasonComment: vi.fn(async (_r: string, _n: number, body: string, id?: number) => {
+        store.c = { id: id ?? 99, body };
+      }),
+    });
+    return { deps, store };
+  }
+
+  it("posts exactly one comment, then nothing on the next tick", async () => {
+    const { deps } = reasonDeps(labelled(), null);
+    const state = st();
+    const r1 = await apply(ctx, state, deps);
+    expect(deps.upsertReasonComment).toHaveBeenCalledTimes(1);
+    expect(deps.upsertReasonComment).toHaveBeenCalledWith("/repo", 10, needsHumanReasonBody(slice));
+    expect(r1.actions.map((a) => a.action)).toEqual([PR_REASON_POSTED_ACTION]);
+    deps.advance(CHECK_INTERVAL_MS);
+    const r2 = await apply(ctx, state, deps);
+    expect(deps.upsertReasonComment).toHaveBeenCalledTimes(1);
+    expect(r2.actions).toEqual([]);
+  });
+
+  it("edits with existingId when the reason changed", async () => {
+    const { deps } = reasonDeps(labelled(), { id: 7, body: "<!-- march:needs-human-reason -->\nold" });
+    const res = await apply(ctx, st(), deps);
+    expect(deps.upsertReasonComment).toHaveBeenCalledWith("/repo", 10, needsHumanReasonBody(slice), 7);
+    expect(res.actions.map((a) => a.action)).toEqual([PR_REASON_UPDATED_ACTION]);
+  });
+
+  it("marks resolved once when the label is cleared", async () => {
+    const { deps } = reasonDeps(labelled(), { id: 7, body: needsHumanReasonBody(slice)! });
+    const state = st({ stage: "pr-open", merge_gate: "ready" });
+    const r1 = await apply(ctx, state, deps);
+    expect(deps.removeLabel).toHaveBeenCalledWith("/repo", 10, NEEDS_HUMAN_LABEL, "s1");
+    expect(deps.upsertReasonComment).toHaveBeenCalledWith("/repo", 10, resolvedReasonBody(), 7);
+    expect(r1.actions.map((a) => a.action)).toContain(PR_REASON_RESOLVED_ACTION);
+    deps.advance(CHECK_INTERVAL_MS);
+    await apply(ctx, state, deps);
+    expect(deps.upsertReasonComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("clear with no existing comment posts nothing", async () => {
+    const { deps } = reasonDeps(labelled(), null);
+    await apply(ctx, st({ stage: "pr-open", merge_gate: "ready" }), deps);
+    expect(deps.upsertReasonComment).not.toHaveBeenCalled();
+  });
+
+  it("a lookup failure posts nothing and records a failure", async () => {
+    const { deps } = reasonDeps(labelled(), null);
+    (deps.findReasonComment as any).mockRejectedValue(new Error("nope"));
+    const res = await apply(ctx, st(), deps);
+    expect(deps.upsertReasonComment).not.toHaveBeenCalled();
+    expect(res.failures).toEqual([{ action: PR_LABEL_FAILED_ACTION, sliceId: "s1", pr: 10, detail: "reason: nope" }]);
+  });
+
+  it("leaves a dependabot PR untouched", async () => {
+    const d = [{ number: 10, author: { login: "dependabot[bot]" }, labels: [{ name: NEEDS_HUMAN_LABEL }] }];
+    const { deps } = reasonDeps(d, null);
+    await apply(ctx, st(), deps);
+    expect(deps.findReasonComment).not.toHaveBeenCalled();
+    expect(deps.upsertReasonComment).not.toHaveBeenCalled();
+  });
+
+  it("only lists comments for entries with a reason", async () => {
+    const { deps } = reasonDeps([{ number: 10, headRefName: "x", labels: [{ name: OPENED_LABEL }] }], null);
+    await apply(ctx, st({ stage: "pr-open", merge_gate: "ready" }), deps);
+    expect(deps.findReasonComment).not.toHaveBeenCalled();
+  });
+
+  it("works without the optional deps", async () => {
+    const deps = mkDeps(labelled());
+    const res = await apply(ctx, st(), deps);
+    expect(res.failures).toEqual([]);
   });
 });
