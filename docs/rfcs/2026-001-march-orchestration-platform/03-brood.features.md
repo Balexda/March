@@ -127,7 +127,7 @@ Recommended specification sequence:
 | F2 | Brood CLI Read Surface | F1 | `specs/2026-08-14-012-brood-cli-read-surface` |
 | F3 | Lifecycle Teardown | F1 | `specs/2026-08-19-013-lifecycle-teardown` |
 | F4 | Concurrent Dispatch Audit | F1 | `specs/2026-11-22-016-concurrent-dispatch-audit` |
-| F5 | Interactive Session Attach Helper | — | — |
+| F5 | Interactive Session Attach Helper | — | `specs/2026-11-22-017-interactive-session-attach-helper` |
 | F6 | Brood Skills | F1, F2, F3, F5 | — |
 
 F2, F3, F4, and F5 can begin in parallel once F1 has landed (F5 is fully independent and could even start first). F6 ships last because skill content references the final verbs of F2/F3/F5; its authoring can run in parallel once F1's reader signatures are committed, but content stabilizes after F2–F5 merge.
