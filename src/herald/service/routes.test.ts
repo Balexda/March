@@ -3,7 +3,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";
+import { OPERATOR_REQUEST_TYPES, registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { EventStore } from "./store.js";
 
@@ -327,15 +327,33 @@ describe.skipIf(!sqliteAvailable)("POST /admin/events (#265)", () => {
 
   it("requires the operator bearer for operator-request events when MARCH_LEGATE_OPERATOR_TOKEN is set (#593)", async () => {
     const { app, store } = await buildApp(undefined, { MARCH_LEGATE_OPERATOR_TOKEN: "op-tok" });
-    const merge = { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 };
+    // One valid body per gated type, so the valid-bearer case reaches the append.
+    const gated: Record<string, unknown>[] = [
+      { type: "slice.merge.requested", profile: "march", sliceId: "s1", prNumber: 7 },
+      { type: "slice.relaunch.requested", profile: "march", sliceId: "s1" },
+      { type: "slice.requeue.requested", profile: "march", sliceId: "s1", closePr: false },
+      { type: "slice.recovery.requested", profile: "march", sliceId: "s1" },
+      { type: "dispatch.paused", profile: "march" },
+      { type: "dispatch.resumed", profile: "march" },
+      { type: "legate.tick.requested", profile: "march" },
+    ];
+    expect(gated.map((e) => e.type).sort()).toEqual([...OPERATOR_REQUEST_TYPES].sort());
     try {
-      expect((await app.inject({ method: "POST", url: "/events", payload: merge })).statusCode).toBe(401);
-      expect((await app.inject({ method: "POST", url: "/events", payload: merge, headers: { authorization: "Bearer wrong" } })).statusCode).toBe(401);
-      for (const type of ["slice.relaunch.requested", "slice.recovery.requested", "dispatch.paused", "legate.tick.requested"]) {
-        expect((await app.inject({ method: "POST", url: "/events", payload: { type, profile: "march", sliceId: "s1" } })).statusCode).toBe(401);
+      for (const payload of gated) {
+        expect((await app.inject({ method: "POST", url: "/events", payload })).statusCode, `${payload.type} missing`).toBe(401);
+        expect(
+          (await app.inject({ method: "POST", url: "/events", payload, headers: { authorization: "Bearer wrong" } })).statusCode,
+          `${payload.type} wrong`,
+        ).toBe(401);
       }
       expect(store.count()).toBe(0);
-      expect((await app.inject({ method: "POST", url: "/events", payload: merge, headers: { authorization: "Bearer op-tok" } })).statusCode).toBe(201);
+      for (const payload of gated) {
+        expect(
+          (await app.inject({ method: "POST", url: "/events", payload, headers: { authorization: "Bearer op-tok" } })).statusCode,
+          `${payload.type} valid`,
+        ).toBe(201);
+      }
+      expect(store.count()).toBe(gated.length);
       // Observation/transition events that don't ask the legate to act stay open.
       expect((await app.inject({ method: "POST", url: "/events", payload: { type: "slice.stage.changed", profile: "march", sliceId: "s1", stage: "pr-open" } })).statusCode).toBe(201);
     } finally {
