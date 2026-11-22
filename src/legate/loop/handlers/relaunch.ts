@@ -563,156 +563,164 @@ export async function apply(
     }
 
     const slice = state.slices[d.sliceId];
+    // Mark the warm slice while this relaunch is between its first await and the
+    // rebind of worker_session_id (#593): an operator resend that overlaps it must
+    // not record feedback as handled for a steward that is being replaced.
+    slice.relaunch_in_progress = true;
+    try {
 
-    // Operator relaunch (#593): REPLACE a still-live steward — remove its session
-    // (keeping the worktree, which the fresh steward re-attaches to) before the
-    // launch. A dead or absent session needs no removal.
-    if (d.mode === "operator") {
-      const prior = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
-      if (prior && state.sessionsById.get(prior)) {
+      // Operator relaunch (#593): REPLACE a still-live steward — remove its session
+      // (keeping the worktree, which the fresh steward re-attaches to) before the
+      // launch. A dead or absent session needs no removal.
+      if (d.mode === "operator") {
+        const prior = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
+        if (prior && state.sessionsById.get(prior)) {
+          try {
+            await ctx.castra.removeSession({ profile: ctx.meta.profile, sessionId: prior, pruneWorktree: false, traceKey: d.sliceId });
+            dropSession(state, prior);
+          } catch (err) {
+            const detail = "removing the live steward " + prior + " failed: " + errMsg(err);
+            recordFailure(d, detail);
+            res.mutated = true;
+            res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: prior, detail: "operator relaunch: " + detail });
+            continue;
+          }
+        }
+      }
+
+      // Auto path: an escalated-infra slice is un-escalated in place first so the
+      // relaunch re-attaches to its preserved PR/worktree (never nukes).
+      if (d.unescalateStage && slice) {
+        const stageChanged = unescalate(
+          slice,
+          d.unescalateStage,
+          ctx.ts,
+          d.mode === "operator"
+            ? "Operator relaunch: un-escalated to re-attach a fresh steward (#593)"
+            : "Auto-recovery: un-escalated for steward relaunch (infra failure, #stranded)",
+        );
+        if (stageChanged) {
+          ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: d.unescalateStage });
+        }
+      }
+
+      if (!deps.worktreeExists(d.worktreePath)) {
         try {
-          await ctx.castra.removeSession({ profile: ctx.meta.profile, sessionId: prior, pruneWorktree: false, traceKey: d.sliceId });
-          dropSession(state, prior);
+          await deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
         } catch (err) {
-          const detail = "removing the live steward " + prior + " failed: " + errMsg(err);
+          const detail =
+            "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch +
+            " (" + attemptLabel(d) + "): " + errMsg(err);
           recordFailure(d, detail);
           res.mutated = true;
-          res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: prior, detail: "operator relaunch: " + detail });
+          res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
           continue;
         }
       }
-    }
 
-    // Auto path: an escalated-infra slice is un-escalated in place first so the
-    // relaunch re-attaches to its preserved PR/worktree (never nukes).
-    if (d.unescalateStage && slice) {
-      const stageChanged = unescalate(
-        slice,
-        d.unescalateStage,
-        ctx.ts,
-        d.mode === "operator"
-          ? "Operator relaunch: un-escalated to re-attach a fresh steward (#593)"
-          : "Auto-recovery: un-escalated for steward relaunch (infra failure, #stranded)",
-      );
-      if (stageChanged) {
-        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: d.unescalateStage });
-      }
-    }
+      // Capture the PRIOR steward's identity BEFORE the rebind so we can reap its
+      // Brood record after the new one is registered (#308).
+      const priorSessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
+      const priorWorktree = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
+      // The Hatchery spawn this steward belongs to — re-registered as the new
+      // row's parentId so Brood keeps the spawn↔steward group intact (#308).
+      const parentSpawnId =
+        slice.hatchery && typeof slice.hatchery.spawn_id === "string" ? slice.hatchery.spawn_id : "";
 
-    if (!deps.worktreeExists(d.worktreePath)) {
+      let newSessionId: string | null = null;
+      let liveWorktree = d.worktreePath;
       try {
-        await deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
+        const relaunched = await ctx.castra.launchSession({
+          profile: ctx.meta.profile,
+          repoPath: state.repoPath as string,
+          branch: d.bareBranch,
+          title: d.launchTitle,
+          group: ctx.meta.worker_group,
+          model: "opus",
+          // Attach to the EXISTING branch/PR — never `-b` (it already exists). This
+          // flag was previously dropped by the async client, collapsing the attach
+          // into a create that always failed "branch already exists".
+          createBranch: false,
+          traceKey: d.sliceId,
+        });
+        newSessionId = relaunched.sessionId;
+        // The launch response carries the session's REAL worktree (agent-deck may
+        // pick a fresh hashed path when feature-<branch> already exists); register
+        // and track THAT, not the assess-time guess, so Brood owns the live path.
+        if (typeof relaunched.worktreePath === "string" && relaunched.worktreePath.length > 0) {
+          liveWorktree = relaunched.worktreePath;
+        }
       } catch (err) {
-        const detail =
-          "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch +
-          " (" + attemptLabel(d) + "): " + errMsg(err);
+        const detail = "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err);
         recordFailure(d, detail);
         res.mutated = true;
         res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
         continue;
       }
-    }
-
-    // Capture the PRIOR steward's identity BEFORE the rebind so we can reap its
-    // Brood record after the new one is registered (#308).
-    const priorSessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
-    const priorWorktree = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
-    // The Hatchery spawn this steward belongs to — re-registered as the new
-    // row's parentId so Brood keeps the spawn↔steward group intact (#308).
-    const parentSpawnId =
-      slice.hatchery && typeof slice.hatchery.spawn_id === "string" ? slice.hatchery.spawn_id : "";
-
-    let newSessionId: string | null = null;
-    let liveWorktree = d.worktreePath;
-    try {
-      const relaunched = await ctx.castra.launchSession({
-        profile: ctx.meta.profile,
-        repoPath: state.repoPath as string,
-        branch: d.bareBranch,
-        title: d.launchTitle,
-        group: ctx.meta.worker_group,
-        model: "opus",
-        // Attach to the EXISTING branch/PR — never `-b` (it already exists). This
-        // flag was previously dropped by the async client, collapsing the attach
-        // into a create that always failed "branch already exists".
-        createBranch: false,
-        traceKey: d.sliceId,
-      });
-      newSessionId = relaunched.sessionId;
-      // The launch response carries the session's REAL worktree (agent-deck may
-      // pick a fresh hashed path when feature-<branch> already exists); register
-      // and track THAT, not the assess-time guess, so Brood owns the live path.
-      if (typeof relaunched.worktreePath === "string" && relaunched.worktreePath.length > 0) {
-        liveWorktree = relaunched.worktreePath;
+      if (!newSessionId) {
+        const detail = "castra launch returned no identifiable new session (" + attemptLabel(d) + ")";
+        recordFailure(d, detail);
+        res.mutated = true;
+        res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
+        continue;
       }
-    } catch (err) {
-      const detail = "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err);
-      recordFailure(d, detail);
+
+      try {
+        await ctx.castra.sendPrompt({ profile: ctx.meta.profile, sessionId: newSessionId, prompt: stewardResumeMessage(d), traceKey: d.sliceId } as any);
+      } catch {
+        // Best-effort: session is alive; future babysit messages will still reach it.
+      }
+
+      // #308: register the LIVE steward with Brood and reap the prior one's record
+      // so Brood tracks exactly one live steward + worktree per slice. Best-effort
+      // — neither call may fail the relaunch (the live session must serve the PR).
+      const reconcileNote = await reconcileBrood(ctx, state, d, {
+        newSessionId,
+        liveWorktree,
+        priorSessionId,
+        priorWorktree,
+        parentSpawnId,
+      });
+
+      slice.worker_session_id = newSessionId;
+      slice.worker_title = d.launchTitle;
+      slice.worktree_path = liveWorktree;
+      slice.last_action = ctx.ts;
+      slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (" + attemptLabel(d) + "); new session " + newSessionId;
+      // Record the LIVE worktree (the launch-reported path, which may be a fresh
+      // agent-deck hash) so the fold keeps it durably — a cold-start rebuild then
+      // re-attaches to the real worktree instead of re-guessing a colliding one
+      // (#410/#412).
+      ctx.emitTransition?.({
+        type: "steward.relaunched",
+        sliceId: d.sliceId,
+        sessionId: newSessionId,
+        worktreePath: liveWorktree,
+        // Operator mode names the request it settles, so a newer one stays pending.
+        ...(d.mode === "operator" && typeof d.requestSeq === "number" ? { requestSeq: d.requestSeq } : {}),
+      });
+      if (d.mode === "operator") {
+        // Settled by the `steward.relaunched` above (its requestSeq clears this request);
+        // the warm seq keeps the in-flight fold from re-reading it next tick.
+        if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
+      } else {
+        recordAttempt(d);
+      }
+      // Healed: clear any pending backoff window so a future re-strand re-probes
+      // promptly (its first backoff is short again).
+      if (d.mode === "auto") clearBackoff(state.raw, RELAUNCH_DOMAIN, d.sliceId);
       res.mutated = true;
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
-      continue;
+      res.actions.push({
+        action: "relaunch-steward",
+        sliceId: d.sliceId,
+        sessionId: newSessionId,
+        detail:
+          "re-attached opus steward to PR #" + d.prNumber + " on " + d.featureBranch +
+          " (" + attemptLabel(d) + ")" + (reconcileNote ? "; " + reconcileNote : ""),
+      });
+    } finally {
+      delete slice.relaunch_in_progress;
     }
-    if (!newSessionId) {
-      const detail = "castra launch returned no identifiable new session (" + attemptLabel(d) + ")";
-      recordFailure(d, detail);
-      res.mutated = true;
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
-      continue;
-    }
-
-    try {
-      await ctx.castra.sendPrompt({ profile: ctx.meta.profile, sessionId: newSessionId, prompt: stewardResumeMessage(d), traceKey: d.sliceId } as any);
-    } catch {
-      // Best-effort: session is alive; future babysit messages will still reach it.
-    }
-
-    // #308: register the LIVE steward with Brood and reap the prior one's record
-    // so Brood tracks exactly one live steward + worktree per slice. Best-effort
-    // — neither call may fail the relaunch (the live session must serve the PR).
-    const reconcileNote = await reconcileBrood(ctx, state, d, {
-      newSessionId,
-      liveWorktree,
-      priorSessionId,
-      priorWorktree,
-      parentSpawnId,
-    });
-
-    slice.worker_session_id = newSessionId;
-    slice.worker_title = d.launchTitle;
-    slice.worktree_path = liveWorktree;
-    slice.last_action = ctx.ts;
-    slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (" + attemptLabel(d) + "); new session " + newSessionId;
-    // Record the LIVE worktree (the launch-reported path, which may be a fresh
-    // agent-deck hash) so the fold keeps it durably — a cold-start rebuild then
-    // re-attaches to the real worktree instead of re-guessing a colliding one
-    // (#410/#412).
-    ctx.emitTransition?.({
-      type: "steward.relaunched",
-      sliceId: d.sliceId,
-      sessionId: newSessionId,
-      worktreePath: liveWorktree,
-      // Operator mode names the request it settles, so a newer one stays pending.
-      ...(d.mode === "operator" && typeof d.requestSeq === "number" ? { requestSeq: d.requestSeq } : {}),
-    });
-    if (d.mode === "operator") {
-      // Settled by the `steward.relaunched` above (its requestSeq clears this request);
-      // the warm seq keeps the in-flight fold from re-reading it next tick.
-      if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
-    } else {
-      recordAttempt(d);
-    }
-    // Healed: clear any pending backoff window so a future re-strand re-probes
-    // promptly (its first backoff is short again).
-    if (d.mode === "auto") clearBackoff(state.raw, RELAUNCH_DOMAIN, d.sliceId);
-    res.mutated = true;
-    res.actions.push({
-      action: "relaunch-steward",
-      sliceId: d.sliceId,
-      sessionId: newSessionId,
-      detail:
-        "re-attached opus steward to PR #" + d.prNumber + " on " + d.featureBranch +
-        " (" + attemptLabel(d) + ")" + (reconcileNote ? "; " + reconcileNote : ""),
-    });
   }
 
   // AIMD: a fully-successful rate-limited sweep earns +1; ANY failure halves R.

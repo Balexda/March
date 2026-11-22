@@ -467,7 +467,9 @@ export type ResendTarget =
  * incarnation or session, and recording it would mark it handled for the new one.
  */
 export function resendStillCurrent(current: any, captured: any, sessionId: string): boolean {
-  return current === captured && current?.worker_session_id === sessionId;
+  // `relaunch_in_progress` covers a relaunch that started during the send and has
+  // not yet rebound worker_session_id (the relaunch handler sets it across its awaits).
+  return current === captured && current?.worker_session_id === sessionId && current?.relaunch_in_progress !== true;
 }
 
 export function resolveResendTarget(slice: any, observedPr: any, threadIds?: string[]): ResendTarget {
@@ -497,6 +499,9 @@ export function resolveResendTarget(slice: any, observedPr: any, threadIds?: str
   if (threads.length === 0) return { ok: false, status: 409, error: `PR #${prNumber} has no unresolved review threads to re-send.` };
   const sessionId = typeof slice?.worker_session_id === "string" ? slice.worker_session_id : "";
   if (!sessionId) return { ok: false, status: 409, error: "slice has no steward session — relaunch it first." };
+  if (slice?.relaunch_in_progress === true) {
+    return { ok: false, status: 409, error: "the slice's steward is being relaunched — re-send once the new steward is up." };
+  }
   return {
     ok: true,
     pr,

@@ -838,6 +838,9 @@ describe("resendStillCurrent (#593)", () => {
     const relaunched = { worker_session_id: "old" };
     relaunched.worker_session_id = "fresh";
     expect(resendStillCurrent(relaunched, relaunched, "old")).toBe(false);
+    // Relaunch still running (session removed, launch awaited, not yet rebound).
+    const relaunching = { worker_session_id: "old", relaunch_in_progress: true };
+    expect(resendStillCurrent(relaunching, relaunching, "old")).toBe(false);
   });
 });
 

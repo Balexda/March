@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { apply, assess, relaunchBackoffMs, RELAUNCH_BACKOFF_MAX_MS, type RelaunchDeps } from "./relaunch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
+import { resendStillCurrent } from "../http.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
   return {
@@ -394,6 +395,51 @@ describe("operator relaunch (#593)", () => {
     // No retry budget is spent, and the settled request is not re-read next tick.
     expect((state.raw as any).transient_retry_counts).toBeUndefined();
     expect(assess(state).filter((d) => d.mode === "operator")).toEqual([]);
+  });
+
+  it("marks the slice relaunching across its awaits, so an overlapping resend is not recorded", async () => {
+    const raw = { slices: { s: eligibleSlice({ worker_session_id: "live", worktree_path: "/wt/s" }) } };
+    const live = { id: "live", group: "legate-workers" };
+    const state = loopState({
+      raw,
+      slices: raw.slices,
+      sessions: [live],
+      sessionsById: new Map([["live", live]]),
+      relaunchRequests: [{ sliceId: "s", seq: 12 }],
+    });
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/s" }));
+    c.castra.removeSession = vi.fn(async () => ({ removed: true }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const launch = c.castra.launchSession as any;
+    c.castra.launchSession = vi.fn(async (...args: any[]) => {
+      await gate;
+      return launch(...args);
+    }) as any;
+    const slice = state.slices.s;
+    const running = apply(assess(state), c, state, deps);
+    await vi.waitFor(() => expect(c.castra.launchSession).toHaveBeenCalled());
+    // Mid-relaunch: the old session is still bound, but a resend that delivered
+    // to it now must not record its comment ids as handled.
+    expect(slice.worker_session_id).toBe("live");
+    expect(slice.relaunch_in_progress).toBe(true);
+    expect(resendStillCurrent(slice, slice, "live")).toBe(false);
+    release();
+    await running;
+    expect(slice.worker_session_id).toBe("fresh");
+    expect(slice.relaunch_in_progress).toBeUndefined();
+    expect(resendStillCurrent(slice, slice, "fresh")).toBe(true);
+  });
+
+  it("clears the relaunching mark when the launch fails", async () => {
+    const raw = { slices: { s: eligibleSlice({ worker_session_id: "gone", worktree_path: "/wt/s" }) } };
+    const state = loopState({ raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 3 }] });
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/s" }));
+    c.castra.launchSession = vi.fn(async () => {
+      throw new Error("castra down");
+    }) as any;
+    await apply(assess(state), c, state, deps);
+    expect(state.slices.s.relaunch_in_progress).toBeUndefined();
   });
 
   it("un-escalates an escalated slice and ignores the self-heal backoff", async () => {
