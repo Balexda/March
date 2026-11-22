@@ -4,7 +4,7 @@ import type { LoopState, MergeRequest, RequeueRequest, SliceExternalState, Smith
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
 import { actionableLayer0Items, queueDepth } from "../pure/smithy-graph.js";
-import { prSnapshotErrored, prSnapshotNumber, type ObservedSession, type SystemState } from "../../../herald/events.js";
+import { prSnapshotErrored, prSnapshotNumber, type ObservedSession, type SliceState, type SystemState } from "../../../herald/events.js";
 
 /**
  * Stage 1: gather every external read into one {@link LoopState} snapshot. Since
@@ -242,11 +242,27 @@ function adaptObservedSession(s: ObservedSession): any {
 }
 
 /**
+ * The slice's action key (#653) in the working-state shape `launchDispatch` /
+ * `archiveSlice` write (`command`, `arguments`, `artifact_path`), so the dedup
+ * matchers decide by key after a restart. Empty for a slice dispatched before
+ * #653 — the fold has no key for it, and the matchers' keyless (#599) handling
+ * applies.
+ */
+function restoredActionKey(s: SliceState): Record<string, unknown> {
+  if (typeof s.command !== "string" || s.command.length === 0) return {};
+  return {
+    command: s.command,
+    arguments: Array.isArray(s.arguments) ? [...s.arguments] : [],
+    artifact_path: s.artifactPath ?? null,
+  };
+}
+
+/**
  * Cold-start rebuild of the legate's working `raw` from the Herald fold. The
  * fold is intentionally thin (its `EventType` is a low-cardinality metric
  * label), so this restores the slice SET and the durable facts the fold carries
- * — stage, branch, worktree, session, PR snapshot, archive, and the transient
- * retry counters — while the loop's self-healing (PR discovery, branch-collision
+ * — stage, branch, worktree, session, PR snapshot, action key (#653), archive,
+ * and the transient retry counters — while the loop's self-healing (PR discovery, branch-collision
  * recovery, stranded-steward nudges) re-derives the per-slice cadence fields the
  * fold does not. A restart therefore resumes against the same slices rather than
  * a blank slate, which is what makes retiring `state.json` safe (#176).
@@ -266,6 +282,7 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
         pr_number: pr?.number ?? null,
         pr_url: pr?.url ?? null,
         branch: s.branch ?? null,
+        ...restoredActionKey(s),
         terminal_state: prState === "MERGED" || prState === "CLOSED" ? prState : s.stage === "merged" ? "MERGED" : null,
       };
       continue;
@@ -277,6 +294,7 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       worktree_path: s.worktreePath ?? null,
       stage: s.stage,
       pr: pr ?? null,
+      ...restoredActionKey(s),
     };
     if (s.handledFeedback?.inline) slice.review_fix_seen_comment_ids = [...s.handledFeedback.inline];
     if (s.handledFeedback?.conversation) slice.comment_fix_seen_comment_ids = [...s.handledFeedback.conversation];

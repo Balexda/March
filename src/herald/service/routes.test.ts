@@ -51,6 +51,18 @@ describe("validateEvent", () => {
     // Absent sessionId is still fine (it is optional on these events).
     expect(validateEvent({ type: "slice.dispatched", sliceId: "s1" })).toMatchObject({ ok: true });
   });
+  it("types the optional slice action key on the dispatch transitions (#653)", () => {
+    for (const type of ["slice.dispatched", "slice.recovery.dispatched"]) {
+      const key = { command: "smithy.forge", arguments: ["docs/a.tasks.md", "1"], artifactPath: "docs/a.tasks.md" };
+      expect(validateEvent({ type, sliceId: "s1", ...key })).toMatchObject({ ok: true });
+      expect(validateEvent({ type, sliceId: "s1", arguments: [] })).toMatchObject({ ok: true });
+      expect(validateEvent({ type, sliceId: "s1", command: "" })).toMatchObject({ ok: false });
+      expect(validateEvent({ type, sliceId: "s1", command: 7 })).toMatchObject({ ok: false });
+      expect(validateEvent({ type, sliceId: "s1", arguments: "docs/a.tasks.md" })).toMatchObject({ ok: false });
+      expect(validateEvent({ type, sliceId: "s1", arguments: ["ok", 1] })).toMatchObject({ ok: false });
+      expect(validateEvent({ type, sliceId: "s1", artifactPath: "  " })).toMatchObject({ ok: false });
+    }
+  });
   it("requires sliceId + sessionId for slice.steward.attached (#213)", () => {
     expect(validateEvent({ type: "slice.steward.attached", sessionId: "x" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "slice.steward.attached", sliceId: "s1" })).toMatchObject({ ok: false });

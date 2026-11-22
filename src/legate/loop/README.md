@@ -200,7 +200,8 @@ still routes through Brood (#155), never a worktree prune here.
 
 These transitions emit `slice.dispatched` / `slice.recovery.dispatched` /
 `slice.escalated` / `retry.counted` events — the durable record the working state
-is rebuilt from (#176) — and a `recovery_dispatch` action-log event that re-lights
+is rebuilt from (#176); the two dispatch events carry the slice's action key
+(command, arguments, artifact path, #653) so the rebuilt slices keep it — and a `recovery_dispatch` action-log event that re-lights
 the (previously replay-only) recovery dispatch span.
 
 **Operator recovery of a spent-budget escalation

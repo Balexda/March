@@ -56,7 +56,11 @@ describe("launchDispatch", () => {
     const out = await launchDispatch(state, "T", item(), "s", deps({ emitTransition, postSpawn }));
     expect(state.slices.s).toMatchObject({ stage: "hatchery-pending", command: "smithy.forge", hatchery: { backend: "codex", job_id: "job-7" } });
     expect(out.actions).toEqual([expect.objectContaining({ action: "dispatch", sliceId: "s" })]);
-    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.dispatched", sliceId: "s", jobId: "job-7" }));
+    // The action key rides along so a cold-start rebuild can tell rows apart (#653).
+    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({
+      type: "slice.dispatched", sliceId: "s", jobId: "job-7",
+      command: "smithy.forge", arguments: ["specs/a.spec.md", "1"], artifactPath: "specs/a.spec.md",
+    }));
     // The spawn runs under the same slice id as the in-memory slice + transition.
     expect((postSpawn.mock.calls[0]![0] as any).sliceId).toBe("s");
   });
@@ -278,7 +282,10 @@ describe("recoverDispatch (#211 bounded auto-recovery)", () => {
     await recoverDispatch(state, "T", item(), "s", 2, deps({ emitTransition }));
     expect(state.transient_retry_counts[recoveryAttemptKey("s")]).toBe(2);
     expect(emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: recoveryAttemptKey("s"), count: 2 });
-    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.recovery.dispatched", sliceId: "s" }));
+    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({
+      type: "slice.recovery.dispatched", sliceId: "s",
+      command: "smithy.forge", arguments: ["specs/a.spec.md", "1"], artifactPath: "specs/a.spec.md",
+    }));
     // The recovery.dispatched reducer sets stage=hatchery-pending in the fold, so the
     // dispatch path emits no compensating slice.stage.changed (#255); the in-memory
     // warm state is still hatchery-pending (launchDispatch sets it).

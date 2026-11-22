@@ -235,6 +235,22 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
       return { ok: false, error: `event "${type}" worktreePath must be a non-empty string.` };
     }
   }
+  // The slice action key (#653) on slice.dispatched / slice.recovery.dispatched.
+  // Optional (pre-#653 legates omit it), but typed when present — it folds into
+  // slice.command/arguments/artifactPath, which the legate's dedup matchers key on.
+  if (type === "slice.dispatched" || type === "slice.recovery.dispatched") {
+    if (body.command !== undefined && (typeof body.command !== "string" || body.command.trim().length === 0)) {
+      return { ok: false, error: `event "${type}" command must be a non-empty string.` };
+    }
+    if (body.arguments !== undefined &&
+        (!Array.isArray(body.arguments) || !body.arguments.every((arg) => typeof arg === "string"))) {
+      return { ok: false, error: `event "${type}" arguments must be an array of strings.` };
+    }
+    if (body.artifactPath !== undefined &&
+        (typeof body.artifactPath !== "string" || body.artifactPath.trim().length === 0)) {
+      return { ok: false, error: `event "${type}" artifactPath must be a non-empty string.` };
+    }
+  }
   // Graduated-recovery rung (#412) on slice.recovery.requested: optional, but when
   // present it selects the reducer branch, so it must be an integer in {0,1,2,3}
   // (3 = the last-resort tombstone-and-redispatch; 0-2 = the gentle rungs).

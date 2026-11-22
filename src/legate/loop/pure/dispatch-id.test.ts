@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   actionArguments,
   actionCommandLine,
+  dispatchActionKeyFields,
   dispatchArtifactSlug,
   dispatchBranch,
   dispatchIdentity,
@@ -18,6 +19,21 @@ import {
   slugifyDispatchPart,
   smithyVerb,
 } from "./dispatch-id.js";
+
+describe("dispatchActionKeyFields (#653)", () => {
+  it("returns the item's action key in the event shape", () => {
+    expect(dispatchActionKeyFields({
+      path: "docs/a.tasks.md", next_action: { command: "smithy.forge", arguments: ["docs/a.tasks.md", 1] },
+    })).toEqual({ command: "smithy.forge", arguments: ["docs/a.tasks.md", "1"], artifactPath: "docs/a.tasks.md" });
+  });
+
+  it("omits an empty or whitespace-only command or path, which Herald's validator would reject", () => {
+    for (const blank of ["", "   "]) {
+      expect(dispatchActionKeyFields({ path: blank, next_action: { command: blank } })).toEqual({ arguments: [] });
+    }
+    expect(dispatchActionKeyFields(undefined)).toEqual({ arguments: [] });
+  });
+});
 
 describe("dispatch-id pure helpers", () => {
   it("slugifies, defaulting and truncating", () => {

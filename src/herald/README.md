@@ -60,7 +60,11 @@ metrics label).
   folds them for replay of older logs.)
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,
   `slice.stage.changed`, `slice.archived`, `slice.recovery.dispatched`,
-  `steward.relaunched`, `slice.escalated`, `retry.counted`. `steward.relaunched`
+  `steward.relaunched`, `slice.escalated`, `retry.counted`. `slice.dispatched` and
+  `slice.recovery.dispatched` carry the slice's action key (`command`, `arguments`,
+  `artifactPath`, #653), folded onto the slice so the legate's cold-start rebuild
+  can still tell sibling plan rows apart; events from before #653 have none.
+  `steward.relaunched`
   carries the LIVE `worktreePath` the relaunch attached to (#410/#412) — the
   reducer folds it onto the slice so a cold-start rebuild keeps the real worktree
   instead of the relaunch handler re-guessing a colliding path.

@@ -140,6 +140,16 @@ The operator levers add these event types:
 | `dispatch.paused {reason?}` / `dispatch.resumed {reason?}` | Sets or clears the profile's `dispatchPaused` (`seq`, `ts`, `reason`). |
 | `legate.tick.requested {reason?}` | None (history only). |
 
+## Dispatch action key
+
+`POST /events` accepts optional `command` (non-empty string), `arguments` (array
+of strings) and `artifactPath` (non-empty string) on Legate's `slice.dispatched`
+and `slice.recovery.dispatched` transitions, and rejects them when mistyped. The
+fold stores each field on the slice when present. An event without them leaves a
+known key alone, and a rung-3 `slice.recovery.requested` drops it with the rest
+of the slice. Legate restores the key on a cold start to match sibling plan rows
+exactly (#653).
+
 ## Review request intents
 
 `POST /events` accepts Legate's `review.requested` transition with a profile,
