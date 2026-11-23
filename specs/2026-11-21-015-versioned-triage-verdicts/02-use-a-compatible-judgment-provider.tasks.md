@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Use one validation boundary for judgment providers**
+- [x] **Use one validation boundary for judgment providers**
 
   Define the provider and consumer boundary in `src/triage/` for AS 2.1. Apply [operating philosophy rule 2](../../docs/operating-philosophy.md#2-minimum-required-access-not-zero-access) to the judgment interface.
 
@@ -26,7 +26,7 @@
   - Compatibility tests use equivalent valid and invalid outputs from baseline and substitute providers to demonstrate identical validation results, including for malformed JSON and unsupported versions, with no GitHub writes.
   - The open baseline and substitute use the same contract. Recommender execution, calibration, and plugin discovery are outside this slice.
 
-- [ ] **Document the open baseline and provider interface**
+- [x] **Document the open baseline and provider interface**
 
   Keep the open-core exception discoverable for AS 2.2. Describe the provider surface in the [triage subsystem contract](../../docs/subsystems/triage/contract.md).
 

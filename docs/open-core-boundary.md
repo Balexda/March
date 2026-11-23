@@ -181,15 +181,19 @@ Two concerns must travel on the boundary, or the private layers cannot act safel
 
 ### Issue triage exception
 
-The open engine ships the issue-triage rubric, versioned verdict and label
-vocabulary, and baseline recommender. Smithy is public and March has no judgment
-plugin mechanism today. Revisit this exception when that mechanism exists.
+The open-engine exception covers the issue-triage rubric, versioned verdict and
+label vocabulary, and baseline recommender. The versioned verdict contract
+publishes the rubric and verdict vocabulary. The baseline recommender is
+scheduled for
+[RFC Milestone 2](rfcs/2026-003-issue-triage/issue-triage.rfc.md#milestone-2-single-issue-recommender-and-operator-backfill).
+Smithy is public and March has no judgment plugin mechanism today. Revisit this
+exception when that mechanism exists.
 [PRD decision SD-002](prds/2026-001-issue-triage.prd.md#sd-002--triage-judgment-open-vs-private)
 
 A future plugin can evaluate the same read-only issue context and return a
 candidate through the judgment interface. March validates that candidate against
-the same verdict schema used for the baseline. The deterministic writer owns
-GitHub mutations outside the judgment interface.
+the same verdict contract and validator used for the baseline. The deterministic
+writer owns any later GitHub writes.
 [Versioned triage verdict contract](../specs/2026-11-21-015-versioned-triage-verdicts/versioned-triage-verdicts.contracts.md)
 
 ## Graduation — when a private package earns its own repo

@@ -10,6 +10,14 @@ Recommender execution and calibration belong to the recommender milestone.
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
+- `TriageJudgmentProvider.judge(input)` receives the untrusted issue title and
+  body, available repository context as a read-only list of text snippets, and
+  the selected rubric revision. Baseline and substitute providers use this
+  interface and return untrusted JSON text. The deterministic writer owns any
+  later GitHub writes.
+  [Operating philosophy rule 2](../../operating-philosophy.md#2-minimum-required-access-not-zero-access)
+- `evaluateTriageJudgment(provider, input)` passes the raw output to
+  `validateTriageVerdict` before a verdict becomes eligible for recording.
 - `validateTriageVerdict(raw: string): VerdictValidation` validates raw JSON
   text. It returns `{ ok: true, verdict }` for an eligible `TriageVerdictV1`, or
   `{ ok: false, diagnostic }`. The diagnostic contains a code and a field path,
