@@ -5,13 +5,15 @@ import {
   startBroodSpan,
   type BroodChildSpan,
 } from "../../observability/brood-trace.js";
-import { readSpawnContainerLogs, spawnContainerName } from "../../spawn/container-launch.js";
+import { spawnContainerName } from "../../spawn/container-launch.js";
+import { readContainerLogsAsync } from "./docker-logs.js";
 import type { SessionRepository } from "./repository.js";
 import {
   defaultStewardGateway,
   removeStewardViaCastra,
   type StewardRemovalResult,
 } from "./steward-removal.js";
+import { archiveTeardownEvidence, TeardownArchive } from "./teardown-archive.js";
 import { broodArchiveDir } from "./store.js";
 import { hostTeardownSubstrate, type ComputeTarget, type TeardownSubstrate } from "./substrate.js";
 import type {
@@ -55,7 +57,7 @@ export interface TeardownDeps {
    * substrate (e.g. an orchestrator API + ephemeral volume). See `substrate.ts`.
    */
   substrate?: TeardownSubstrate;
-  readContainerLogs?: (containerId: string) => string;
+  readContainerLogs?: (containerId: string) => string | Promise<string>;
   /**
    * Remove the steward from Castra. Resolves the real live session(s) for the
    * steward's worktree and returns a verifying outcome (`removed`/`absent`/
@@ -78,7 +80,7 @@ export interface TeardownDeps {
 
 interface ResolvedDeps {
   substrate: TeardownSubstrate;
-  readContainerLogs: (containerId: string) => string;
+  readContainerLogs: (containerId: string) => string | Promise<string>;
   removeSteward: (input: {
     sessionId: string;
     profile?: string;
@@ -114,13 +116,15 @@ async function defaultRemoveSteward(input: {
 function resolveDeps(deps: TeardownDeps): ResolvedDeps {
   return {
     substrate: deps.substrate ?? hostTeardownSubstrate,
-    readContainerLogs: deps.readContainerLogs ?? readSpawnContainerLogs,
+    readContainerLogs: deps.readContainerLogs ?? readContainerLogsAsync,
     removeSteward: deps.removeSteward ?? defaultRemoveSteward,
     pathExists: deps.pathExists ?? fs.existsSync,
     homeDir: deps.homeDir,
     now: deps.now ?? (() => new Date().toISOString()),
   };
 }
+
+const activeTeardowns = new Map<string, Promise<TeardownResult>>();
 
 /**
  * Archive before reclaiming compute, steward, worktree and branch in that order.
@@ -132,6 +136,29 @@ export async function teardownSession(
   id: string,
   request: TeardownRequest = {},
   deps: TeardownDeps = {},
+): Promise<TeardownResult> {
+  const target = store.get(id);
+  const parent = target?.kind === "steward" && target.parentId
+    ? store.get(target.parentId)
+    : undefined;
+  const key = path.resolve(broodArchiveDir(parent?.kind === "spawn" ? parent.id : id, deps.homeDir));
+  // Serialize requests for the same archive, including requests by steward ID.
+  const previous = activeTeardowns.get(key);
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve())
+    .then(() => runTeardown(store, id, request, deps));
+  activeTeardowns.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (activeTeardowns.get(key) === current) activeTeardowns.delete(key);
+  }
+}
+
+async function runTeardown(
+  store: SessionRepository,
+  id: string,
+  request: TeardownRequest,
+  deps: TeardownDeps,
 ): Promise<TeardownResult> {
   const d = resolveDeps(deps);
   const target = store.get(id);
@@ -188,6 +215,28 @@ export async function teardownSession(
     return finish("success");
   }
 
+  const dir = path.resolve(broodArchiveDir(primary.id, d.homeDir));
+  let archive: TeardownArchive | undefined;
+  let archiveError: unknown;
+  try {
+    if (path.dirname(dir) !== path.resolve(broodArchiveDir("", d.homeDir)) ||
+        path.basename(dir) !== primary.id) {
+      throw new Error("Invalid session identity for teardown archive");
+    }
+    archive = new TeardownArchive(dir);
+  } catch (error) {
+    archiveError = error;
+  }
+  const completion = archive?.completion;
+  if (primary.status === "tearing-down" && completion &&
+      completion.attempt === store.pendingTeardownCompletion(primary.id)) {
+    // A crash after the terminal journal write can leave one or both rows
+    // behind. Finish the registry update without repeating cleanup.
+    completeRegistry(completion.at);
+    span.end();
+    return { id: primary.id, status: "torndown", steps, warnings };
+  }
+
   // A stored force decision holds until teardown completes, even if a
   // lifecycle PATCH has since moved the row out of `tearing-down`. Older
   // in-progress rows lack a recorded decision; require force when their
@@ -208,38 +257,30 @@ export async function teardownSession(
     );
   }
 
-  // Pre-teardown snapshot of the primary row (a standalone legate has no spawn
-  // or steward row, so without this its record would be missing from the archive).
-  const sessionSnapshot: SessionRecord = { ...primary };
-
-  // Mark the group as tearing-down so a concurrent reader sees the transition.
-  store.update(primary.id, {
-    status: "tearing-down",
-    teardownReason: request.reason,
-    teardownRequiresForce: requiresForce,
-  });
-  if (steward && steward.id !== primary.id) {
-    store.update(steward.id, { status: "tearing-down" });
+  const archiveSpan = span.startChild("brood.teardown.archive");
+  let snapshot: string;
+  try {
+    snapshot = store.beginTeardown(
+      primary.id,
+      steward?.id,
+      JSON.stringify({
+        session: snapshotRow(primary),
+        spawn: spawn && snapshotRow(spawn),
+        steward: steward && snapshotRow(steward),
+      }, null, 2) + "\n",
+      { teardownReason: request.reason, teardownRequiresForce: requiresForce },
+    );
+  } catch (error) {
+    endStepSpan(archiveSpan, { step: "archive", outcome: "failed", detail: message(error) });
+    span.end({ error: true });
+    throw error;
   }
 
-  const archiveSpan = span.startChild("brood.teardown.archive");
-  // 1. Archive (before any deletion).
+  let attempt: number | undefined;
   try {
-    const dir = broodArchiveDir(primary.id, d.homeDir);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, "record.json"),
-      JSON.stringify({ session: sessionSnapshot, spawn, steward, torndownAt: d.now() }, null, 2) + "\n",
-    );
-    if (primary.containerId) {
-      let logs: string | undefined;
-      try {
-        logs = d.readContainerLogs(primary.containerId);
-      } catch (err) {
-        warnings.push(`container logs unavailable: ${message(err)}`);
-      }
-      if (logs !== undefined) fs.writeFileSync(path.join(dir, "container.log"), logs);
-    }
+    if (!archive) throw archiveError;
+    attempt = archive.start(snapshot, request, d.now());
+    await archiveTeardownEvidence(dir, primary, d.readContainerLogs, warnings);
     steps.push({ step: "archive", outcome: "ok" });
   } catch (err) {
     steps.push({ step: "archive", outcome: "failed", detail: message(err) });
@@ -254,7 +295,7 @@ export async function teardownSession(
       steps.push(deferred);
       endStepSpan(span.startChild(`brood.teardown.${step}`), deferred);
     }
-    return finish("error");
+    return finalize("error");
   }
 
   // 2. Container.
@@ -394,14 +435,42 @@ export async function teardownSession(
   }
 
   const failed = steps.some((step) => step.outcome === "failed");
-  if (!failed) {
-    store.markTorndown(primary.id);
-    if (steward && steward.id !== primary.id) {
-      store.markTorndown(steward.id);
+  return finalize(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
+
+  function completeRegistry(at: string): void {
+    const registrySpan = span.startChild("brood.teardown.registry");
+    try {
+      store.completeTeardown(primary.id, steward?.id, at);
+      registrySpan.end();
+    } catch (error) {
+      registrySpan.end({ error: true });
+      span.end({ error: true });
+      throw error;
     }
   }
 
-  return finish(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
+  function finalize(outcome: "error" | "partial" | "success"): TeardownResult {
+    if (archive && attempt !== undefined) {
+      const at = d.now();
+      const finalizationSpan = span.startChild("brood.teardown.archive.finish");
+      try {
+        if (outcome === "success") store.prepareTeardownCompletion(primary.id, attempt);
+        archive.finish(attempt, {
+          id: primary.id,
+          status: outcome === "success" ? "torndown" : "tearing-down",
+          steps,
+          warnings,
+        }, at);
+        finalizationSpan.end();
+      } catch (error) {
+        warnings.push(`archive finalization failed: ${message(error)}`);
+        finalizationSpan.end({ error: true });
+        return finish("error");
+      }
+      if (outcome === "success") completeRegistry(at);
+    }
+    return finish(outcome);
+  }
 
   function finish(outcome: "error" | "partial" | "success"): TeardownResult {
     const finalStatus = outcome === "success" ? "torndown" : "tearing-down";
@@ -422,6 +491,11 @@ export async function teardownSession(
 
     return { id: primary.id, status: finalStatus, steps, warnings };
   }
+}
+
+function snapshotRow(record: SessionRecord): SessionRecord {
+  const { teardownReason, teardownRequiresForce, torndownAt, ...snapshot } = record;
+  return snapshot;
 }
 
 function resolveComputeTarget(record: SessionRecord): ComputeTarget | undefined {

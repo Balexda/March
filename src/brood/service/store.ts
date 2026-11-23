@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_kind_status ON sessions(kind, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id);
+CREATE TABLE IF NOT EXISTS teardown_snapshots (
+  id TEXT PRIMARY KEY,
+  snapshot TEXT NOT NULL,
+  completing_attempt INTEGER
+);
 CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
 `;
 
@@ -296,6 +301,57 @@ export class SessionStore implements SessionRepository {
     });
     this.persist(merged);
     return merged;
+  }
+
+  beginTeardown(
+    id: string,
+    stewardId: string | undefined,
+    snapshot: string,
+    changes: UpdateSessionInput,
+  ): string {
+    return this.teardownTransaction(() => {
+      this.db.prepare(
+        "INSERT INTO teardown_snapshots (id, snapshot) VALUES (?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET completing_attempt = NULL",
+      ).run(id, snapshot);
+      const original = this.db.prepare("SELECT snapshot FROM teardown_snapshots WHERE id = ?")
+        .get(id) as { snapshot: string };
+      this.update(id, { ...changes, status: "tearing-down" });
+      if (stewardId && stewardId !== id) this.update(stewardId, { status: "tearing-down" });
+      return original.snapshot;
+    });
+  }
+
+  prepareTeardownCompletion(id: string, attempt: number): void {
+    this.db.prepare("UPDATE teardown_snapshots SET completing_attempt = ? WHERE id = ?")
+      .run(attempt, id);
+  }
+
+  pendingTeardownCompletion(id: string): number | undefined {
+    const row = this.db.prepare("SELECT completing_attempt FROM teardown_snapshots WHERE id = ?")
+      .get(id) as { completing_attempt: number | null } | undefined;
+    return row?.completing_attempt ?? undefined;
+  }
+
+  completeTeardown(id: string, stewardId: string | undefined, at: string): void {
+    this.teardownTransaction(() => {
+      const changes = { status: "torndown", torndownAt: at } as const;
+      if (stewardId && stewardId !== id) this.update(stewardId, changes);
+      this.update(id, changes);
+      this.db.prepare("DELETE FROM teardown_snapshots WHERE id = ?").run(id);
+    });
+  }
+
+  private teardownTransaction<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Fetch a single session by id. */

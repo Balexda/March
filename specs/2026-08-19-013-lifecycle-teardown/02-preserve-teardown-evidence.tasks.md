@@ -15,7 +15,7 @@
 
 ### Tasks
 
-- [ ] **Preserve the original registry snapshot and journal cleanup attempts**
+- [x] **Preserve the original registry snapshot and journal cleanup attempts**
 
   Preserve the write-once snapshot and implement the append-only attempt lifecycle in Brood for AS 2.1.
 
@@ -25,7 +25,7 @@
   - The final entry records the response's ordered steps, warnings, final status, and finish timestamp. An unmatched started entry remains visible as interrupted. Concurrent requests preserve snapshot and journal integrity. Test recovery from interruption between journal finalization and registry update so terminal results agree across both.
   - A failed steward removal followed by a successful retry leaves one snapshot and two attempt pairs whose finished statuses are `tearing-down` and `torndown`.
 
-- [ ] **Archive available logs and validated registry output**
+- [x] **Archive available logs and validated registry output**
 
   Preserve the optional evidence described by the archive contract for AS 2.2–2.5.
 
@@ -34,7 +34,7 @@
   - The validated registry extraction result is archived as `artifacts/extraction-result.json`. A succeeded result also produces `artifacts/spawn.patch` with the expected SHA-256. Verify the digest before writing and after reading back the archived patch.
   - An unavailable optional source or malformed registry result produces a warning and permits cleanup. A source digest mismatch produces a warning and no patch write. Registry artifacts and container logs are the only optional evidence sources, and unrelated worktree files stay out of the archive.
 
-- [ ] **Gate destructive cleanup on archive writes**
+- [x] **Gate destructive cleanup on archive writes**
 
   Apply FR-007a and FR-008a at the Brood teardown boundary, preserving the source/sink distinction from SD-010. Document the archive phases and retry outcomes in Brood's subsystem contract.
 

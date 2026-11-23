@@ -25,6 +25,19 @@ export interface SessionRepository {
   register(input: RegisterSessionInput): SessionRecord;
   /** Apply a lifecycle update. Returns `undefined` if the session is unknown. */
   update(id: string, changes: UpdateSessionInput): SessionRecord | undefined;
+  /** Save the original snapshot and mark the group tearing down atomically. */
+  beginTeardown(
+    id: string,
+    stewardId: string | undefined,
+    snapshot: string,
+    changes: UpdateSessionInput,
+  ): string;
+  /** Persist which journal attempt can complete this registry transition. */
+  prepareTeardownCompletion(id: string, attempt: number): void;
+  /** Read the attempt authorized to complete an interrupted registry transition. */
+  pendingTeardownCompletion(id: string): number | undefined;
+  /** Commit the terminal status for the group and clear pending teardown state. */
+  completeTeardown(id: string, stewardId: string | undefined, at: string): void;
   /** Fetch a single session by id. */
   get(id: string): SessionRecord | undefined;
   /** List sessions, optionally filtered by kind/status/parentId. */

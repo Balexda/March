@@ -1,6 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import {
   teardownSession,
   type TeardownDeps,
 } from "./teardown.js";
+import type { SessionRecord, ExtractionResult } from "./types.js";
 import type { TeardownSubstrate } from "./substrate.js";
 
 const tmpDirs: string[] = [];
@@ -317,6 +319,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const store = new SessionStore({ homeDir });
     const { spawnId, stewardId } = seedSpawnGroup(store);
     store.update(spawnId, { status: "running", failureReason: "original failure" });
+    const original = { session: store.get(spawnId), spawn: store.get(spawnId), steward: store.get(stewardId) };
     const archive = broodArchiveDir(spawnId, homeDir);
     fs.mkdirSync(path.dirname(archive), { recursive: true });
     fs.writeFileSync(archive, "blocks archive directory creation");
@@ -351,6 +354,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       restarted.close();
     }
 
+    expect(JSON.parse(fs.readFileSync(path.join(archive, "record.json"), "utf8"))).toEqual(original);
     const reopened = new SessionStore({ homeDir });
     try {
       expect(reopened.get(spawnId)).toMatchObject({
@@ -416,6 +420,299 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       "logs for container-aaa",
     );
     store.close();
+  });
+
+  it("archives validated registry evidence before removal and keeps worktree files out", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const worktreePath = path.join(home, "worktree");
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "unrelated.txt"), "worktree evidence");
+    const patchText = "registry patch\n";
+    const sha256 = createHash("sha256").update(patchText).digest("hex");
+    const extractionResult: ExtractionResult = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, sha256, touchedPaths: [] },
+    };
+    store.update(spawnId, { worktreePath, extractionResult });
+    const dir = broodArchiveDir(spawnId, home);
+    const rec = recordingDeps(home);
+    const remove = vi.spyOn(rec.deps.substrate!, "removeCompute").mockImplementation(async () => {
+      expect(fs.readdirSync(dir).sort()).toEqual([
+        "artifacts", "container.log", "record.json", "teardown.ndjson",
+      ]);
+      expect(fs.readdirSync(path.join(dir, "artifacts")).sort()).toEqual([
+        "extraction-result.json", "spawn.patch",
+      ]);
+      expect(fs.readFileSync(path.join(dir, "container.log"), "utf8")).toBe("logs for container-aaa");
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "artifacts", "extraction-result.json"), "utf8")))
+        .toEqual(extractionResult);
+      expect(createHash("sha256").update(fs.readFileSync(path.join(dir, "artifacts", "spawn.patch")))
+        .digest("hex")).toBe(sha256);
+    });
+    try {
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(remove).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("serializes group requests and journals a failed steward removal followed by a retry", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const original = { session: store.get(spawnId), spawn: store.get(spawnId), steward: store.get(stewardId) };
+    const rec = recordingDeps(home);
+    const dir = broodArchiveDir(spawnId, home);
+    const snapshotPath = path.join(dir, "record.json");
+    const journalPath = path.join(dir, "teardown.ndjson");
+    const available = rec.deps.readContainerLogs!;
+    rec.deps.readContainerLogs = vi.fn(available).mockImplementationOnce(available)
+      .mockImplementation(() => { throw new Error("container gone"); });
+    let firstSnapshot: string | undefined;
+    const removeSteward = rec.deps.removeSteward!;
+    rec.deps.removeSteward = vi.fn(removeSteward).mockImplementationOnce(async () => {
+      firstSnapshot = fs.readFileSync(snapshotPath, "utf8");
+      return { outcome: "failed", removedIds: [], detail: "unavailable" };
+    });
+
+    try {
+      const [first, retry] = await Promise.all([
+        teardownSession(store, spawnId, { reason: "cleanup" }, rec.deps),
+        teardownSession(store, stewardId, {}, rec.deps),
+      ]);
+      expect(first.status).toBe("tearing-down");
+      expect(retry.status).toBe("torndown");
+      expect(retry.warnings).toContain("container logs unavailable: container gone");
+      expect(fs.readFileSync(path.join(dir, "container.log"), "utf8")).toBe("logs for container-aaa");
+      expect(fs.readFileSync(snapshotPath, "utf8")).toBe(firstSnapshot);
+      expect(JSON.parse(firstSnapshot!)).toEqual(original);
+      const history = fs.readFileSync(journalPath, "utf8");
+      const entries = history.trim().split("\n").map((line) => JSON.parse(line));
+      expect(entries).toMatchObject([
+        { attempt: 1, event: "started", at: expect.any(String), request: { force: false, kill: false, reason: "cleanup" } },
+        { attempt: 1, event: "finished", at: expect.any(String), status: first.status, steps: JSON.parse(JSON.stringify(first.steps)), warnings: first.warnings },
+        { attempt: 2, event: "started", at: expect.any(String), request: { force: false, kill: false } },
+        { attempt: 2, event: "finished", at: expect.any(String), status: retry.status, steps: JSON.parse(JSON.stringify(retry.steps)), warnings: retry.warnings },
+      ]);
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).steps).toEqual([]);
+      expect(fs.readFileSync(journalPath, "utf8")).toBe(history);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps legacy snapshot bytes and treats malformed extraction as an optional source", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    store.update(spawnId, {
+      extractionResult: { status: "succeeded" } as SessionRecord["extractionResult"],
+    });
+    const dir = broodArchiveDir(spawnId, home);
+    fs.mkdirSync(dir, { recursive: true });
+    const legacy = '{"spawn":{"status":"stopped"},"torndownAt":"legacy"}\n';
+    const snapshot = path.join(dir, "record.json");
+    fs.writeFileSync(snapshot, legacy);
+    try {
+      const result = await teardownSession(store, spawnId, {}, recordingDeps(home).deps);
+      expect(result.status).toBe("torndown");
+      expect(result.warnings).toContain("registry extraction result unavailable or malformed");
+      expect(fs.existsSync(path.join(dir, "artifacts"))).toBe(false);
+      expect(fs.readFileSync(snapshot, "utf8")).toBe(legacy);
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each(["record.json", "teardown.ndjson", "container.log", "artifacts/extraction-result.json", "artifacts/spawn.patch"])(
+    "blocks removal when the archive cannot write %s", async (blockedFile) => {
+      const home = makeHome();
+      const store = new SessionStore({ dbPath: ":memory:" });
+      const { spawnId } = seedSpawnGroup(store);
+      const patchText = "registry patch";
+      store.update(spawnId, { extractionResult: {
+        spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+        patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+          sha256: createHash("sha256").update(patchText).digest("hex") },
+      } });
+      const blocked = path.join(broodArchiveDir(spawnId, home), blockedFile);
+      let failedAppend: ReturnType<typeof vi.spyOn> | undefined;
+      if (blockedFile === "teardown.ndjson") {
+        const rename = fs.renameSync;
+        failedAppend = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+          if (target === blocked) throw new Error("journal unavailable");
+          rename(source, target);
+        });
+      } else {
+        fs.mkdirSync(blocked, { recursive: true });
+      }
+      const rec = recordingDeps(home);
+      try {
+        const result = await teardownSession(store, spawnId, {}, rec.deps);
+        expect(result.status).toBe("tearing-down");
+        expect(result.steps[0]).toMatchObject({ step: "archive", outcome: "failed" });
+        expect(result.steps.slice(1).every(({ outcome }) => outcome === "skipped")).toBe(true);
+        expect(rec.calls.filter((call) => !call.startsWith("logs:"))).toEqual([]);
+      } finally {
+        failedAppend?.mockRestore();
+        store.close();
+      }
+    },
+  );
+
+  it.each([false, true])("distinguishes source and archive digest mismatches (read-back: %s)", async (readBack) => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "registry patch";
+    const patchPath = path.join(broodArchiveDir(spawnId, home), "artifacts", "spawn.patch");
+    store.update(spawnId, { extractionResult: {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(readBack ? patchText : "different text").digest("hex") },
+    } });
+    const rec = recordingDeps(home);
+    const readFile = fs.readFileSync;
+    const spy = readBack ? vi.spyOn(fs, "readFileSync").mockImplementation((file, options) =>
+      file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options)) : undefined;
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe(readBack ? "tearing-down" : "torndown");
+      expect(result.steps[0]?.outcome).toBe(readBack ? "failed" : "ok");
+      expect(result.warnings).toContain(readBack
+        ? "archive failed: archived extraction patch digest mismatch"
+        : "registry extraction patch digest mismatch");
+      expect(fs.existsSync(patchPath)).toBe(readBack);
+      expect(rec.calls.includes(`container:${spawnId}`)).toBe(!readBack);
+    } finally {
+      spy?.mockRestore();
+      store.close();
+    }
+  });
+
+  it("keeps the archived patch and registry result consistent across source changes", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "original registry patch";
+    const result = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(patchText).digest("hex") },
+    } satisfies ExtractionResult;
+    store.update(spawnId, { extractionResult: result });
+    const artifacts = path.join(broodArchiveDir(spawnId, home), "artifacts");
+    const resultPath = path.join(artifacts, "extraction-result.json");
+    const patchPath = path.join(artifacts, "spawn.patch");
+    const retryable = recordingDeps(home, {
+      removeSteward: async () => ({ outcome: "failed", detail: "unavailable", removedIds: [] }),
+    }).deps;
+    try {
+      expect((await teardownSession(store, spawnId, {}, retryable)).status).toBe("tearing-down");
+      store.update(spawnId, {
+        extractionResult: { ...result, patch: { ...result.patch, patchText: "changed bytes" } },
+      });
+      const mismatch = await teardownSession(store, spawnId, {}, retryable);
+      expect(mismatch.warnings).toContain("registry extraction patch digest mismatch");
+      expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toEqual(result);
+      expect(fs.readFileSync(patchPath, "utf8")).toBe(patchText);
+
+      const failure = {
+        spawnId, backend: "codex", status: "failed",
+        failureReason: "no changes exported", extractedAt: result.extractedAt,
+      } satisfies ExtractionResult;
+      store.update(spawnId, { extractionResult: failure });
+      const retry = await teardownSession(store, spawnId, {}, recordingDeps(home).deps);
+      expect(retry.status).toBe("torndown");
+      expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toEqual(failure);
+      expect(fs.existsSync(patchPath)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps an unmatched start when journal finalization fails after removal", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const dir = broodArchiveDir(spawnId, home);
+    const journal = path.join(dir, "teardown.ndjson");
+    const rename = fs.renameSync;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+      if (target === journal && fs.existsSync(journal)) throw new Error("archive unavailable");
+      rename(source, target);
+    });
+    const rec = recordingDeps(home);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.steps.find(({ step }) => step === "container")?.outcome).toBe("ok");
+      expect(result.warnings).toContain("archive finalization failed: archive unavailable");
+      expect(store.get(spawnId)?.status).toBe("tearing-down");
+      const interrupted = fs.readFileSync(journal, "utf8");
+      expect(JSON.parse(interrupted)).toMatchObject({ attempt: 1, event: "started" });
+      const snapshot = fs.readFileSync(path.join(dir, "record.json"), "utf8");
+      spy.mockRestore();
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(fs.readFileSync(path.join(dir, "record.json"), "utf8")).toBe(snapshot);
+      const history = fs.readFileSync(journal, "utf8");
+      expect(history.startsWith(interrupted)).toBe(true);
+      expect(history.trim().split("\n").map((line) => JSON.parse(line))).toMatchObject([
+        { attempt: 1, event: "started" },
+        { attempt: 2, event: "started" },
+        { attempt: 2, event: "finished", status: "torndown" },
+      ]);
+    } finally {
+      spy.mockRestore();
+      store.close();
+    }
+  });
+
+  it("recovers the registry after a restart following journal finalization", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running" });
+    const update = store.update.bind(store);
+    vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    const journal = path.join(broodArchiveDir(spawnId, homeDir), "teardown.ndjson");
+    try {
+      await expect(teardownSession(store, spawnId, { force: true }, rec.deps))
+        .rejects.toThrow("registry unavailable");
+      expect(store.get(spawnId)?.status).toBe("tearing-down");
+    } finally {
+      store.close();
+    }
+
+    const restarted = new SessionStore({ homeDir });
+    try {
+      const history = fs.readFileSync(journal, "utf8");
+      const finished = JSON.parse(history.trim().split("\n").at(-1)!);
+      expect(finished).toMatchObject({ event: "finished", status: "torndown" });
+      rec.calls.length = 0;
+      const result = await teardownSession(restarted, stewardId, {}, rec.deps);
+      expect(result).toMatchObject({ status: "torndown", steps: [], warnings: [] });
+      for (const id of [spawnId, stewardId]) {
+        expect(restarted.get(id)).toMatchObject({ status: finished.status, torndownAt: finished.at });
+      }
+      expect(rec.calls).toEqual([]);
+      expect(fs.readFileSync(journal, "utf8")).toBe(history);
+
+      restarted.update(spawnId, { status: "running" });
+      await expect(teardownSession(restarted, spawnId, {}, rec.deps))
+        .rejects.toBeInstanceOf(BroodConflictError);
+      expect(restarted.get(spawnId)?.status).toBe("running");
+      expect(fs.readFileSync(journal, "utf8")).toBe(history);
+    } finally {
+      restarted.close();
+    }
   });
 
   it("defers worktree + branch when steward removal fails (does not orphan a live checkout)", async () => {
@@ -532,6 +829,26 @@ describe.skipIf(!sqliteAvailable)("teardownSession tracing", () => {
         expect(span.status.code).toBe(SpanStatusCode.ERROR);
         expect(span.spanContext().traceId).toBe(traceId);
         expect(span.parentSpanContext?.spanId).toBe(spanId);
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("ends the teardown and archive spans with errors when evidence cannot be saved", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    fs.mkdirSync(path.join(broodArchiveDir(spawnId, home), "container.log"), { recursive: true });
+    try {
+      expect((await teardownSession(store, spawnId, {}, recordingDeps(home).deps)).status)
+        .toBe("tearing-down");
+      for (const name of ["brood.teardown", "brood.teardown.archive"]) {
+        const span = created.find((candidate) => candidate.name === name);
+        expect(span?.ended, name).toBe(true);
+        expect(span?.status.code, name).toBe(SpanStatusCode.ERROR);
       }
     } finally {
       store.close();

@@ -74,6 +74,34 @@ use only the `kind`, `outcome`, and `profile` dimensions. Outcomes are
 Git cleanup failure, and `error` when archiving or verifying steward
 removal failed. HTTP rejections are tracked by the HTTP request instruments.
 
+Brood archives teardown evidence under `~/.march/brood/archive/<primary-id>/`.
+Requests for a spawn and its steward share one archive and run serially within
+the Brood service. Brood saves the original registry group when it records
+admission, so an archive failure can be retried after restart. It publishes
+`record.json` once and preserves existing snapshots byte for byte, including
+legacy snapshots. Rejected and already-complete requests leave the archive
+untouched.
+
+Each attempt adds a numbered `started` entry to `teardown.ndjson` after the
+snapshot, then a `finished` entry with the response's status, steps, and warnings.
+Brood publishes the journal atomically with its prior entries intact. A start
+without a finish identifies an interrupted attempt. Available container logs go
+to `container.log`. Validated registry extraction results go to
+`artifacts/extraction-result.json`. Successful patches go to
+`artifacts/spawn.patch` with SHA-256 verification before writing and after reading
+back the saved bytes. The archive excludes worktree files.
+
+Unavailable sources produce warnings and preserve previously archived evidence.
+A source digest mismatch also preserves any earlier verified patch and its
+matching extraction result. A read-back mismatch fails the archive step.
+An archive write failure before removal yields a failed archive step and blocks
+all removal. A journal finalization failure leaves the row `tearing-down` and
+returns the completed step outcomes with a warning. If Brood stops after
+journaling `torndown` and before updating the registry, the next teardown request
+completes the registry transition without repeating removal. Archive failures
+end errored spans, following the [March vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
+
 The orphan PR lookup used by `POST /admin/sweep` and periodic reconciliation
 requests a Tessera app/read token scoped to the repository at the profile's
 GitHub origin. Brood retries a GitHub 401 once using a refreshed entitlement.

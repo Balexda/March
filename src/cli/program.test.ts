@@ -427,16 +427,20 @@ describe("march CLI", () => {
       expect(calls).toEqual([]);
       expect(fs.existsSync(broodArchiveDir("live", homeDir))).toBe(false);
 
+      const missingEvidence = [
+        "container logs unavailable: no tracked container ID",
+        "registry extraction result unavailable or malformed",
+      ];
       const completed = await runTeardown(url, "stopped");
       expect(completed.stdout.trim().split("\n")).toEqual([
         "stopped: torndown", "archive: ok", "container: ok (absence verified)",
         "steward: ok", "worktree: ok", "branch: ok",
       ]);
-      expect(completed.stderr).toBe("");
+      expect(completed.stderr.trim().split("\n")).toEqual(missingEvidence.map((warning) => `warning: ${warning}`));
 
       const forced = await runTeardown(url, "live-steward", "--force", "--json", "--reason", "operator cleanup");
       expect(JSON.parse(forced.stdout)).toEqual({
-        id: "live", status: "torndown", warnings: [],
+        id: "live", status: "torndown", warnings: missingEvidence,
         steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
           expect.objectContaining({ step, outcome: "ok" })),
       });
@@ -454,7 +458,7 @@ describe("march CLI", () => {
         id: "deferred", status: "tearing-down",
         steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
           expect.objectContaining({ step })),
-        warnings: ["steward removal failed: Castra unavailable"],
+        warnings: [...missingEvidence, "steward removal failed: Castra unavailable"],
       });
       expect(store.get("deferred")).toMatchObject({
         failureReason: "spawn failed", teardownReason: "reclaim failed spawn",
