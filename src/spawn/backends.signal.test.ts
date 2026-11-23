@@ -153,6 +153,14 @@ async function waitForPid(file: string, timeoutMs = 10_000): Promise<number> {
   throw new Error(`timed out waiting for ${file}`);
 }
 
+async function waitForFile(file: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(file)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${file}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -206,6 +214,27 @@ describe.skipIf(!hasSetsid).each([
     child.kill("SIGTERM");
 
     expect(await exited).toEqual({ code: 42, signal: null });
+    expect(emittedStatus(root)).toBe(telemetry ? "42" : undefined);
+  }, 20_000);
+
+  it("waits through a second stop while the agent finishes shutting down", async () => {
+    const { root, child, exited } = setup([
+      `trap 'stopping=1' TERM`,
+      `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
+      `while [ -z "$stopping" ]; do sleep 0.05; done`,
+      `echo stopping > "$MARCH_TEST_ROOT/stopping.tmp" && mv "$MARCH_TEST_ROOT/stopping.tmp" "$MARCH_TEST_ROOT/agent.stopping"`,
+      `i=0; while [ "$i" -lt 10 ]; do sleep 0.05; i=$((i + 1)); done`,
+      `echo done > "$MARCH_TEST_ROOT/agent.done"`,
+      `exit 42`,
+    ].join("\n"), { telemetry });
+    await waitForPid(path.join(root, "agent.pid"));
+
+    child.kill("SIGTERM");
+    await waitForFile(path.join(root, "agent.stopping"));
+    child.kill("SIGTERM");
+
+    expect(await exited).toEqual({ code: 42, signal: null });
+    expect(fs.existsSync(path.join(root, "agent.done"))).toBe(true);
     expect(emittedStatus(root)).toBe(telemetry ? "42" : undefined);
   }, 20_000);
 
