@@ -95,11 +95,13 @@ conductor flow (a single shared `march-legate` service now drives every profile)
 
 Run `march brood sessions` to list live interactive names alongside tracked
 spawn IDs. A tmux session named `march/<name>` is advertised under its unprefixed
-name. To attach, pass only that name to `march brood attach <name>` from an
-interactive terminal on the host with access to Castra's tmux server, including
-an SSH terminal on that host. A name that matches any tracked spawn ID is
-unavailable for attachment. If either inventory source fails, the command
-reports the unavailable source and marks any results as partial.
+name. The planned `march brood attach <name>` command (not yet available) will
+take only that unprefixed name and must run from an interactive terminal on the
+host with access to Castra's tmux server, including an SSH terminal on that
+host. A name that matches any tracked spawn ID is flagged as a spawn-ID
+collision and will not be an attach candidate. If either inventory source
+fails, the command reports the unavailable source and marks any results as
+partial.
 
 ## Observability
 
