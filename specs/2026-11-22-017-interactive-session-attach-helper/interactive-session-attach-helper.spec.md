@@ -66,7 +66,7 @@ As an operator, I want one list of attachable names and tracked spawns so I can 
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | Attach to an Interactive Session | — | — |
+| US1 | Attach to an Interactive Session | — | specs/2026-11-22-017-interactive-session-attach-helper/01-attach-to-an-interactive-session.tasks.md |
 | US2 | Discover Interactive Sessions Alongside Spawns | — | — |
 
 ## Requirements
