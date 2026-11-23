@@ -6,6 +6,8 @@ import {
   type DispatchOutcome,
 } from "../../observability/hatchery-metrics.js";
 import { runSpawnInWorker } from "./spawn-runner.js";
+import { DISPATCH_REASON_NONE, dispatchReasonCode } from "../dispatch-reason.js";
+import { SpawnWindow } from "./readiness.js";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
 import type { JobRecord, SpawnRequest } from "./types.js";
 
@@ -68,6 +70,8 @@ export class JobStore {
   private readonly terminalTtlMs: number;
   private readonly onSucceeded?: JobStoreOptions["onSucceeded"];
   private reaper?: ReturnType<typeof setInterval>;
+  /** Rolling window of finished spawn outcomes — feeds `/readyz` (`spawns`). */
+  readonly spawnWindow = new SpawnWindow();
 
   constructor(options: JobStoreOptions = {}) {
     this.executor = options.executor ?? runSpawnInWorker;
@@ -138,7 +142,8 @@ export class JobStore {
         { ...fields, spawn_id: record.result.spawnId },
         "spawn job succeeded",
       );
-      this.recordDispatch(request, "success");
+      this.recordDispatch(request, "success", DISPATCH_REASON_NONE);
+      this.spawnWindow.record(true, null);
       if (this.onSucceeded) {
         try {
           await this.onSucceeded(record.result, request);
@@ -153,7 +158,9 @@ export class JobStore {
       record.error = { message: errorMessage(err) };
       record.status = "failed";
       this.logger?.error({ ...fields, err: errorMessage(err) }, "spawn job failed");
-      this.recordDispatch(request, "failure");
+      const reason = dispatchReasonCode(err);
+      this.recordDispatch(request, "failure", reason);
+      this.spawnWindow.record(false, reason);
     } finally {
       record.finishedAt = new Date().toISOString();
       decActiveSpawns();
@@ -164,14 +171,16 @@ export class JobStore {
    * Emit the dispatch-outcome metric for a terminal job. Labels stay
    * low-cardinality (no spawn/slice ids); task type/profile are trimmed and
    * default to `"unknown"` — mirroring `runHatcherySpawn` — so blank or
-   * whitespace values don't fragment the metric series.
+   * whitespace values don't fragment the metric series. `reason` is the bounded
+   * failure code (`dispatchReasonCode`), `"none"` on success.
    */
-  private recordDispatch(request: SpawnRequest, outcome: DispatchOutcome): void {
+  private recordDispatch(request: SpawnRequest, outcome: DispatchOutcome, reason: string): void {
     recordHatcheryDispatch({
       backend: request.backend,
       taskType: request.taskType?.trim() || "unknown",
       profile: request.profile?.trim() || "unknown",
       outcome,
+      reason,
     });
   }
 

@@ -42,6 +42,8 @@ export interface ServiceStatus {
   /** HTTP status code from the health probe, when a response was received. */
   readonly httpStatus?: number;
   readonly token: TokenState;
+  /** Readiness state, for services with a readiness endpoint that answered. */
+  readonly readiness?: "ok" | "degraded" | "down";
   /** Present only for services with a locally-built image. */
   readonly imagePresent?: boolean;
   /** True when this service is up, reachable, and correctly token-wired. */
@@ -66,6 +68,8 @@ export interface HttpProbeResult {
   readonly reachable: boolean;
   /** The HTTP status code, when a response came back. */
   readonly status?: number;
+  /** The parsed JSON body, when the response carried one. */
+  readonly body?: unknown;
 }
 
 export interface StatusOptions {
@@ -167,7 +171,13 @@ export async function fetchProbe(
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: controller.signal,
     });
-    return { reachable: true, status: res.status };
+    let body: unknown;
+    try {
+      body = JSON.parse(await res.text());
+    } catch {
+      body = undefined;
+    }
+    return { reachable: true, status: res.status, ...(body !== undefined ? { body } : {}) };
   } catch {
     return { reachable: false };
   } finally {
@@ -257,7 +267,28 @@ async function statusForService(
     }
   }
 
+  // Readiness: a live service that cannot do its job (e.g. hatchery with no
+  // GitHub credential) is `down` — unhealthy; `degraded` is reported only.
+  let readiness: "ok" | "degraded" | "down" | undefined;
+  if (svc.readinessPath && reachable === "ok") {
+    const ready = await deps.probeHttp(`http://127.0.0.1:${port}${svc.readinessPath}`);
+    const body = ready.body as { state?: unknown; reasons?: unknown } | undefined;
+    const state = body?.state;
+    if (state === "ok" || state === "degraded" || state === "down") {
+      readiness = state;
+      const reasons = Array.isArray(body?.reasons)
+        ? body.reasons.filter((r): r is string => typeof r === "string")
+        : [];
+      for (const r of reasons) issues.push(`${state === "down" ? "not ready" : "degraded"}: ${r}`);
+      if (state === "down" && reasons.length === 0) issues.push(`not ready (${svc.readinessPath} state=down)`);
+    } else if (ready.reachable && ready.status !== undefined && ready.status >= 500) {
+      readiness = "down";
+      issues.push(`not ready (${svc.readinessPath} answered HTTP ${ready.status})`);
+    }
+  }
+
   const healthy =
+    readiness !== "down" &&
     container === "running" &&
     reachable === "ok" &&
     (token === "ok" || token === "n/a") &&
@@ -270,6 +301,7 @@ async function statusForService(
     reachable,
     ...(health.status !== undefined ? { httpStatus: health.status } : {}),
     token,
+    ...(readiness !== undefined ? { readiness } : {}),
     ...(imagePresent !== undefined ? { imagePresent } : {}),
     healthy,
     issues,
@@ -350,7 +382,7 @@ export function formatStatusTable(status: StackStatus): string {
         : s.reachable === "error"
           ? `error (:${s.port})`
           : "unreachable";
-    const mark = s.healthy ? "✓" : "✗";
+    const mark = !s.healthy ? "✗" : s.readiness === "degraded" ? "!" : "✓";
     lines.push(
       `${mark} ${s.service.padEnd(11)}${s.container.padEnd(10)}${reach.padEnd(16)}${s.token}`,
     );

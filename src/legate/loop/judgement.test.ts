@@ -2,7 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
-import { requestJudgement, type JudgementDeps } from "./judgement.js";
+import { judgementErrorCode, requestJudgement, type JudgementDeps } from "./judgement.js";
 
 function deps(over: Partial<JudgementDeps> = {}): JudgementDeps {
   return {
@@ -64,5 +64,25 @@ describe("requestJudgement", () => {
     const d = deps({ sendDoorbell: vi.fn(async () => false) });
     await requestJudgement({ ts: "T", sliceId: "s", reason: "r", detail: "d" }, d);
     expect(d.log).toHaveBeenCalledWith(expect.stringContaining("(doorbell delivery failed)"));
+  });
+
+  it("names Hatchery's error code in the log line", async () => {
+    const d = deps({ sendDoorbell: vi.fn(async () => false) });
+    await requestJudgement({
+      ts: "T", sliceId: "s", reason: "hatchery_dispatch_failed",
+      detail: "Hatchery dispatch for smithy.forge x failed and was escalated.\n\nError:\nHatchery GitHub read failed (tessera:unconfigured)\n\nThe loop auto-recovered…",
+    }, d);
+    expect(d.log).toHaveBeenCalledWith(expect.stringContaining("hatchery_dispatch_failed [tessera:unconfigured] (doorbell delivery failed)"));
+  });
+});
+
+describe("judgementErrorCode", () => {
+  it("classifies only the Error: block of a dispatch failure, never the guidance prose", () => {
+    const detail = "Hatchery dispatch launch threw for x.\n\nError:\nspawn worker exited with code 1 before reporting a result"
+      + "\n\nFor a persistent 'branch already exists' collision, …";
+    expect(judgementErrorCode("hatchery_dispatch_failed", detail)).toBe("worker_exit");
+    expect(judgementErrorCode("hatchery_dispatch_failed", "Error:\nsomething odd\n\nbranch already exists")).toBeUndefined();
+    expect(judgementErrorCode("steward_awaiting_input", "Error:\ndocker down")).toBeUndefined();
+    expect(judgementErrorCode("r", undefined)).toBeUndefined();
   });
 });

@@ -21,8 +21,10 @@ import {
   recordOperatorAction,
   recordReviewCaps,
   recordSpawnBudget,
+  recordStackServiceStates,
   type OperatorAction,
 } from "../../observability/loop-metrics.js";
+import { probeServices, type ServicesHealth } from "./service-health.js";
 import { stampDwell } from "./pure/dwell.js";
 import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -190,8 +192,11 @@ export function configureLoopRuntime(opts: {
   intervalSeconds: number;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
+  /** Override the per-tick stack service probe (tests). */
+  probeServices?: (env: NodeJS.ProcessEnv) => Promise<ServicesHealth>;
 }): void {
   profileClient = opts.profileClient;
+  if (opts.probeServices) serviceProbe = opts.probeServices;
   intervalSeconds = opts.intervalSeconds;
   if (opts.homeDir) homeDir = opts.homeDir;
   if (opts.env) env = opts.env;
@@ -208,6 +213,9 @@ export interface LoopSnapshot {
   readonly lastTickDurationMs: number;
   /** Back-compat: an arbitrary profile's heartbeat (first registered). */
   readonly lastHeartbeat: any;
+  /** Stack service readiness from the latest tick's probe (empty before the
+   *  first tick). Served by GET /status as `services`; never probed inline. */
+  readonly services?: ServicesHealth;
 }
 
 /** Latest tick snapshot, consumed by the HTTP /status + /escalations endpoints. */
@@ -222,6 +230,7 @@ export function getLoopSnapshot(): LoopSnapshot {
     lastTickAtMs: _scheduler?.lastTickAtMs ?? 0,
     lastTickDurationMs: _scheduler?.lastTickDurationMs ?? 0,
     lastHeartbeat: profiles.length > 0 ? byProfile[profiles[0]].lastHeartbeat : null,
+    services: latestServices,
   };
 }
 
@@ -1250,7 +1259,42 @@ const codeRabbitBackoff = new ReviewerBackoff(appendReviewBackoff);
 const copilotBackoff = new ReviewerBackoff(appendReviewBackoff, "copilot");
 
 // Drain the shared Herald stream once, then run each profile in isolation.
+// Latest per-tick stack service probe (#2026-11-22 spawn-credential outage).
+let latestServices: ServicesHealth = {};
+let serviceProbe: (env: NodeJS.ProcessEnv) => Promise<ServicesHealth> = (e) => probeServices({ env: e });
+
+/**
+ * Probe every stack service once (concurrently, ~2s timeout each), cache the
+ * result for GET /status, and refresh the `march.stack.service.state` gauge.
+ * Never throws: a probe failure is a `down` entry, never a broken tick.
+ */
+async function refreshServiceHealth(): Promise<void> {
+  try {
+    latestServices = await serviceProbe(env);
+    recordStackServiceStates(
+      Object.fromEntries(Object.entries(latestServices).map(([name, h]) => [name, h!.state])),
+    );
+  } catch (err: any) {
+    emitLoopLog({
+      severity: "WARN",
+      body: "service_probe_failed: " + (err?.message || String(err)),
+      eventKind: "processor_error",
+    });
+  }
+}
+
 async function tick() {
+  // The service probe runs alongside the tick body (it only waits on the
+  // network) and is awaited even when the body returns early or throws.
+  const probing = refreshServiceHealth();
+  try {
+    await tickBody();
+  } finally {
+    await probing;
+  }
+}
+
+async function tickBody() {
   let profiles: ProfileRecord[];
   try {
     profiles = await profileClient.list();

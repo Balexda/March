@@ -273,7 +273,16 @@ describe("recoverDispatch (#211 bounded auto-recovery)", () => {
     expect(state.slices.s).toMatchObject({ stage: "hatchery-pending", hatchery: { job_id: "job-99" } });
     expect(state.slices.s.escalated_reason).toBeUndefined();
     expect(out.actions[0]).toMatchObject({ action: "dispatch-recovery" });
-    expect(out.actions[0].detail).toContain("auto-recovery attempt 1/");
+    expect(out.actions[0].detail).toContain("auto-recovery attempt 1: ");
+  });
+
+  it("reports the attempt without a fake limit (recovery retries indefinitely since #460)", async () => {
+    const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
+    const log = vi.fn();
+    const out = await recoverDispatch(state, "T", item(), "s", 7, deps({ log, postSpawn: vi.fn(async () => ({ id: "job-7" })) }));
+    expect(out.actions[0].detail).toMatch(/^auto-recovery attempt 7: /);
+    expect(out.actions[0].detail).not.toContain("7/");
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("(attempt 7)"));
   });
 
   it("persists the bumped retry counter and emits retry.counted + recovery.dispatched, no stage clear (#255)", async () => {

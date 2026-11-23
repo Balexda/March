@@ -22,15 +22,48 @@ Hatchery exposes an open HTTP API for spawn job submission and lookup. Bodies ar
 |-------|----------|
 | Method and path | `GET /readyz` |
 | Request envelope | No params, query, or body. |
-| Response envelope | `{ "ready": boolean, "docker": boolean, "castra": boolean }`. |
-| Visible status or error behavior | Returns `200` when `ready` is true; returns `503` when Docker or Castra is unavailable. |
+| Response envelope | The readiness body below (snake_case). |
+| Visible status or error behavior | Returns `200` when `state` is `ok` or `degraded`; returns `503` when `state` is `down`. |
 
-Readiness dependencies:
+Readiness answers "can Hatchery spawn right now", not "is the process up". It
+closes the 2026-11-22 outage, where every spawn failed `tessera:unconfigured`
+for five hours while `/healthz` and the old `/readyz` (docker + castra only)
+stayed green.
 
-| Field | Meaning | Gates readiness |
-|-------|---------|-----------------|
-| `docker` | Docker is available to run sibling spawn containers. | Yes |
-| `castra` | Castra is reachable for steward session handoff. | Yes |
+```json
+{
+  "ready": true,
+  "state": "ok",
+  "docker": true,
+  "castra": true,
+  "github": { "ok": true, "source": "fallback", "reason": null },
+  "spawns": {
+    "recent": 20, "failed": 0, "consecutive_failures": 0,
+    "last_error": null, "last_error_at": null,
+    "last_success_at": "2026-11-22T12:00:00.000Z"
+  },
+  "reasons": []
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ready` | `state != "down"`. Kept for older readers. |
+| `state` | `ok` \| `degraded` \| `down`, derived from the checks below. |
+| `docker` | Docker is available to run sibling spawn containers. |
+| `castra` | Castra is reachable for steward session handoff. |
+| `github.ok` / `github.source` | Whether a spawn can get a GitHub app/read credential, and from where: `tessera` (both `MARCH_TESSERA_URL` and `MARCH_TESSERA_CLIENT_KEY` are set and valid), `fallback` (`MARCH_TESSERA_GH_TOKEN_FALLBACK=1` with a non-empty `GH_TOKEN`/`GITHUB_TOKEN`), or `none`. This check runs locally: no network call and no token mint. |
+| `github.reason` | `null` unless `source` is `none`: `tessera:unconfigured`, or `fallback:no_token` when the fallback flag is on but no token was forwarded. |
+| `spawns` | In-memory rolling window over the last 20 finished jobs: `recent` and `failed` counts, `consecutive_failures` since the last success, and `last_error`, which is a low-cardinality reason code (a Hatchery GitHub code such as `tessera:unconfigured`, or one of `worker_exit`, `patch_apply_failed`, `branch_collision`, `castra_error`, `docker_error`, `timeout`, `other`). Also `last_error_at` and `last_success_at` (ISO, or `null`). A restart resets the window. |
+| `reasons` | One human sentence per failing check. Empty when `state` is `ok`. |
+
+State rules:
+
+| State | When |
+|-------|------|
+| `down` | `docker` is false, or `castra` is false, or `github.ok` is false, or `consecutive_failures >= 5`. |
+| `degraded` | Not down, and `consecutive_failures >= 2`. |
+| `ok` | Otherwise. A `fallback` credential is still `ok`: it is the sanctioned migration path, so `/readyz` reports it but does not mark it degraded. |
 
 ### `POST /spawns`
 
@@ -92,7 +125,7 @@ Job record response:
 - Job status is one of `pending`, `running`, `succeeded`, or `failed`.
 - A successful job record exposes `result`; a failed job record exposes `error.message`.
 - Terminal job records may be evicted after the service's retention window, after which lookup is treated as an unknown job id.
-- `/readyz` is the dependency gate for useful service work; `/healthz` is only a basic process-health route.
+- `/readyz` is the dependency gate for useful service work; `/healthz` is only a basic process-health route. The container healthcheck uses `/healthz`, so a credential outage never restart-loops Hatchery.
 
 ## Error Modes
 
@@ -104,7 +137,7 @@ Job record response:
 | Missing repo path | `POST /spawns` | `400` with `{ "error": string }` | The body has no non-empty string `repoPath`. |
 | Invalid toolchain | `POST /spawns` | `400` with `{ "error": string }` | A provided `toolchain` is not one of Hatchery's allowed selections. |
 | Unknown job id | `GET /spawns/:id` | `404` with `{ "error": string }` | No retained job record exists for the requested id. |
-| Readiness dependency unavailable | `GET /readyz` | `503` with `{ "ready": false, "docker": boolean, "castra": boolean }` | At least one readiness dependency is false. |
+| Readiness down | `GET /readyz` | `503` with the readiness body, `state: "down"`, `ready: false` | Docker or Castra is unavailable, there is no GitHub credential, or the last 5 or more spawns failed. `reasons` names each cause. |
 
 ### GitHub base pinning and branch collisions
 

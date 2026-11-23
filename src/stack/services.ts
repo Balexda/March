@@ -31,6 +31,12 @@ export interface MarchService {
   /** HTTP path that reports liveness (200 = reachable + healthy). */
   readonly healthPath: string;
   /**
+   * HTTP path reporting READINESS as `{ state: "ok"|"degraded"|"down", reasons }`
+   * (only hatchery today). Probed after a healthy {@link healthPath}: liveness
+   * alone stayed green through the 2026-11-22 spawn-credential outage.
+   */
+  readonly readinessPath?: string;
+  /**
    * HTTP path gated by the shared `CASTRA_API_TOKEN`, used to verify the token
    * actually authenticates rather than 401/404-ing silently. Only set for
    * services that gate a route on the shared token (castra).
@@ -86,6 +92,7 @@ export const MARCH_SERVICES: readonly MarchService[] = [
     image: "march-hatchery:latest",
     port: 8080,
     healthPath: "/healthz",
+    readinessPath: "/readyz",
     dependsOn: ["castra"],
   },
   {

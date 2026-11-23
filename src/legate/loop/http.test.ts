@@ -49,6 +49,7 @@ function snapshot(over: Partial<LoopSnapshot> = {}): LoopSnapshot {
     lastTickAtMs: over.lastTickAtMs ?? Date.now(),
     lastTickDurationMs: over.lastTickDurationMs ?? 420,
     lastHeartbeat: over.lastHeartbeat ?? Object.values(byProfile)[0]?.lastHeartbeat ?? null,
+    ...(over.services ? { services: over.services } : {}),
   };
 }
 
@@ -141,6 +142,20 @@ describe("loop http (fastify)", () => {
     const status = buildStatus(ctxWith(snapshot()));
     expect(status).toMatchObject({ ok: true, profiles: ["smithy"] });
     expect((status as any).by_profile.smithy.queue.dispatchable).toBe(2);
+  });
+
+  it("/status serves the cached per-tick service probe under top-level `services`", () => {
+    const services = {
+      hatchery: {
+        state: "down" as const, checked_at: "2026-11-22T00:00:00.000Z",
+        reasons: ["no GitHub credential"], remedy: "fix it", detail: { state: "down" },
+      },
+    };
+    const snap = snapshot({ services });
+    expect(buildStatus(ctxWith(snap))).toMatchObject({ services });
+    expect(buildStatus(ctxWith(snap), "smithy")).toMatchObject({ services });
+    // Before the first tick there is no probe yet: an empty map, never a probe.
+    expect(buildStatus(ctxWith(snapshot()))).toMatchObject({ services: {} });
   });
 
   it("an unknown profile reports not-ok with the known profile list", () => {

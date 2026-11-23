@@ -190,6 +190,13 @@ const latestByProfile = new Map<string, LoopMetricsSnapshot>();
 // tick with no `profile` label. Its gauges read this holder.
 let latestSpawnBudget: SpawnBudgetMetrics | undefined;
 
+// Stack service readiness as the legate's per-tick probe saw it (service →
+// state). Profile-less, like the spawn budget: one stack per legate.
+let latestServiceStates: Readonly<Record<string, string>> = {};
+
+/** The bounded `state` label values of `march.stack.service.state`. */
+export const STACK_SERVICE_STATES = ["ok", "degraded", "down", "absent"] as const;
+
 // The dwell max-age gauges read this map (one sample PER PROFILE) so a stuck
 // slice in any profile surfaces, not just the last profile to tick. Module-level;
 // the observable callbacks iterate it.
@@ -474,6 +481,21 @@ function ensureInstruments(meter: Meter): void {
     (b) => b.breakerOpen ?? 0,
   );
 
+  // Stack service readiness (2026-11-22 outage): one series per {service, state},
+  // 1 for the current state and 0 for the others, so a panel can do
+  // `max by (service) (march_stack_service_state{state="down"})`. No unit ⇒
+  // exported as exactly `march_stack_service_state`. `service` is the fixed
+  // castra/hatchery/brood/herald/tessera set; `state` is STACK_SERVICE_STATES.
+  meter
+    .createObservableGauge("march.stack.service.state", {
+      description: "Stack service readiness as probed by the legate each tick (1 = current state)",
+    })
+    .addCallback((result: ObservableResult) => {
+      for (const [service, current] of Object.entries(latestServiceStates)) {
+        for (const state of STACK_SERVICE_STATES) result.observe(state === current ? 1 : 0, { service, state });
+      }
+    });
+
   // Dwell (time-in-state) — max age of the oldest slice in each stage / merge-gate,
   // per profile. Drives the dwell alarms (spawn/steward too long; ready/blocked
   // not draining). Labels: profile + the bounded stage/gate vocab. No unit ⇒
@@ -609,6 +631,18 @@ export function recordSpawnBudget(budget: SpawnBudgetMetrics): void {
   if (!otel.enabled) return;
   ensureInstruments(otel.getMeter());
   latestSpawnBudget = budget;
+}
+
+/**
+ * Refresh the `march.stack.service.state` gauge from the legate's per-tick
+ * service probe (service → ok/degraded/down/absent). Once per tick, profile-less.
+ * No-op when telemetry is disabled.
+ */
+export function recordStackServiceStates(states: Readonly<Record<string, string>>): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  latestServiceStates = { ...states };
 }
 
 /**

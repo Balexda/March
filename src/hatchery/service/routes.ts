@@ -6,12 +6,23 @@ import { createCastraClientFromEnv } from "../../castra/client.js";
 import {
   outcomeFromStatus,
   recordHatcheryRequest,
+  registerHatcheryReadinessSource,
 } from "../../observability/hatchery-metrics.js";
+import { deriveReadiness, githubCredentialCheck } from "./readiness.js";
 import type { JobStore } from "./jobs.js";
 import type { SpawnRequest } from "./types.js";
 
+/** Injectable readiness probes (tests); defaults are the real local checks. */
+export interface ReadinessProbes {
+  readonly docker?: () => boolean;
+  readonly castra?: () => Promise<boolean>;
+  /** Env the GitHub-credential check reads (defaults to process.env). */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
 export interface RoutesOptions {
   readonly store: JobStore;
+  readonly readiness?: ReadinessProbes;
 }
 
 export type SpawnRequestValidation =
@@ -76,6 +87,21 @@ export async function registerRoutes(
   opts: RoutesOptions,
 ): Promise<void> {
   const { store } = opts;
+  // docker is still driven locally (sibling spawn containers on the host
+  // socket); interactive sessions now go through Castra over HTTP, so its
+  // reachability — not a local agent-deck binary — gates readiness.
+  const probeDocker = opts.readiness?.docker ?? (() => isFinderAvailable() && isOnPath("docker"));
+  const probeCastra = opts.readiness?.castra ?? (() => createCastraClientFromEnv().reachable());
+  const readinessEnv = opts.readiness?.env ?? process.env;
+  // Last observed docker/castra results, for the readiness gauges (the legate
+  // polls /readyz every tick, so these stay fresh). The GitHub check and the
+  // spawn window are read live at collect time.
+  let lastDocker: boolean | undefined;
+  let lastCastra: boolean | undefined;
+  registerHatcheryReadinessSource(() => ({
+    checks: { docker: lastDocker, castra: lastCastra, github: githubCredentialCheck(readinessEnv).ok },
+    consecutiveFailures: store.spawnWindow.consecutiveFailures,
+  }));
 
   // Record every request keyed by route TEMPLATE (not the concrete path) to
   // keep metric cardinality bounded — the same rule spawn-metrics applies to
@@ -89,17 +115,29 @@ export async function registerRoutes(
     });
   });
 
+  // Pure liveness: the docker healthcheck uses it, so it must never depend on a
+  // downstream (a credential outage must not restart-loop the container).
   app.get("/healthz", async () => ({ status: "ok" }));
 
+  // Readiness: can Hatchery actually spawn? 200 unless `state` is "down".
   app.get("/readyz", async (_request, reply) => {
-    // docker is still driven locally (sibling spawn containers on the host
-    // socket); interactive sessions now go through Castra over HTTP, so its
-    // reachability — not a local agent-deck binary — gates readiness.
-    const docker = isFinderAvailable() && isOnPath("docker");
-    const castra = await createCastraClientFromEnv().reachable();
-    const ready = docker && castra;
-    reply.code(ready ? 200 : 503);
-    return { ready, docker, castra };
+    const docker = probeDocker();
+    let castra = false;
+    try {
+      castra = await probeCastra();
+    } catch {
+      castra = false;
+    }
+    lastDocker = docker;
+    lastCastra = castra;
+    const body = deriveReadiness({
+      docker,
+      castra,
+      github: githubCredentialCheck(readinessEnv),
+      spawns: store.spawnWindow.snapshot(),
+    });
+    reply.code(body.state === "down" ? 503 : 200);
+    return body;
   });
 
   app.post("/spawns", async (request, reply) => {

@@ -311,3 +311,39 @@ describe("formatStatusTable", () => {
     expect(out).toContain("container is absent");
   });
 });
+
+describe("stackStatus — hatchery readiness (/readyz)", () => {
+  const withReadyz = (body: unknown, status = 200): StatusOptions =>
+    healthyOptions({
+      probeHttp: async (url, token) => {
+        if (url.includes("/v1/")) return token === "tok-123" ? { reachable: true, status: 200 } : { reachable: true, status: 401 };
+        if (url.endsWith("/readyz")) return { reachable: true, status, body };
+        return { reachable: true, status: 200 };
+      },
+    });
+
+  it("a live hatchery whose readiness is down is unhealthy, with the reasons as issues", async () => {
+    const status = await stackStatus(withReadyz({ ready: false, state: "down", reasons: ["no GitHub credential (tessera:unconfigured)"] }, 503));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery.reachable).toBe("ok");
+    expect(hatchery.readiness).toBe("down");
+    expect(hatchery.healthy).toBe(false);
+    expect(hatchery.issues).toContain("not ready: no GitHub credential (tessera:unconfigured)");
+    expect(status.healthy).toBe(false);
+    expect(formatStatusTable(status)).toContain("✗ hatchery");
+  });
+
+  it("degraded readiness is reported but stays healthy", async () => {
+    const status = await stackStatus(withReadyz({ ready: true, state: "degraded", reasons: ["the last 2 spawns failed (worker_exit)"] }));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ readiness: "degraded", healthy: true });
+    expect(hatchery.issues).toEqual(["degraded: the last 2 spawns failed (worker_exit)"]);
+    expect(formatStatusTable(status)).toContain("! hatchery");
+  });
+
+  it("ok readiness adds nothing", async () => {
+    const status = await stackStatus(withReadyz({ ready: true, state: "ok", reasons: [] }));
+    expect(status.healthy).toBe(true);
+    expect(status.services.find((s) => s.service === "hatchery")?.readiness).toBe("ok");
+  });
+});

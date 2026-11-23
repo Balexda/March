@@ -1,4 +1,23 @@
 import { formatProcessorRequestLine } from "./pure/format.js";
+import { dispatchReasonCode, hatcheryGitHubCode } from "../../hatchery/dispatch-reason.js";
+
+/**
+ * The bounded Hatchery error code an escalation carries, for the log line (so
+ * the operator reads "tessera:unconfigured", not just "hatchery_dispatch_failed").
+ * Only the `Error:` block of a dispatch-failure detail is classified — the rest
+ * of the detail is operator guidance whose wording must not match a pattern.
+ * An unclassifiable dispatch error yields nothing rather than "other".
+ */
+export function judgementErrorCode(reason: unknown, detail: unknown): string | undefined {
+  if (typeof detail !== "string") return undefined;
+  const github = hatcheryGitHubCode(detail);
+  if (github) return github;
+  if (reason !== "hatchery_dispatch_failed") return undefined;
+  const block = /(?:^|\n)Error:\n([\s\S]*?)(?:\n\n|$)/.exec(detail)?.[1];
+  if (!block) return undefined;
+  const code = dispatchReasonCode(block);
+  return code === "other" ? undefined : code;
+}
 
 /**
  * Legate-judgement requests (#144, extracted from runtime.ts). When a handler
@@ -61,7 +80,10 @@ export async function requestJudgement(input: JudgementInput, deps: JudgementDep
   deps.appendRequest(event);
   deps.appendEvent(event);
   const delivered = await deps.sendDoorbell();
-  deps.log(`${formatProcessorRequestLine(event)}${delivered ? "" : " (doorbell delivery failed)"}`);
+  // Surface Hatchery's bounded error code (e.g. tessera:unconfigured) so the log
+  // line names the cause, not just the escalation reason.
+  const code = judgementErrorCode(input.reason, input.detail);
+  deps.log(`${formatProcessorRequestLine(event)}${code ? ` [${code}]` : ""}${delivered ? "" : " (doorbell delivery failed)"}`);
   if (input.slice && input.requestKey) {
     input.slice.last_processor_request_key = input.requestKey;
     input.slice.last_processor_request_at = input.ts;

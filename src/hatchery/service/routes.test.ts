@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
 import { JobStore } from "./jobs.js";
-import { validateSpawnRequest } from "./routes.js";
+import { validateSpawnRequest, type ReadinessProbes } from "./routes.js";
 import type { FastifyInstance } from "fastify";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
 
@@ -32,8 +32,10 @@ function fakeResult(): HatcherySpawnResult {
   };
 }
 
-async function makeApp(): Promise<FastifyInstance> {
-  const store = new JobStore({ executor: async () => fakeResult() });
+async function makeApp(
+  readiness?: ReadinessProbes,
+  store: JobStore = new JobStore({ executor: async () => fakeResult() }),
+): Promise<FastifyInstance> {
   // Silent logger to avoid noisy/file output in tests.
   const logger = {
     info: () => {},
@@ -48,7 +50,7 @@ async function makeApp(): Promise<FastifyInstance> {
       return this;
     },
   } as never;
-  const { app } = await buildServer({ store, logger });
+  const { app } = await buildServer({ store, logger, readiness });
   return app;
 }
 
@@ -142,14 +144,53 @@ describe("routes", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("GET /readyz reports docker + castra readiness", async () => {
+  it("GET /readyz reports docker + castra + github + spawns readiness", async () => {
     app = await makeApp();
     const res = await app.inject({ method: "GET", url: "/readyz" });
     expect([200, 503]).toContain(res.statusCode);
-    const body = res.json() as { ready: boolean; docker: boolean; castra: boolean };
-    expect(typeof body.ready).toBe("boolean");
+    const body = res.json() as Record<string, any>;
     expect(typeof body.docker).toBe("boolean");
     expect(typeof body.castra).toBe("boolean");
-    expect(body.ready).toBe(body.docker && body.castra);
+    expect(["ok", "degraded", "down"]).toContain(body.state);
+    expect(body.ready).toBe(body.state !== "down");
+    expect(res.statusCode).toBe(body.state === "down" ? 503 : 200);
+    expect(body.github).toEqual(expect.objectContaining({ ok: expect.any(Boolean), source: expect.any(String) }));
+    expect(body.spawns).toEqual(expect.objectContaining({ recent: 0, consecutive_failures: 0 }));
+    expect(Array.isArray(body.reasons)).toBe(true);
+  });
+
+  it("GET /readyz is 503 down with no GitHub credential (the tessera:unconfigured outage)", async () => {
+    app = await makeApp({ docker: () => true, castra: async () => true, env: { MARCH_TESSERA_URL: "http://tessera:9477" } });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      ready: false, state: "down", docker: true, castra: true,
+      github: { ok: false, source: "none", reason: "tessera:unconfigured" },
+    });
+  });
+
+  it("GET /readyz is 200 ok on the fallback credential; /healthz stays pure liveness", async () => {
+    app = await makeApp({
+      docker: () => true, castra: async () => true,
+      env: { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "t" },
+    });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ready: true, state: "ok", github: { ok: true, source: "fallback" }, reasons: [] });
+    const live = await app.inject({ method: "GET", url: "/healthz" });
+    expect(live.json()).toEqual({ status: "ok" });
+  });
+
+  it("GET /readyz goes down after 5 consecutive spawn failures", async () => {
+    const store = new JobStore({ executor: async () => { throw new Error("Hatchery GitHub read failed (tessera:unconfigured)"); } });
+    app = await makeApp({ docker: () => true, castra: async () => true, env: { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "t" } }, store);
+    for (let i = 0; i < 5; i++) store.create({ prompt: "p", backend: "codex", repoPath: "/r" });
+    await vi.waitFor(() => expect(store.spawnWindow.consecutiveFailures).toBe(5));
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      state: "down",
+      spawns: { recent: 5, failed: 5, consecutive_failures: 5, last_error: "tessera:unconfigured", last_success_at: null },
+    });
   });
 });
