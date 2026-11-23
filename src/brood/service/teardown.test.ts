@@ -218,7 +218,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     store.close();
   });
 
-  it("continues after a failing step and records a warning", async () => {
+  it("defers workspace cleanup when compute removal fails and records a warning", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
@@ -235,11 +235,48 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const containerStep = result.steps.find((s) => s.step === "container");
     expect(containerStep?.outcome).toBe("failed");
     expect(result.warnings.some((w) => w.includes("docker daemon down"))).toBe(true);
-    // Later steps still ran.
-    expect(result.steps.find((s) => s.step === "worktree")?.outcome).toBe("ok");
-    expect(result.steps.find((s) => s.step === "branch")?.outcome).toBe("ok");
+    // Steward removal still runs, but Git cleanup waits for verified compute absence.
+    expect(rec.calls).toContain(`steward:${group.stewardId}`);
+    for (const step of ["worktree", "branch"] as const) {
+      expect(result.steps.find((s) => s.step === step)).toEqual({
+        step, outcome: "skipped", detail: "deferred: compute removal failed",
+      });
+    }
+    expect(rec.calls.some((c) => c.startsWith("worktree:") || c.startsWith("branch:"))).toBe(false);
     expect(result.status).toBe("tearing-down");
     expect(store.get(group.spawnId)?.status).toBe("tearing-down");
+    store.close();
+  });
+
+  it("defers workspace cleanup when removal after a verified stop fails, then retries", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    const removeCompute = vi.fn<TeardownSubstrate["removeCompute"]>(async () => {
+      throw new Error("container restarted after stop check");
+    });
+    rec.deps.substrate = {
+      ...rec.deps.substrate!,
+      stopCompute: async () => ({ outcome: "stopped", containerId: "c".repeat(64) }),
+      removeCompute,
+    };
+
+    const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    expect(result.steps.find((s) => s.step === "stop")?.outcome).toBe("ok");
+    expect(result.steps.find((s) => s.step === "container")?.outcome).toBe("failed");
+    expect(removeCompute.mock.calls[0]?.[1]).toEqual({ outcome: "stopped", containerId: "c".repeat(64) });
+    expect(result.steps.find((s) => s.step === "worktree")?.detail).toBe("deferred: compute removal failed");
+    expect(result.steps.find((s) => s.step === "branch")?.detail).toBe("deferred: compute removal failed");
+    expect(rec.calls.some((c) => c.startsWith("worktree:") || c.startsWith("branch:"))).toBe(false);
+    expect(result.status).toBe("tearing-down");
+
+    removeCompute.mockResolvedValue(undefined);
+    const retry = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+    expect(retry.status).toBe("torndown");
+    expect(retry.steps.find((s) => s.step === "worktree")?.outcome).toBe("ok");
+    expect(retry.steps.find((s) => s.step === "branch")?.outcome).toBe("ok");
     store.close();
   });
 

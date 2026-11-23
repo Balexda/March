@@ -407,7 +407,14 @@ async function runTeardown(
   // never removed. Check membership here, synchronously adjacent to the Git
   // steps (no await in between), and defer both rather than delete its workspace.
   const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(unchangedStewardIds(verifiedStewards));
-  const gitDeferral = stewardRemovalFailed
+  // Compute that may still be running (e.g. restarted after the stop check)
+  // must keep its workspace; reclaim Git only after verified compute absence.
+  const computeRemovalFailed = steps.some(
+    (step) => step.step === "container" && step.outcome === "failed",
+  );
+  const gitDeferral = computeRemovalFailed
+    ? "deferred: compute removal failed"
+    : stewardRemovalFailed
     ? "deferred: steward removal failed"
     : unverifiedSteward
       ? "deferred: steward registered or changed during teardown"

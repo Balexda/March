@@ -64,8 +64,8 @@ verifies absence after removal. The recorded container ID supplies logs.
 Compose service containers are excluded. Docker errors, deadline breaches,
 and unverified removal produce a failed container step and leave teardown
 retryable. Castra removes the steward with worktree pruning disabled. Brood
-then removes the tracked worktree and branch separately, in that order. Failed steward removal
-defers both Git steps. Failed Git steps leave teardown retryable. The CLI
+then removes the tracked worktree and branch separately, in that order. Failed container or steward removal
+defers both Git steps, so compute that may still be running keeps its workspace. Failed Git steps leave teardown retryable. The CLI
 prints the status, steps, and warnings in text mode or emits the service
 result with `--json`. Only `torndown` exits zero. A `tearing-down` result
 is rendered and exits non-zero even on HTTP 200.
