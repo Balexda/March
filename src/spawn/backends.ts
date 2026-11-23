@@ -18,6 +18,10 @@ export const CONTAINER_WORKDIR = "/march/workspace";
  */
 export const PATCH_SENTINEL = "__MARCH_PATCH_B64__";
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Wrap a backend's *agent command* in the deterministic git scaffold so the
  * worker produces its patch from a real container-local git repo rather than
@@ -26,7 +30,8 @@ export const PATCH_SENTINEL = "__MARCH_PATCH_B64__";
  * (which now makes the change AND commits it), and emits the diff:
  *
  *   1. `git init` + a fixed identity, then commit the snapshot as the base.
- *   2. run the agent command inside a subshell; preserve its exit code.
+ *   2. run the agent command in its own process group, forwarding SIGTERM/
+ *      SIGINT to it (graceful stop); preserve its exit code.
  *   3. if the agent failed (non-zero), exit with its code — no patch.
  *   4. if `HEAD == base` but the tree is dirty, capture the uncommitted work so
  *      nothing is lost; if `HEAD == base` and the tree is clean, fail clearly
@@ -48,8 +53,23 @@ function composeGitScaffoldedEntrypoint(
     `git add -A`,
     `git commit -q -m spawn-base --allow-empty >/dev/null 2>&1 || true`,
     `__march_base=$(git rev-parse HEAD)`,
-    `( ${agentCommand} )`,
+    // The container's main process is this `sh`, which does not pass signals
+    // on to its children. Run the agent in its own session/process group and
+    // forward SIGTERM/SIGINT to that whole group so Brood's graceful stop
+    // (`docker kill --signal SIGTERM`) reaches the agent. `kill -s TERM -- -PGID`
+    // is the form dash (the bookworm image `sh`) accepts.
+    `__march_agent=`,
+    `__march_term=`,
+    `trap '__march_term=1; [ -n "$__march_agent" ] && kill -s TERM -- "-$__march_agent" 2>/dev/null' TERM INT`,
+    `setsid sh -c ${shellQuote(agentCommand)} &`,
+    `__march_agent=$!`,
+    `if [ -n "$__march_term" ]; then kill -s TERM -- "-$__march_agent" 2>/dev/null; fi`,
+    `wait "$__march_agent"`,
     `__march_rc=$?`,
+    `# A trapped signal interrupts wait early; keep waiting for the real exit.`,
+    `while kill -0 "$__march_agent" 2>/dev/null; do wait "$__march_agent"; __march_rc=$?; done`,
+    `trap - TERM INT`,
+    `if [ -n "$__march_term" ] && [ "$__march_rc" -eq 0 ]; then exit 143; fi`,
     `if [ "$__march_rc" -ne 0 ]; then exit "$__march_rc"; fi`,
     `# Capture any edits the agent left uncommitted — even if it ALSO made a`,
     `# commit (e.g. it committed the main change, then ticked a tasks.md box or`,

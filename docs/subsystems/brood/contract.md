@@ -50,7 +50,8 @@ status, ordered cleanup steps, and warnings. Ordinary forced teardown of
 ephemeral compute checks for a graceful stop before capturing final evidence.
 The host substrate gives the stop check up to 10 seconds, sends SIGTERM to the
 verified container if it is running, and verifies it exited and remains
-present. The `stop` step reports `ok` for a verified graceful stop and
+present. The spawn entrypoint's `sh` (the container's main process) forwards
+SIGTERM to the agent's process group, so the signal reaches the agent. The `stop` step reports `ok` for a verified graceful stop and
 `skipped` for already stopped or absent compute. An unsupported, unverified,
 or timed-out stop reports `failed`, defers the remaining steps, and leaves the
 session retryable. Removal after a verified stop targets the same container ID
