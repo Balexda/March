@@ -91,6 +91,16 @@ is deprecated — it prints a deprecation warning and then runs the same profile
 onboarding flow as `march init [profile]`, which supersedes the old per-profile
 conductor flow (a single shared `march-legate` service now drives every profile).
 
+**Find live sessions and tracked spawns**
+
+Run `march brood sessions` to list live interactive names alongside tracked
+spawn IDs. A tmux session named `march/<name>` is advertised under its unprefixed
+name. To attach, pass only that name to `march brood attach <name>` from an
+interactive terminal on the host with access to Castra's tmux server, including
+an SSH terminal on that host. A name that matches any tracked spawn ID is
+unavailable for attachment. If either inventory source fails, the command
+reports the unavailable source and marks any results as partial.
+
 ## Observability
 
 March emits OpenTelemetry traces, metrics, and logs — spawn success rate, spawn

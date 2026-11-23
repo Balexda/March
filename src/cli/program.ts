@@ -2505,6 +2505,16 @@ brood
   });
 
 brood
+  .command("sessions")
+  .description("List live interactive names and tracked spawns")
+  .allowExcessArguments(false)
+  .action(async () => {
+    commandHandled = true;
+    const { showSessions } = await import("../brood/sessions.js");
+    process.exitCode = (await showSessions()) ? SUCCESS : ERROR;
+  });
+
+brood
   .command("logs <id>")
   .description("Read logs for a tracked session from the Brood service")
   .action(async (id: string) => {
@@ -3058,11 +3068,11 @@ async function dispatchCli(argv: readonly string[]): Promise<void> {
         commandHandled = true;
         findInvokedCommand(argv.slice(2)).outputHelp();
         process.exitCode = USAGE_ERROR;
-      } else if (err.code === "commander.unknownCommand") {
-        // err.message names the actual unknown token, even when it's a
-        // subcommand inside a group (`march legate frobnicate` →
-        // "error: unknown command 'frobnicate'"). The bottom-of-file argv
-        // scan would otherwise mis-blame the parent group.
+      } else if (
+        err.code === "commander.unknownCommand" ||
+        err.code === "commander.excessArguments"
+      ) {
+        // Keep Commander's specific diagnostic and show help for the invoked command.
         commandHandled = true;
         process.stderr.write(err.message + "\n");
         findInvokedCommand(argv.slice(2)).outputHelp();

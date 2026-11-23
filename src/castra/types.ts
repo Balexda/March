@@ -88,7 +88,16 @@ export type CastraErrorCode =
   | "not_found"
   | "conflict"
   | "agent_deck_error"
+  | "tmux_error"
   | "internal";
+
+/** Live tmux inventory could not be read. Maps to HTTP 502. */
+export class CastraTmuxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CastraTmuxError";
+  }
+}
 
 /** Uniform error envelope returned on every non-2xx response. */
 export interface CastraErrorBody {

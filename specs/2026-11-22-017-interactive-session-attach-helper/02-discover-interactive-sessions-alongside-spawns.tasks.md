@@ -19,7 +19,7 @@
 
 ### Tasks
 
-- [ ] **Expose live interactive inventory from Castra**
+- [x] **Expose live interactive inventory from Castra**
 
   Add an authenticated service and client surface that reads live names from Castra's tmux server for AS 2.1–2.3.
 
@@ -29,7 +29,7 @@
   - Bound tmux and HTTP calls. Surface authentication, missing tmux, socket permission, timeout, and service failures as errors distinguishable from an empty inventory.
   - Cover filtering, empty results, and failures in Castra tests and update the Castra subsystem contract.
 
-- [ ] **Show both sources in the Brood CLI**
+- [x] **Show both sources in the Brood CLI**
 
   Wire `march brood sessions` with no positional inputs through the Brood subsystem. Read Castra inventory and the existing Brood spawn views for AS 2.1–2.3.
 

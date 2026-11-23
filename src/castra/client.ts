@@ -149,6 +149,19 @@ export class CastraClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
+  /** GET /v1/interactive-sessions — live unprefixed names from Castra's tmux server. */
+  async listInteractiveSessions(): Promise<string[]> {
+    const body = await this.request("GET", "/v1/interactive-sessions", {
+      expectStatus: 200,
+      timeoutMs: 5_000,
+    });
+    const names = (body as { names?: unknown } | null)?.names;
+    if (!Array.isArray(names) || !names.every((name) => typeof name === "string" && name.length > 0)) {
+      throw new CastraClientError("Castra did not return a valid interactive session inventory.");
+    }
+    return names;
+  }
+
   /** GET /v1/sessions — list sessions (optionally filtered by group). */
   async listSessions(profile: string, group?: string): Promise<CastraSession[]> {
     const qs = new URLSearchParams({ profile });

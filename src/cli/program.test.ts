@@ -280,6 +280,74 @@ describe("march CLI", () => {
     });
   }, 15000);
 
+  it("lists both session sources and reports each unavailable source", async () => {
+    const app = Fastify();
+    let names = ["conductor", "finished"];
+    let castraStatus = 200;
+    let broodStatus = 200;
+    app.get("/v1/interactive-sessions", (request, reply) => {
+      expect(request.headers.authorization).toBe("Bearer inventory-token");
+      return reply.code(castraStatus).send(
+        castraStatus === 200 ? { names } : { error: { message: "tmux unavailable" } },
+      );
+    });
+    app.get("/sessions", (request, reply) => {
+      expect(request.query).toEqual({ kind: "spawn" });
+      return reply.code(broodStatus).send(broodStatus === 200
+        ? { views: [
+            { record: { id: "active", status: "running" } },
+            { record: { id: "finished", status: "torndown" } },
+          ] }
+        : { error: "registry unavailable" });
+    });
+    const url = await app.listen({ host: "127.0.0.1", port: 0 });
+    const list = (...args: string[]) =>
+      execFileAsync(process.execPath, [CLI_PATH, "brood", "sessions", ...args], {
+        env: {
+          ...process.env, HOME: makeTmpDir(), MARCH_OTEL: "0",
+          MARCH_BROOD_URL: url, CASTRA_URL: url, CASTRA_API_TOKEN: "inventory-token",
+        },
+        timeout: 8_000,
+      });
+    const tracked = "Tracked spawns:\n  active (running)\n  finished (torndown)\n";
+
+    try {
+      expect(await list()).toEqual({
+        stdout: "Interactive sessions:\n  conductor (attachable)\n" +
+          "  finished (unavailable: spawn ID collision)\n" + tracked,
+        stderr: "",
+      });
+      names = [];
+      expect((await list()).stdout).toBe("Interactive sessions:\n  No live march/ sessions.\n" + tracked);
+      castraStatus = 502;
+      await expect(list()).rejects.toMatchObject({
+        code: 1,
+        stdout: tracked.replace("spawns:", "spawns (partial):"),
+        stderr: expect.stringContaining("Castra interactive sessions unavailable:"),
+      });
+      castraStatus = 200;
+      broodStatus = 503;
+      names = ["conductor"];
+      await expect(list()).rejects.toMatchObject({
+        code: 1,
+        stdout: "Interactive sessions (partial):\n  conductor (availability unknown: spawn ID check unavailable)\n",
+        stderr: expect.stringContaining("Brood tracked spawns unavailable:"),
+      });
+      castraStatus = 502;
+      await expect(list()).rejects.toMatchObject({
+        code: 1,
+        stdout: "",
+        stderr: expect.stringMatching(/Castra interactive sessions unavailable:[^\n]+\nBrood tracked spawns unavailable:/),
+      });
+      await expect(list("unexpected")).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining("too many arguments"),
+      });
+    } finally {
+      await app.close();
+    }
+  }, 20_000);
+
   it.skipIf(!sqliteAvailable)("renders real Brood teardown results and admission errors", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
     const app = Fastify();
