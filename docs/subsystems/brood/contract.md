@@ -116,8 +116,11 @@ journaling `torndown` and before updating the registry, the next teardown reques
 completes the registry transition without repeating removal, even after a
 status-only PATCH. Recovery applies only while the row keeps the container,
 repository, worktree, and branch the attempt reclaimed; a re-registered identity
-gets a full teardown instead. A spawn teardown removes and verifies every live
-steward under the spawn before it reclaims the shared worktree and branch; if
+gets a full teardown instead. Requests by spawn ID or steward ID apply the
+same group completion rule. When the spawn and all its stewards are already
+`torndown`, Brood returns `torndown` with no cleanup steps or archive writes.
+Teardown removes and verifies every live steward under the spawn before it
+reclaims the shared worktree and branch; if
 any steward removal fails, or a steward registers under the spawn (or a removed
 steward's registration changes) while earlier steps are in progress, Git cleanup
 is deferred and the row stays retryable. Ordinary completion and recovery apply
