@@ -264,9 +264,7 @@ async function runTeardown(
     // Complete only steward registrations that still match what the attempt
     // removed (same row, parent, and Castra target); a re-registered steward
     // was never verified gone and is left for a real retry.
-    const verified = (completion.stewards ?? [])
-      .filter((recorded) => sameSteward(recorded, store.get(recorded.id)))
-      .map((recorded) => recorded.id);
+    const verified = unchangedStewardIds(completion.stewards ?? []);
     completeRegistry(completion.at, verified);
     return unremovedStewards(verified) ? finish("partial") : finish("success");
   }
@@ -312,7 +310,6 @@ async function runTeardown(
 
   // Stewards whose Castra removal this attempt verified (`removed` or `absent`).
   const verifiedStewards: StewardIdentity[] = [];
-  const verifiedStewardIds = (): string[] => verifiedStewards.map((steward) => steward.id);
   let attempt: number | undefined;
   try {
     if (!archive) throw archiveError;
@@ -400,11 +397,11 @@ async function runTeardown(
   // A steward registered while earlier steps awaited shares the worktree but was
   // never removed. Check membership here, synchronously adjacent to the Git
   // steps (no await in between), and defer both rather than delete its workspace.
-  const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(verifiedStewardIds());
+  const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(unchangedStewardIds(verifiedStewards));
   const gitDeferral = stewardRemovalFailed
     ? "deferred: steward removal failed"
     : unverifiedSteward
-      ? "deferred: steward registered during teardown"
+      ? "deferred: steward registered or changed during teardown"
       : undefined;
 
   // 4. Worktree (re-check after steward; Castra may already have removed it).
@@ -508,12 +505,24 @@ async function runTeardown(
     }
   }
 
+  /**
+   * IDs of verified stewards whose current registration still matches what was
+   * removed (same row, parent, and Castra target). A steward whose session
+   * changed after removal was never verified gone, so it does not count.
+   */
+  function unchangedStewardIds(verified: readonly StewardIdentity[]): string[] {
+    return verified
+      .filter((recorded) => sameSteward(recorded, store.get(recorded.id)))
+      .map((recorded) => recorded.id);
+  }
+
   /** Warn about live stewards under the spawn that `verified` does not cover. */
   function unremovedStewards(verified: readonly string[]): boolean {
-    const candidates = new Set([
-      ...(spawn ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id) : []),
-      ...(steward ? [steward.id] : []),
-    ]);
+    // Only stewards currently under the spawn share its worktree; one that moved
+    // to another spawn belongs to that group now.
+    const candidates = new Set(
+      spawn ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id) : [],
+    );
     const live = [...candidates].filter((stewardId) =>
       stewardId !== primary.id && !verified.includes(stewardId) &&
       store.get(stewardId)?.status !== "torndown");
@@ -553,7 +562,7 @@ async function runTeardown(
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at, verifiedStewardIds());
+      if (outcome === "success") completeRegistry(at, unchangedStewardIds(verifiedStewards));
     }
     return finish(outcome);
   }

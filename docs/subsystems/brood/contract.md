@@ -105,8 +105,11 @@ status-only PATCH. Recovery applies only while the row keeps the container,
 repository, worktree, and branch the attempt reclaimed; a re-registered identity
 gets a full teardown instead. A spawn teardown removes and verifies every live
 steward under the spawn before it reclaims the shared worktree and branch; if
-any steward removal fails, or a steward registers under the spawn while earlier
-steps are in progress, Git cleanup is deferred and the row stays retryable. The
+any steward removal fails, or a steward registers under the spawn (or a removed
+steward's registration changes) while earlier steps are in progress, Git cleanup
+is deferred and the row stays retryable. Ordinary completion and recovery apply
+the same rule: a steward counts as removed only while its registration still
+matches what was removed. The
 journal's `finished` entry lists only the stewards whose removal that attempt
 verified.
 The journal records each verified steward's registration identity (row, parent,

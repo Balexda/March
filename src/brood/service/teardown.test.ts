@@ -911,7 +911,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       expect(result.warnings.join("\n")).toContain('"ad-session-late"');
       expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
       expect(result.steps.find((step) => step.step === "worktree")?.detail)
-        .toBe("deferred: steward registered during teardown");
+        .toBe("deferred: steward registered or changed during teardown");
       expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([stewardId]);
 
       rec.calls.length = 0;
@@ -919,6 +919,37 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       expect(retried.status).toBe("torndown");
       expect(rec.calls).toContain("steward:ad-session-late");
       expect(store.get("ad-session-late")?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("defers Git cleanup when a removed steward's Castra session changes mid-teardown", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      if (input.sessionId === "ad-session-bbb") {
+        store.update(stewardId, { agentDeckSessionId: "ad-session-yyy" });
+      }
+      return remove(input);
+    };
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings.join("\n")).toContain(`"${stewardId}"`);
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(store.get(stewardId)?.status).not.toBe("torndown");
+
+      rec.deps.removeSteward = remove;
+      rec.calls.length = 0;
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-yyy");
+      expect(store.get(stewardId)?.status).toBe("torndown");
     } finally {
       store.close();
     }
