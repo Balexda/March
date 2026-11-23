@@ -57,6 +57,39 @@
       ]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Castra event-loop lag p99 over the last minute (march_castra_event_loop_lag_ms). Over 2000ms, /readyz reports down: requests (including /healthz and Hatchery's spawn-time calls) are stalling. Heartbeat and uptime stay green through this, so read this tile, not those.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 500 }, { "color": "red", "value": 2000 }] }, "unit": "ms" },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "id": 14,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Event-loop lag p99 (1m)",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "max(march_castra_event_loop_lag_ms)", "refId": "A" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Sessions Castra is fast-failing sends to after a composer refusal (march_castra_refused_sessions), and refused sends in the last 15 minutes (march_castra_sends_total{outcome=~\"refused|refused_cached\"}). Non-zero means a steward's composer is blocked (for example by a directory-trust dialog) and /readyz reports degraded.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }, "unit": "none" },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "id": 15,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
+      "title": "Refused sessions / sends",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "max(march_castra_refused_sessions)", "legendFormat": "sessions in cooldown", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "sum(increase(march_castra_sends_total{outcome=~\"refused|refused_cached\"}[15m])) or vector(0)", "legendFormat": "refused sends (15m)", "refId": "B" }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
       "id": 1,

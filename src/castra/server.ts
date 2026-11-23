@@ -23,11 +23,23 @@ import { recoverErrorSessions, type RecoverDeps } from "./recovery.js";
 import {
   type CastraSpanContext,
   recordCastraRequest,
+  recordCastraSend,
+  recordTrustDialog,
+  setCastraReadinessSource,
   statusClass,
   withCastraSpan,
+  withCastraSpanAsync,
 } from "./metrics.js";
 import {
+  deriveCastraReadiness,
+  EventLoopLagMonitor,
+  SendTracker,
+  type EventLoopLagSource,
+  type SendOutcome,
+} from "./send-health.js";
+import {
   CastraAgentDeckError,
+  CastraComposerRefusedError,
   CastraConflictError,
   CastraNotFoundError,
   CastraTmuxError,
@@ -39,10 +51,20 @@ import {
 const SLICE_ID_HEADER = "x-march-slice-id";
 
 export interface BuildServerOptions {
-  /** agent-deck adapter; defaults to the real execFileSync-backed one. */
+  /** agent-deck adapter; defaults to the real async child-process-backed one. */
   readonly adapter?: AgentDeckAdapter;
   /** Override the live tmux inventory reader in tests. */
   readonly interactiveInventory?: typeof listInteractiveSessions;
+  /**
+   * Send health (refusal cooldowns + recent outcomes) behind `/readyz`. The
+   * default adapter shares it. Tests inject one to drive readiness.
+   */
+  readonly sendTracker?: SendTracker;
+  /**
+   * Event-loop lag source behind `/readyz`; defaults to a
+   * `monitorEventLoopDelay` monitor started with the server and stopped on close.
+   */
+  readonly eventLoopLag?: EventLoopLagSource;
   /**
    * Shared bearer token gating `/v1/*`. When empty/undefined, auth is disabled
    * (open) — the serve entry warns at startup so this is a deliberate, visible
@@ -84,6 +106,13 @@ const sessionIdParams = {
   required: ["id"],
   properties: { id: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$", maxLength: 128 } },
 } as const;
+
+/** The `outcome` label for a send that threw. */
+function sendOutcomeFor(err: unknown): SendOutcome {
+  if (err instanceof CastraComposerRefusedError) return err.cached ? "refused_cached" : "refused";
+  if (err instanceof CastraNotFoundError) return "not_found";
+  return "failed";
+}
 
 function errorBody(code: CastraErrorCode, message: string) {
   return { error: { code, message } };
@@ -140,7 +169,6 @@ function traceLogFields(
  * Caller is responsible for `listen()` / `close()`.
  */
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
-  const adapter = options.adapter ?? createAgentDeckAdapter();
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
 
@@ -163,6 +191,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     ...(options.recovery?.statusPollMs !== undefined
       ? { statusPollMs: options.recovery.statusPollMs }
       : {}),
+    ...(options.recovery?.trustDialog ? { trustDialog: options.recovery.trustDialog } : {}),
   };
 
   // A logger instance wires through Fastify's `loggerInstance`; a boolean (or
@@ -172,6 +201,29 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     typeof loggerOption === "boolean"
       ? Fastify({ logger: loggerOption })
       : Fastify({ loggerInstance: loggerOption });
+
+  const sendTracker = options.sendTracker ?? new SendTracker();
+  const adapter =
+    options.adapter ?? createAgentDeckAdapter({ sendTracker, logger: app.log });
+
+  // Readiness inputs: event-loop lag (owned here unless injected) and the send
+  // tracker. Both feed the readiness gauges too.
+  let ownedLagMonitor: EventLoopLagMonitor | undefined;
+  const eventLoopLag =
+    options.eventLoopLag ?? (ownedLagMonitor = new EventLoopLagMonitor().start());
+  const unregisterGauges = setCastraReadinessSource({
+    eventLoopLagMs: () => eventLoopLag.lagP99Ms(),
+    refusedSessions: () => sendTracker.refusedSessionIds().length,
+  });
+  app.addHook("onClose", async () => {
+    ownedLagMonitor?.stop();
+    unregisterGauges();
+  });
+
+  const recordSendOutcome = (profile: string, outcome: SendOutcome) => {
+    sendTracker.recordSend(outcome);
+    recordCastraSend({ profile, outcome });
+  };
 
   // Auth: gate every /v1/* route behind the shared bearer token. Health/status
   // stay open. Skipped entirely when no token is configured.
@@ -221,6 +273,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       void reply.code(502).send(errorBody("tmux_error", err.message));
       return;
     }
+    if (err instanceof CastraComposerRefusedError) {
+      void reply.code(502).send(errorBody("composer_refused", err.message));
+      return;
+    }
     if (err instanceof CastraAgentDeckError) {
       void reply.code(502).send(errorBody("agent_deck_error", err.message));
       return;
@@ -239,19 +295,33 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   app.get("/v1/interactive-sessions", async (request) =>
-    withCastraSpan({ op: "interactive_inventory", traceKey: traceKeyFor(request) }, () => ({
-      names: (options.interactiveInventory ?? listInteractiveSessions)(),
+    withCastraSpan({ op: "interactive_inventory", traceKey: traceKeyFor(request) }, async () => ({
+      names: await (options.interactiveInventory ?? listInteractiveSessions)(),
     })),
   );
 
   // --- health / status (open) ---------------------------------------------
+  // Pure liveness: Docker's healthcheck uses it, so it never depends on
+  // agent-deck or on session state.
   app.get("/healthz", async () => ({ status: "ok" }));
+
+  // Readiness: can Castra deliver prompts right now? Built from in-memory state
+  // only, so the probe itself never waits on agent-deck. 503 only when "down".
+  app.get("/readyz", async (_request, reply) => {
+    const body = deriveCastraReadiness({
+      eventLoopLagMs: eventLoopLag.lagP99Ms(),
+      refusedSessions: sendTracker.refusedSessionIds(),
+      recentSendFailures: sendTracker.recentSends().failed,
+    });
+    reply.code(body.state === "down" ? 503 : 200);
+    return body;
+  });
 
   app.get("/status", async () => ({
     service: CASTRA_SERVICE_NAME,
     version: CLI_VERSION,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    agentDeck: { reachable: adapter.reachable() },
+    agentDeck: { reachable: await adapter.reachable() },
   }));
 
   // --- sessions ------------------------------------------------------------
@@ -268,7 +338,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     },
     async (request) => {
       const { profile, group } = request.query as { profile: string; group?: string };
-      return { sessions: adapter.list({ profile, group }) };
+      return { sessions: await adapter.list({ profile, group }) };
     },
   );
 
@@ -313,7 +383,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         metadata?: Record<string, string>;
       };
       const sliceId = sliceIdFrom(request);
-      const session = withCastraSpan(
+      const session = await withCastraSpanAsync(
         {
           op: "launch",
           traceKey: traceKeyFor(request),
@@ -323,8 +393,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             ...sliceAttr(sliceId),
           },
         },
-        (span) => {
-          const launched = adapter.launch({
+        async (span) => {
+          const launched = await adapter.launch({
             profile: body.profile,
             repoPath: body.repoPath,
             branch: body.branch,
@@ -367,7 +437,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     async (request) => {
       const { id } = request.params as { id: string };
       const { profile } = request.query as { profile: string };
-      return { session: adapter.show({ profile, sessionId: id }) };
+      return { session: await adapter.show({ profile, sessionId: id }) };
     },
   );
 
@@ -394,16 +464,28 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         "castra.message_preview": messagePreview(prompt),
         ...sliceAttr(sliceId),
       };
-      withCastraSpan(
-        { op: "send", traceKey: traceKeyFor(request), attributes: sendFields },
-        (span) => {
-          request.log.info(
-            { "castra.op": "send", ...sendFields, ...traceLogFields(span) },
-            "castra send accepted",
-          );
-          return adapter.send({ profile, sessionId: id, prompt });
-        },
-      );
+      const traceKey = traceKeyFor(request);
+      try {
+        await withCastraSpanAsync(
+          { op: "send", traceKey, attributes: sendFields },
+          async (span) => {
+            request.log.info(
+              { "castra.op": "send", ...sendFields, ...traceLogFields(span) },
+              "castra send accepted",
+            );
+            return adapter.send({
+              profile,
+              sessionId: id,
+              prompt,
+              ...(sliceId ? { traceKey, sliceId } : {}),
+            });
+          },
+        );
+      } catch (err) {
+        recordSendOutcome(profile, sendOutcomeFor(err));
+        throw err;
+      }
+      recordSendOutcome(profile, "delivered");
       return reply.code(202).send({ ok: true });
     },
   );
@@ -426,7 +508,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     async (request) => {
       const { id } = request.params as { id: string };
       const { profile, lines } = request.query as { profile: string; lines?: number };
-      return adapter.output({ profile, sessionId: id, lines });
+      return await adapter.output({ profile, sessionId: id, lines });
     },
   );
 
@@ -460,9 +542,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         "castra.set_key": key,
         ...sliceAttr(sliceId),
       };
-      withCastraSpan(
+      await withCastraSpanAsync(
         { op: "set", traceKey: traceKeyFor(request), attributes: setFields },
-        (span) => {
+        async (span) => {
           request.log.info(
             { "castra.op": "set", ...setFields, ...traceLogFields(span) },
             "castra session set",
@@ -502,9 +584,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         "castra.prune_worktree": pruneWorktree ?? false,
         ...sliceAttr(sliceId),
       };
-      const result = withCastraSpan(
+      const result = await withCastraSpanAsync(
         { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
-        (span) => {
+        async (span) => {
           request.log.info(
             { "castra.op": "remove", ...removeFields, ...traceLogFields(span) },
             "castra session removed",
@@ -556,16 +638,50 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         (r) => r.outcome === "recovered" || r.outcome === "picker_resolved",
       ).length;
       const pickers = report.recovered.filter((r) => r.pickerResolved).length;
+      const trustDialogs = report.trustDialogs ?? [];
+      const traceKey = traceKeyFor(request);
+      // One span + log per trust dialog found. An answered dialog unblocks the
+      // session, so its send cooldown ends now rather than in 5 minutes.
+      for (const dialog of trustDialogs) {
+        if (dialog.outcome === "resolved") sendTracker.clearRefusal(profile, dialog.sessionId);
+        const span = recordTrustDialog({
+          traceKey,
+          profile,
+          sessionId: dialog.sessionId,
+          trigger: "recover",
+          outcome: dialog.outcome,
+          dir: dialog.dir,
+          ...(dialog.detail ? { detail: dialog.detail } : {}),
+          ...(sliceId ? { sliceId } : {}),
+        });
+        const fields = {
+          "castra.op": "trust_dialog",
+          "march.profile": profile,
+          "castra.session_id": dialog.sessionId,
+          "castra.trust_trigger": "recover",
+          "castra.trust_outcome": dialog.outcome,
+          "castra.trust_dir": dialog.dir,
+          ...(dialog.detail ? { "castra.trust_detail": dialog.detail } : {}),
+          ...sliceAttr(sliceId),
+          ...traceLogFields(span),
+        };
+        if (dialog.outcome === "resolved") {
+          request.log.info(fields, "castra answered the steward directory-trust dialog");
+        } else {
+          request.log.warn(fields, "castra left a directory-trust dialog unanswered");
+        }
+      }
       withCastraSpan(
         {
           op: "recover",
-          traceKey: traceKeyFor(request),
+          traceKey,
           attributes: {
             "march.profile": profile,
             ...(group ? { "castra.group": group } : {}),
             "castra.recover_total": report.recovered.length,
             "castra.recover_resolved": resolved,
             "castra.recover_pickers": pickers,
+            "castra.recover_trust_dialogs": trustDialogs.length,
             ...sliceAttr(sliceId),
           },
         },
@@ -578,6 +694,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
               "castra.recover_total": report.recovered.length,
               "castra.recover_resolved": resolved,
               "castra.recover_pickers": pickers,
+              "castra.recover_trust_dialogs": trustDialogs.length,
               ...sliceAttr(sliceId),
               ...traceLogFields(span),
             },

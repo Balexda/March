@@ -42,6 +42,7 @@ function harness(opts: {
   runtime: RecoveryRuntime;
   deps: RecoverDeps;
   sendEnter: ReturnType<typeof vi.fn>;
+  sendKey: ReturnType<typeof vi.fn>;
   restart: ReturnType<typeof vi.fn>;
 } {
   let clock = 0;
@@ -49,16 +50,22 @@ function harness(opts: {
     clock += ms;
   });
   const now = () => clock;
-  const sendEnter = vi.fn();
-  const restart = vi.fn(opts.restart ?? (() => {}));
+  const sendEnter = vi.fn(async () => {});
+  const sendKey = vi.fn(async (_tmux: string, _key: string) => {});
+  const restartImpl = opts.restart ?? (() => {});
+  const readImpl =
+    opts.readSession ?? ((_p: string, id: string) => opts.sessions.find((s) => s.sessionId === id));
+  const captureImpl = opts.capturePane ?? (() => "");
+  const restart = vi.fn(async (p: string, id: string) => restartImpl(p, id));
   const runtime: RecoveryRuntime = {
-    listSessions: vi.fn().mockReturnValue(opts.sessions),
+    listSessions: vi.fn(async () => opts.sessions),
     restart,
-    readSession: vi.fn(opts.readSession ?? ((_p, id) => opts.sessions.find((s) => s.sessionId === id))),
-    capturePane: vi.fn(opts.capturePane ?? (() => "")),
+    readSession: vi.fn(async (p: string, id: string) => readImpl(p, id)),
+    capturePane: vi.fn(async (t: string) => captureImpl(t)),
     sendEnter,
+    sendKey,
   };
-  return { runtime, deps: { runtime, sleep, now }, sendEnter, restart };
+  return { runtime, deps: { runtime, sleep, now }, sendEnter, sendKey, restart };
 }
 
 describe("looksLikeResumePicker", () => {
@@ -301,6 +308,102 @@ describe("stopped sessions (#587)", () => {
     });
     const report = await recoverErrorSessions(deps, { profile: "p" });
     expect(report.recovered[0]).toMatchObject({ outcome: "still_error", finalStatus: "stopped" });
+  });
+});
+
+describe("directory-trust dialogs during recovery", () => {
+  const OWN = "/home/u/.march/steward";
+
+  function trustPane(dir: string, cursorOnYes: boolean): string {
+    return [
+      " Adding a new directory:",
+      ` ${dir}`,
+      ` ${cursorOnYes ? " " : "❯"} No, exit`,
+      ` ${cursorOnYes ? "❯" : " "} Yes, add it`,
+    ].join("\n");
+  }
+
+  /** A pane per tmux session showing a trust dialog that Down/Enter answer. */
+  function dialogHarness(sessions: RecoverySessionView[], dirs: Record<string, string>) {
+    const state = new Map(Object.keys(dirs).map((t) => [t, { open: true, yes: false }]));
+    const h = harness({
+      sessions,
+      capturePane: (t) => {
+        const s = state.get(t);
+        return s?.open ? trustPane(dirs[t]!, s.yes) : "❯ ";
+      },
+    });
+    h.sendKey.mockImplementation(async (t: string, key: string) => {
+      const s = state.get(t);
+      if (!s) return;
+      if (key === "Down") s.yes = true;
+      if (key === "Enter" && s.yes) s.open = false;
+    });
+    return { ...h, state };
+  }
+
+  it("answers Castra's own trust dialog on a live session and reports it", async () => {
+    const { deps, sendKey, restart, state } = dialogHarness(
+      [view({ sessionId: "st1", status: "waiting", group: "march-spawn-managers", tmuxSession: "t1" })],
+      { t1: OWN },
+    );
+    const report = await recoverErrorSessions(
+      { ...deps, trustDialog: { ownedDirs: [OWN] } },
+      { profile: "march" },
+    );
+    expect(restart).not.toHaveBeenCalled();
+    expect(report.recovered).toEqual([]);
+    expect(report.trustDialogs).toEqual([
+      { sessionId: "st1", title: "forge: Tasks", group: "march-spawn-managers", outcome: "resolved", dir: OWN },
+    ]);
+    expect(sendKey.mock.calls.map((c) => c[1])).toEqual(["Down", "Enter"]);
+    expect(state.get("t1")!.open).toBe(false);
+  });
+
+  it("reports another directory's trust dialog without typing anything", async () => {
+    const { deps, sendKey } = dialogHarness(
+      [view({ sessionId: "st1", status: "waiting", tmuxSession: "t1" })],
+      { t1: "/home/u/src/other" },
+    );
+    const report = await recoverErrorSessions(
+      { ...deps, trustDialog: { ownedDirs: [OWN] } },
+      { profile: "march" },
+    );
+    expect(report.trustDialogs).toEqual([
+      expect.objectContaining({ sessionId: "st1", outcome: "not_owned", dir: "/home/u/src/other" }),
+    ]);
+    expect(sendKey).not.toHaveBeenCalled();
+  });
+
+  it("answers the trust dialog a restarted session opens with, then keeps watching for the picker", async () => {
+    const { deps, sendKey } = dialogHarness(
+      [view({ sessionId: "e1", status: "error", tmuxSession: "t1" })],
+      { t1: OWN },
+    );
+    // After restart the session reports live on tmux session t1.
+    (deps.runtime.readSession as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+      view({ sessionId: "e1", status: "waiting", tmuxSession: "t1" }),
+    );
+    const report = await recoverErrorSessions(
+      { ...deps, trustDialog: { ownedDirs: [OWN] } },
+      { profile: "march" },
+    );
+    expect(report.recovered[0]).toMatchObject({ sessionId: "e1", outcome: "recovered" });
+    expect(report.trustDialogs).toEqual([expect.objectContaining({ sessionId: "e1", outcome: "resolved" })]);
+    expect(sendKey.mock.calls.map((c) => c[1])).toEqual(["Down", "Enter"]);
+  });
+
+  it("skips the conductor and sessions without a pane", async () => {
+    const { deps, runtime } = dialogHarness(
+      [
+        view({ sessionId: "c1", status: "waiting", group: "conductor", tmuxSession: "t1" }),
+        view({ sessionId: "n1", status: "waiting", tmuxSession: "" }),
+      ],
+      { t1: OWN },
+    );
+    const report = await recoverErrorSessions(deps, { profile: "march" });
+    expect(report.trustDialogs).toEqual([]);
+    expect(runtime.capturePane).not.toHaveBeenCalled();
   });
 });
 

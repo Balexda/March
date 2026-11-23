@@ -32,11 +32,34 @@ let cachedMeter: Meter | undefined;
 let requestsCounter: Counter | undefined;
 let durationHistogram: Histogram | undefined;
 let heartbeatCounter: Counter | undefined;
+let sendsCounter: Counter | undefined;
+let trustDialogsCounter: Counter | undefined;
 
 interface CastraInstruments {
   counter: Counter;
   histogram: Histogram;
   heartbeat: Counter;
+  sends: Counter;
+  trustDialogs: Counter;
+}
+
+/** What the readiness gauges observe; set by the server, read at collection. */
+export interface CastraReadinessGaugeSource {
+  eventLoopLagMs(): number;
+  refusedSessions(): number;
+}
+
+let readinessSource: CastraReadinessGaugeSource | undefined;
+
+/**
+ * Point the `march.castra.event_loop_lag_ms` / `march.castra.refused_sessions`
+ * gauges at the server's live state. Returns an unregister function.
+ */
+export function setCastraReadinessSource(source: CastraReadinessGaugeSource): () => void {
+  readinessSource = source;
+  return () => {
+    if (readinessSource === source) readinessSource = undefined;
+  };
 }
 
 function castraInstruments(meter: Meter): CastraInstruments {
@@ -63,12 +86,112 @@ function castraInstruments(meter: Meter): CastraInstruments {
         unit: "s",
       })
       .addCallback((result) => result.observe(process.uptime()));
+    // No unit on the readiness instruments, so the Prometheus names are exactly
+    // march_castra_sends_total / _trust_dialogs_total / _event_loop_lag_ms /
+    // _refused_sessions.
+    sendsCounter = meter.createCounter("march.castra.sends", {
+      description: "Castra session sends by outcome (delivered/refused/refused_cached/not_found/failed)",
+    });
+    trustDialogsCounter = meter.createCounter("march.castra.trust_dialogs", {
+      description: "Claude directory-trust dialogs Castra found, by outcome",
+    });
+    meter
+      .createObservableGauge("march.castra.event_loop_lag_ms", {
+        description: "Castra event-loop lag p99 over the last minute, in milliseconds",
+      })
+      .addCallback((result) => {
+        if (readinessSource) result.observe(readinessSource.eventLoopLagMs());
+      });
+    meter
+      .createObservableGauge("march.castra.refused_sessions", {
+        description: "Sessions Castra is fast-failing sends to after a composer refusal",
+      })
+      .addCallback((result) => {
+        if (readinessSource) result.observe(readinessSource.refusedSessions());
+      });
   }
   return {
     counter: requestsCounter!,
     histogram: durationHistogram!,
     heartbeat: heartbeatCounter!,
+    sends: sendsCounter!,
+    trustDialogs: trustDialogsCounter!,
   };
+}
+
+/** Count one send by `outcome` (a {@link SendOutcome}) and profile. */
+export function recordCastraSend(input: { profile: string; outcome: string }): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  castraInstruments(otel.getMeter()).sends.add(1, {
+    profile: input.profile,
+    outcome: input.outcome,
+  });
+}
+
+/**
+ * Register the Castra instruments (including the readiness gauges) without
+ * recording anything, so the gauges export before the first request.
+ */
+export function registerCastraInstruments(): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  castraInstruments(otel.getMeter());
+}
+
+export interface TrustDialogSpanInput {
+  readonly traceKey: string;
+  readonly profile: string;
+  readonly sessionId: string;
+  /** What found the dialog: a refused send, or the recovery sweep. */
+  readonly trigger: "send_refusal" | "recover";
+  readonly outcome: "resolved" | "not_owned" | "failed";
+  readonly dir: string;
+  readonly detail?: string;
+  readonly sliceId?: string;
+}
+
+/**
+ * Emit a `castra.trust_dialog` span and count it. `not_owned` and `failed` are
+ * errored spans: both leave a steward unable to take prompts. Returns the span
+ * ids for explicit log correlation.
+ */
+export function recordTrustDialog(input: TrustDialogSpanInput): CastraSpanContext | undefined {
+  const otel = getActiveOtel();
+  if (otel.enabled) {
+    castraInstruments(otel.getMeter()).trustDialogs.add(1, {
+      profile: input.profile,
+      outcome: input.outcome,
+      trigger: input.trigger,
+    });
+  }
+  const dispatch = startDispatchSpan({
+    traceKey: input.traceKey,
+    rootName: "castra.trust_dialog",
+    attributes: {
+      "march.profile": input.profile,
+      "castra.session_id": input.sessionId,
+      "castra.trust_trigger": input.trigger,
+      "castra.trust_outcome": input.outcome,
+      "castra.trust_dir": input.dir,
+      ...(input.detail ? { "castra.trust_detail": input.detail } : {}),
+      ...(input.sliceId ? { "march.slice_id": input.sliceId } : {}),
+    },
+  });
+  const ctx = dispatch.spanContext();
+  if (input.outcome === "resolved") {
+    dispatch.end();
+  } else {
+    dispatch.recordException(
+      new Error(
+        input.outcome === "not_owned"
+          ? `directory-trust dialog for ${input.dir} is not Castra's steward directory; left for the operator`
+          : `could not answer the directory-trust dialog for ${input.dir}: ${input.detail ?? "unknown"}`,
+      ),
+    );
+    dispatch.end({ error: true });
+  }
+  return ctx;
 }
 
 export function recordCastraRequest(input: RecordCastraRequestInput): void {
@@ -149,6 +272,31 @@ export function withCastraSpan<T>(
   });
   try {
     const result = fn(dispatch.spanContext());
+    dispatch.end();
+    return result;
+  } catch (err) {
+    dispatch.recordException(err);
+    dispatch.end({ error: true });
+    throw err;
+  }
+}
+
+/**
+ * Async sibling of {@link withCastraSpan}: the span stays open until `fn`'s
+ * promise settles and is marked errored on rejection. Every Castra operation
+ * that runs a child process is async, so the routes use this one.
+ */
+export async function withCastraSpanAsync<T>(
+  input: CastraSpanInput,
+  fn: (span: CastraSpanContext | undefined) => Promise<T>,
+): Promise<T> {
+  const dispatch = startDispatchSpan({
+    traceKey: input.traceKey,
+    rootName: `castra.${input.op}`,
+    attributes: input.attributes,
+  });
+  try {
+    const result = await fn(dispatch.spanContext());
     dispatch.end();
     return result;
   } catch (err) {

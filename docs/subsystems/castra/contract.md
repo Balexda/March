@@ -15,7 +15,27 @@ Castra exposes open process-health/status routes and a bearer-token-protected `/
 | Request envelope | No headers, params, query, or body required. |
 | Response envelope | `200` with `{ "status": "ok" }`. |
 | Authentication behavior | Open; bearer token is not required. |
-| Visible status or error behavior | Basic process health only; this route does not report agent-deck reachability. |
+| Visible status or error behavior | Pure liveness only; this route does not report agent-deck reachability or session state. Docker's healthcheck uses it. Readiness is `GET /readyz`. |
+
+### `GET /readyz`
+
+| Field | Contract |
+|-------|----------|
+| Method and path | `GET /readyz` |
+| Request envelope | No headers, params, query, or body required. |
+| Response envelope | `{ "ready": boolean, "state": "ok" \| "degraded" \| "down", "reasons": string[], "event_loop_lag_ms": number, "refused_sessions": string[], "recent_send_failures": number }`. |
+| Authentication behavior | Open; bearer token is not required. |
+| Visible status or error behavior | `200` for `ok` and `degraded`, `503` for `down`. Built from Castra's in-memory state only, so the probe never waits on agent-deck. |
+
+Readiness states:
+
+| State | When |
+|-------|------|
+| `down` (`ready: false`) | Event-loop lag p99 over the last minute is over 2000 ms. Requests are stalling. |
+| `degraded` | At least one session is in its composer-refusal cooldown (listed in `refused_sessions`), or 3 or more sends failed in the last 5 minutes (`recent_send_failures`; a `not_found` send is not a failure). |
+| `ok` | Neither of the above. |
+
+`reasons` holds one human-readable sentence per condition found. `refused_sessions` holds session ids, sorted.
 
 ### `GET /status`
 
@@ -100,7 +120,14 @@ failure appears in the startup diagnostic and the errored
 | Request envelope | Header `Authorization: Bearer <token>`. Path param `id` is the session id. JSON body requires `profile` and non-empty `prompt`. Optional header `x-march-slice-id` correlates tracing only and is not echoed. |
 | Response envelope | `202` with `{ "ok": true }`. |
 | Authentication behavior | Bearer-token protected. Missing or invalid bearer tokens return `401` with `unauthorized`. |
-| Visible status or error behavior | Invalid ids or bodies return `400`; unknown sessions return `404`; agent-deck send failures return `502`; unexpected failures return `500`. |
+| Visible status or error behavior | Invalid ids or bodies return `400`; unknown sessions return `404`; a composer refusal returns `502` with `composer_refused`; other agent-deck send failures return `502` with `agent_deck_error`; unexpected failures return `500`. |
+
+Send behavior:
+
+- Sends to one session run one at a time, in arrival order. Sends to different sessions run concurrently.
+- When agent-deck refuses a send because the session's Claude composer is occupied or unreadable, the `composer_refused` message carries the last lines of the session's pane.
+- If that pane shows Claude Code's "Adding a new directory … Yes, add it" trust dialog for Castra's own steward directory (the steward root, `~/.march/steward` by default, or its `plugin` directory), Castra selects "Yes, add it", confirms it, and sends the prompt once more. A success then returns `202`. Castra never answers a trust dialog for any other directory; the message says the dialog was left for the operator.
+- After a refusal, further sends to that session fail at once with `composer_refused`, without running agent-deck, for 5 minutes or until the session's pane changes. The message names the cooldown and repeats the last refusal.
 
 ### `GET /v1/sessions/:id/output`
 
@@ -147,7 +174,8 @@ failure appears in the startup diagnostic and the errored
 
 ## Invariants
 
-- `/healthz` and `/status` are open routes; `/v1/*` session routes are the protected service boundary.
+- `/healthz`, `/readyz`, and `/status` are open routes; `/v1/*` session routes are the protected service boundary.
+- Castra never runs a child process (agent-deck, tmux, git) synchronously. Each has a timeout and is killed with SIGKILL when it expires, so one slow session cannot stall other requests.
 - Every protected session route is scoped by `profile`; list and launch may additionally be scoped by `group`.
 - The documented required fields and optional `group`, `model`, `createBranch`, and bounded string metadata fields are launch's public contract; any additional body fields are ignored rather than rejected.
 - Castra returns `CastraSession` records with stable field names for list, launch, and show; unknown string values are represented as empty strings rather than omitted fields.
@@ -176,6 +204,7 @@ All non-2xx responses use this JSON envelope:
 | Missing route | Any unknown route | `404` with `{ "error": { "code": "not_found", "message": string } }` | No Fastify route matches the requested method and path. |
 | Missing session | Show, send, output, and set routes | `404` with `{ "error": { "code": "not_found", "message": string } }` | agent-deck reports that the requested session id is absent. Remove treats this condition as success with `removed: false`. |
 | Conflict | Launch route | `409` with `{ "error": { "code": "conflict", "message": string } }` | Castra detects a concurrent launch/worktree mismatch and refuses to attach the caller to the wrong session. |
+| Composer refused | Send route | `502` with `{ "error": { "code": "composer_refused", "message": string } }` | agent-deck refused the send because the session's composer was occupied or unreadable, or the session is still in its refusal cooldown. The message carries the pane tail. |
 | Agent-deck failure | Protected routes that invoke agent-deck | `502` with `{ "error": { "code": "agent_deck_error", "message": string } }` | agent-deck exits non-zero, returns unparseable output, cannot identify a launched session, or otherwise fails outside the typed validation/not-found/conflict cases. |
 | tmux inventory failure | `GET /v1/interactive-sessions` | `502` with `{ "error": { "code": "tmux_error", "message": string } }` | The live tmux read failed. |
 | Internal failure | Any route | `500` with `{ "error": { "code": "internal", "message": "Internal server error." } }` | Unexpected server errors are logged server-side; the public body stays generic and does not expose dependency internals. |

@@ -461,7 +461,7 @@ if (args[2] === "list") {
       Object.assign(process.env, launchEnv);
       await ensureStewardSkills();
       await writeFile(join(skills, "tessera-client-key"), key + "\n", { mode: 0o600 });
-      createAgentDeckAdapter().launch({
+      await createAgentDeckAdapter().launch({
         repoPath: cwd, profile: "march", group: "stewards", title: "Steward",
         branch: "slice-2", createBranch,
       });

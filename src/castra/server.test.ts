@@ -7,8 +7,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
 import type { AgentDeckAdapter, RecoveryRuntime } from "./adapter.js";
+import { SendTracker } from "./send-health.js";
 import {
   CastraAgentDeckError,
+  CastraComposerRefusedError,
   CastraConflictError,
   CastraNotFoundError,
   CastraTmuxError,
@@ -92,6 +94,81 @@ describe("castra server", () => {
       expect(body.service).toBe("march-castra");
       expect(body.agentDeck).toEqual({ reachable: true });
       expect(typeof body.uptimeSeconds).toBe("number");
+    });
+  });
+
+  describe("GET /readyz (readiness)", () => {
+    it("is ok, open, and never calls agent-deck", async () => {
+      const adapter = fakeAdapter();
+      app = buildServer({ adapter, token: "secret", eventLoopLag: { lagP99Ms: () => 4 } });
+      const res = await app.inject({ method: "GET", url: "/readyz" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        ready: true,
+        state: "ok",
+        reasons: [],
+        event_loop_lag_ms: 4,
+        refused_sessions: [],
+        recent_send_failures: 0,
+      });
+      expect(adapter.reachable).not.toHaveBeenCalled();
+      expect(adapter.list).not.toHaveBeenCalled();
+    });
+
+    it("is degraded while a session refuses sends, and /healthz stays ok", async () => {
+      const refusal = new CastraComposerRefusedError("agent-deck session send failed: composer is occupied");
+      const sendTracker = new SendTracker();
+      app = buildServer({
+        adapter: fakeAdapter({
+          send: vi.fn(async ({ profile, sessionId }) => {
+            sendTracker.recordRefusal({ profile, sessionId, message: refusal.message });
+            throw refusal;
+          }),
+        }),
+        sendTracker,
+        eventLoopLag: { lagP99Ms: () => 4 },
+      });
+      for (let i = 0; i < 3; i++) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/sessions/stuck-1/send",
+          payload: { profile: "march", prompt: "go" },
+        });
+        expect(res.statusCode).toBe(502);
+        expect(res.json().error.code).toBe("composer_refused");
+      }
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toMatchObject({
+        ready: true,
+        state: "degraded",
+        refused_sessions: ["stuck-1"],
+        recent_send_failures: 3,
+      });
+      const live = await app.inject({ method: "GET", url: "/healthz" });
+      expect(live.json()).toEqual({ status: "ok" });
+    });
+
+    it("is down (503) when event-loop lag p99 is over 2s", async () => {
+      app = buildServer({ adapter: fakeAdapter(), eventLoopLag: { lagP99Ms: () => 14_700 } });
+      const res = await app.inject({ method: "GET", url: "/readyz" });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ ready: false, state: "down", event_loop_lag_ms: 14_700 });
+    });
+
+    it("answers /healthz while a send is still waiting on agent-deck", async () => {
+      let release!: () => void;
+      const blocked = new Promise<void>((r) => (release = r));
+      app = buildServer({ adapter: fakeAdapter({ send: vi.fn(() => blocked) }) });
+      const send = app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/send",
+        payload: { profile: "march", prompt: "go" },
+      });
+      const health = await app.inject({ method: "GET", url: "/healthz" });
+      expect(health.statusCode).toBe(200);
+      release();
+      expect((await send).statusCode).toBe(202);
     });
   });
 
@@ -209,7 +286,14 @@ describe("castra server", () => {
         payload: { profile: "march", prompt: "go" },
       });
       expect(res.statusCode).toBe(202);
-      expect(adapter.send).toHaveBeenCalledWith({ profile: "march", sessionId: "sess-1", prompt: "go" });
+      // The slice id reaches the adapter so its trust-dialog span nests in the slice trace.
+      expect(adapter.send).toHaveBeenCalledWith({
+        profile: "march",
+        sessionId: "sess-1",
+        prompt: "go",
+        traceKey: "my-slice-us1-forge",
+        sliceId: "my-slice-us1-forge",
+      });
     });
 
     it("POST /v1/sessions/:id/set rejects a non-allowlisted key with 400", async () => {
@@ -363,6 +447,7 @@ describe("castra server", () => {
         }),
         capturePane: vi.fn().mockReturnValue("❯ "),
         sendEnter: vi.fn(),
+        sendKey: vi.fn(),
         ...overrides,
       };
     }
@@ -426,8 +511,51 @@ describe("castra server", () => {
             finalStatus: "waiting",
           },
         ],
+        trustDialogs: [],
       });
       expect(runtime.restart).toHaveBeenCalledWith("march", "w1");
+    });
+
+    it("answers a live steward's own trust dialog and ends its send cooldown", async () => {
+      const own = "/home/u/.march/steward";
+      let open = true;
+      let yes = false;
+      const runtime = recoveryRuntime({
+        listSessions: vi.fn().mockReturnValue([
+          { sessionId: "st1", title: "steward", group: "march-spawn-managers", status: "waiting", tmuxSession: "t1" },
+        ]),
+        capturePane: vi.fn(async () =>
+          open
+            ? ` Adding a new directory:\n ${own}\n ${yes ? " " : "❯"} No, exit\n ${yes ? "❯" : " "} Yes, add it`
+            : "❯ ",
+        ),
+        sendKey: vi.fn(async (_t: string, key: string) => {
+          if (key === "Down") yes = true;
+          if (key === "Enter" && yes) open = false;
+        }),
+      });
+      const sendTracker = new SendTracker();
+      sendTracker.recordRefusal({ profile: "march", sessionId: "st1", message: "refused" });
+      app = buildServer({
+        adapter: fakeAdapter(),
+        sendTracker,
+        eventLoopLag: { lagP99Ms: () => 0 },
+        recovery: { ...fastRecovery(runtime), trustDialog: { ownedDirs: [own] } },
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        payload: { profile: "march", sessionIds: ["st1"] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        recovered: [],
+        trustDialogs: [
+          { sessionId: "st1", title: "steward", group: "march-spawn-managers", outcome: "resolved", dir: own },
+        ],
+      });
+      expect(open).toBe(false);
+      expect(sendTracker.refusedSessionIds()).toEqual([]);
     });
 
     it("restricts the sweep to explicit sessionIds", async () => {

@@ -6,13 +6,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const childProcessMock = vi.hoisted(() => ({
+// A sync-style fake for every child process the adapter runs. `fakeExec` wraps
+// it in the async ExecFn the adapter takes, so a thrown error becomes a rejection.
+const childProcessMock = {
   execFileSync: vi.fn(),
-}));
+};
 
-vi.mock("node:child_process", () => ({
-  execFileSync: childProcessMock.execFileSync,
-}));
+const fakeExec: ExecFn = async (cmd, args, opts) =>
+  (childProcessMock.execFileSync(cmd, args, opts) as string | undefined) ?? "";
+
+const noSleep = async () => {};
+
+function makeAdapter(options: Omit<AgentDeckAdapterOptions, "exec"> = {}) {
+  return createAgentDeckAdapter({ exec: fakeExec, sleep: noSleep, ...options });
+}
 
 import {
   buildLaunchArgs,
@@ -31,10 +38,14 @@ import {
   parseAgentDeckSession,
   pickLaunchedSession,
   resolveAgentDeckEnv,
+  type AgentDeckAdapterOptions,
 } from "./adapter.js";
+import { ExecError, type ExecFn } from "./exec.js";
+import { SendTracker } from "./send-health.js";
 import { stewardSessionFilePath } from "./steward-skills.js";
 import {
   CastraAgentDeckError,
+  CastraComposerRefusedError,
   CastraConflictError,
   CastraNotFoundError,
   type CastraSession,
@@ -59,41 +70,41 @@ function session(overrides: Partial<CastraSession> = {}): Record<string, unknown
 }
 
 describe("live interactive inventory", () => {
-  it("reads only live march/ names from Castra's tmux server with a timeout", () => {
+  it("reads only live march/ names from Castra's tmux server with a timeout", async () => {
     childProcessMock.execFileSync.mockReturnValueOnce("other\nmarch/\nmarch/conductor\nmarch/second name\n");
-    expect(listInteractiveSessions()).toEqual(["conductor", "second name"]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual(["conductor", "second name"]);
     expect(childProcessMock.execFileSync).toHaveBeenLastCalledWith(
       "tmux",
       ["list-sessions", "-F", "#{session_name}"],
-      expect.objectContaining({ timeout: 3_000, killSignal: "SIGKILL" }),
+      expect.objectContaining({ capture: true, timeoutMs: 3_000 }),
     );
   });
 
-  it("returns empty when the live server has no eligible sessions", () => {
+  it("returns empty when the live server has no eligible sessions", async () => {
     childProcessMock.execFileSync.mockReturnValueOnce("unrelated\n");
-    expect(listInteractiveSessions()).toEqual([]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual([]);
   });
 
   it.each([
     "no server running on /tmp/tmux/default",
     "error connecting to /tmp/tmux/default (No such file or directory)",
-  ])("returns empty for %s", (stderr) => {
+  ])("returns empty for %s", async (stderr) => {
     childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw Object.assign(new Error("exit 1"), { status: 1, stderr });
+      throw new ExecError("exit 1", { exitCode: 1, stderr });
     });
-    expect(listInteractiveSessions()).toEqual([]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual([]);
   });
 
   it.each([
     [{ code: "ENOENT" }, "tmux executable was not found"],
-    [{ code: "ETIMEDOUT" }, "timed out"],
-    [{ status: 1, stderr: "error connecting to /tmp/tmux/default (Permission denied)" }, "Permission denied"],
-    [{ status: 1, stderr: "server exited unexpectedly" }, "server exited unexpectedly"],
-  ])("reports tmux failure %j", (failure, message) => {
+    [{ timedOut: true }, "timed out"],
+    [{ exitCode: 1, stderr: "error connecting to /tmp/tmux/default (Permission denied)" }, "Permission denied"],
+    [{ exitCode: 1, stderr: "server exited unexpectedly" }, "server exited unexpectedly"],
+  ])("reports tmux failure %j", async (failure, message) => {
     childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw Object.assign(new Error("tmux failed"), failure);
+      throw new ExecError("tmux failed", failure);
     });
-    expect(() => listInteractiveSessions()).toThrow(message);
+    await expect(listInteractiveSessions(fakeExec)).rejects.toThrow(message);
   });
 });
 
@@ -305,13 +316,13 @@ describe("castra adapter — agent-deck tmux env (issue #174)", () => {
     expect(resolveAgentDeckEnv(env, undefined)).toBe(env);
   });
 
-  it("hands the resolved env (with $TMUX) to the spawned agent-deck", () => {
+  it("hands the resolved env (with $TMUX) to the spawned agent-deck", async () => {
     vi.stubEnv("TMUX", "");
     vi.stubEnv("TMUX_TMPDIR", "");
     childProcessMock.execFileSync.mockReset();
     childProcessMock.execFileSync.mockReturnValue("[]");
     try {
-      createAgentDeckAdapter().list({ profile: "march" });
+      await makeAdapter().list({ profile: "march" });
       const opts = childProcessMock.execFileSync.mock.calls[0]?.[2] as {
         env?: NodeJS.ProcessEnv;
       };
@@ -346,35 +357,35 @@ describe("castra adapter — operations", () => {
     fs.rmSync(sidecarRoot, { recursive: true, force: true });
   });
 
-  it("lists sessions, filtering by group when given", () => {
+  it("lists sessions, filtering by group when given", async () => {
     childProcessMock.execFileSync.mockReturnValue(
       JSON.stringify([
         session({ sessionId: "a", group: "g1" }),
         session({ sessionId: "b", group: "g2" }),
       ]),
     );
-    const adapter = createAgentDeckAdapter();
-    expect(adapter.list({ profile: "march" })).toHaveLength(2);
-    expect(adapter.list({ profile: "march", group: "g1" }).map((s) => s.sessionId)).toEqual(["a"]);
+    const adapter = makeAdapter();
+    expect(await adapter.list({ profile: "march" })).toHaveLength(2);
+    expect((await adapter.list({ profile: "march", group: "g1" })).map((s) => s.sessionId)).toEqual(["a"]);
   });
 
-  it("treats an empty profile as [] (agent-deck prints 'No sessions found', not [])", () => {
-    const adapter = createAgentDeckAdapter();
+  it("treats an empty profile as [] (agent-deck prints 'No sessions found', not [])", async () => {
+    const adapter = makeAdapter();
     // The exact human line agent-deck prints to stdout for an empty profile.
     childProcessMock.execFileSync.mockReturnValue("No sessions found in profile 'gatecli'.\n");
-    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+    expect(await adapter.list({ profile: "gatecli" })).toEqual([]);
     // Empty stdout is also a normal empty listing, not malformed output.
     childProcessMock.execFileSync.mockReturnValue("");
-    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+    expect(await adapter.list({ profile: "gatecli" })).toEqual([]);
   });
 
-  it("still throws on genuinely malformed (non-empty, non-JSON) list output", () => {
-    const adapter = createAgentDeckAdapter();
+  it("still throws on genuinely malformed (non-empty, non-JSON) list output", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValue("garbled <not json> output");
-    expect(() => adapter.list({ profile: "march" })).toThrow(/unexpected output/);
+    await expect(adapter.list({ profile: "march" })).rejects.toThrow(/unexpected output/);
   });
 
-  it("launches and returns the identified session", () => {
+  it("launches and returns the identified session", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -385,8 +396,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const result = adapter.launch({
+    const adapter = makeAdapter();
+    const result = await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -403,7 +414,7 @@ describe("castra adapter — operations", () => {
     ).toBe(true);
   });
 
-  it("stamps launch metadata, returns it on launch, and re-attaches it on list/show (#214)", () => {
+  it("stamps launch metadata, returns it on launch, and re-attaches it on list/show (#214)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -419,8 +430,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const launched = adapter.launch({
+    const adapter = makeAdapter();
+    const launched = await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -431,16 +442,16 @@ describe("castra adapter — operations", () => {
     expect(launched.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
 
     // list re-attaches the Castra-owned metadata even though agent-deck omits it.
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
     // show does too.
-    expect(adapter.show({ profile: "march", sessionId: "sess-new" }).metadata).toEqual({
+    expect((await adapter.show({ profile: "march", sessionId: "sess-new" })).metadata).toEqual({
       sliceId: "slice-7",
       spawnId: "sp-1",
     });
   });
 
-  it("writes the steward-report sidecar keyed by the worktree dir on launch (#371)", () => {
+  it("writes the steward-report sidecar keyed by the worktree dir on launch (#371)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -453,7 +464,7 @@ describe("castra adapter — operations", () => {
     });
     process.env.MARCH_HERALD_URL = "http://herald.example:1234";
     try {
-      createAgentDeckAdapter().launch({
+      await makeAdapter().launch({
         profile: "march",
         repoPath: "/repo",
         branch: "march/spawn/x",
@@ -475,7 +486,7 @@ describe("castra adapter — operations", () => {
     }
   });
 
-  it("skips the steward-report sidecar when no sliceId is supplied (#371)", () => {
+  it("skips the steward-report sidecar when no sliceId is supplied (#371)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -486,7 +497,7 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    createAgentDeckAdapter().launch({
+    await makeAdapter().launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -497,7 +508,7 @@ describe("castra adapter — operations", () => {
     expect(fs.existsSync(sidecar)).toBe(false);
   });
 
-  it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", () => {
+  it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -509,19 +520,19 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.launch({
+    const adapter = makeAdapter();
+    await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
       title: "Steward",
       group: "g",
     });
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.branch).toBe("march/spawn/x");
   });
 
-  it("derives an empty session branch from the working directory's git head (#264)", () => {
+  it("derives an empty session branch from the working directory's git head (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -532,12 +543,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/smithy/cut/01\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "legacy");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "legacy");
     expect(listed?.branch).toBe("feature/smithy/cut/01");
   });
 
-  it("returns an empty branch for a non-git working directory (#264)", () => {
+  it("returns an empty branch for a non-git working directory (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -547,12 +558,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git") throw execError("not a git repository");
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "nogit");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "nogit");
     expect(listed?.branch).toBe("");
   });
 
-  it("returns an empty branch for a detached HEAD checkout (#264)", () => {
+  it("returns an empty branch for a detached HEAD checkout (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -564,12 +575,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "detached");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "detached");
     expect(listed?.branch).toBe("");
   });
 
-  it("caches the derived branch for the session lifetime — git runs once across calls (#264)", () => {
+  it("caches the derived branch for the session lifetime — git runs once across calls (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -580,16 +591,16 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
-    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
+    const adapter = makeAdapter();
+    expect((await adapter.list({ profile: "march" }))[0]?.branch).toBe("feature/x");
+    expect((await adapter.list({ profile: "march" }))[0]?.branch).toBe("feature/x");
     const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
       (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
     );
     expect(gitShowCurrentCalls).toHaveLength(1);
   });
 
-  it("re-derives the branch after the session is removed (cache invalidation #264)", () => {
+  it("re-derives the branch after the session is removed (cache invalidation #264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -600,10 +611,10 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.list({ profile: "march" });
-    adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
-    adapter.list({ profile: "march" });
+    const adapter = makeAdapter();
+    await adapter.list({ profile: "march" });
+    await adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
+    await adapter.list({ profile: "march" });
     const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
       (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
     );
@@ -611,7 +622,7 @@ describe("castra adapter — operations", () => {
     expect(gitShowCurrentCalls).toHaveLength(2);
   });
 
-  it("forgets a session's metadata after remove", () => {
+  it("forgets a session's metadata after remove", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -622,8 +633,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.launch({
+    const adapter = makeAdapter();
+    await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -631,14 +642,14 @@ describe("castra adapter — operations", () => {
       group: "g",
       metadata: { sliceId: "slice-7" },
     });
-    expect(adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).toEqual({
+    expect(await adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).toEqual({
       removed: true,
     });
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.metadata).toBeUndefined();
   });
 
-  it("raises a conflict when the launched worktree dir does not match the branch", () => {
+  it("raises a conflict when the launched worktree dir does not match the branch", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -651,8 +662,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    expect(() =>
+    const adapter = makeAdapter();
+    await expect(
       adapter.launch({
         profile: "march",
         repoPath: "/repo",
@@ -660,58 +671,58 @@ describe("castra adapter — operations", () => {
         title: "t",
         group: "g",
       }),
-    ).toThrow(CastraConflictError);
+    ).rejects.toThrow(CastraConflictError);
   });
 
-  it("reports removed:true on success and removed:false when the session is already gone", () => {
-    const adapter = createAgentDeckAdapter();
+  it("reports removed:true on success and removed:false when the session is already gone", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValueOnce("");
-    expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
+    expect(await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
       removed: true,
     });
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw execError("session not found");
     });
-    expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
+    expect(await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
       removed: false,
     });
   });
 
-  it("maps an unexpected remove failure to a 502-class error", () => {
-    const adapter = createAgentDeckAdapter();
+  it("maps an unexpected remove failure to a 502-class error", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw execError("tmux server connection refused");
     });
-    expect(() => adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toThrow(
+    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).rejects.toThrow(
       CastraAgentDeckError,
     );
   });
 
-  it("throws not-found when showing a missing session", () => {
-    const adapter = createAgentDeckAdapter();
+  it("throws not-found when showing a missing session", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw execError("no such session");
     });
-    expect(() => adapter.show({ profile: "p", sessionId: "missing" })).toThrow(CastraNotFoundError);
+    await expect(adapter.show({ profile: "p", sessionId: "missing" })).rejects.toThrow(CastraNotFoundError);
   });
 
-  it("truncates output to the last N lines", () => {
-    const adapter = createAgentDeckAdapter();
+  it("truncates output to the last N lines", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValueOnce("l1\nl2\nl3\nl4\nl5");
-    expect(adapter.output({ profile: "p", sessionId: "s", lines: 2 })).toEqual({
+    expect(await adapter.output({ profile: "p", sessionId: "s", lines: 2 })).toEqual({
       output: "l4\nl5",
       truncated: true,
     });
   });
 
-  it("reports reachability from agent-deck --version", () => {
-    const adapter = createAgentDeckAdapter();
+  it("reports reachability from agent-deck --version", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValueOnce("agent-deck 1.9.17");
-    expect(adapter.reachable()).toBe(true);
+    expect(await adapter.reachable()).toBe(true);
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw new Error("not installed");
     });
-    expect(adapter.reachable()).toBe(false);
+    expect(await adapter.reachable()).toBe(false);
   });
 });
 
@@ -747,7 +758,7 @@ describe("castra adapter — refused send diagnostics (#608)", () => {
     expect(paneTail(DIALOG_PANE, 50)).not.toContain("\u2500");
   });
 
-  it("appends the steward's pane tail to a refused send", () => {
+  it("appends the steward's pane tail to a refused send", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("send")) {
         throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
@@ -761,18 +772,218 @@ describe("castra adapter — refused send diagnostics (#608)", () => {
       }
       throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
     });
-    expect(() =>
-      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
-    ).toThrow(/composer is occupied[\s\S]*Steward pane at refusal[\s\S]*Adding a new directory/);
+    await expect(
+      makeAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).rejects.toThrow(/composer is occupied[\s\S]*Steward pane at refusal[\s\S]*Adding a new directory/);
   });
 
-  it("leaves other send failures unchanged and never captures the pane", () => {
+  it("leaves other send failures unchanged and never captures the pane", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string) => {
       if (cmd === "tmux") throw new Error("must not capture");
       throw Object.assign(new Error("exit 1"), { stderr: "tmux: server exited" });
     });
-    expect(() =>
-      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
-    ).toThrow(/^agent-deck session send failed: tmux: server exited$/);
+    await expect(
+      makeAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).rejects.toThrow(/^agent-deck session send failed: tmux: server exited$/);
+  });
+});
+
+describe("castra adapter — async sends (stuck-steward unbrick)", () => {
+  const REFUSAL =
+    "Error: message not delivered to 't': message not sent: composer is occupied or " +
+    "unreadable; existing draft preserved, nothing was typed";
+  const BUSY_PANE = "❯ half-typed draft the operator left\n  ? for shortcuts";
+  const prevSkillsDir = process.env.MARCH_STEWARD_SKILLS_DIR;
+
+  beforeEach(() => {
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/home/u/.march/steward";
+  });
+
+  afterEach(() => {
+    if (prevSkillsDir === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+    else process.env.MARCH_STEWARD_SKILLS_DIR = prevSkillsDir;
+  });
+
+  function deferred() {
+    let resolve!: (v: string) => void;
+    const promise = new Promise<string>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  function sendCalls(calls: { args: readonly string[] }[]): string[] {
+    return calls.filter((c) => c.args.includes("send")).map((c) => c.args[4]!);
+  }
+
+  it("serializes sends to one session and runs other sessions concurrently", async () => {
+    const calls: { args: readonly string[] }[] = [];
+    const pending = new Map<string, ReturnType<typeof deferred>[]>();
+    const exec: ExecFn = (cmd, args) => {
+      calls.push({ args });
+      const d = deferred();
+      const id = args[4]!;
+      pending.set(id, [...(pending.get(id) ?? []), d]);
+      return d.promise;
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const a1 = adapter.send({ profile: "march", sessionId: "s1", prompt: "one" });
+    const a2 = adapter.send({ profile: "march", sessionId: "s1", prompt: "two" });
+    const b1 = adapter.send({ profile: "march", sessionId: "s2", prompt: "other" });
+    await new Promise((r) => setTimeout(r, 0));
+    // s1's second prompt waits for its first; s2 is not held up by s1.
+    expect(calls.map((c) => `${c.args[4]}:${c.args[5]}`)).toEqual(["s1:one", "s2:other"]);
+
+    pending.get("s2")![0]!.resolve("");
+    await b1;
+    pending.get("s1")![0]!.resolve("");
+    await a1;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.map((c) => `${c.args[4]}:${c.args[5]}`)).toEqual(["s1:one", "s2:other", "s1:two"]);
+    pending.get("s1")![1]!.resolve("");
+    await a2;
+  });
+
+  it("fails fast with composer_refused during the cooldown, until the pane changes", async () => {
+    let pane = BUSY_PANE;
+    const calls: { args: readonly string[] }[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      calls.push({ args });
+      if (cmd === "agent-deck" && args.includes("send")) {
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      if (cmd === "agent-deck" && args.includes("show")) {
+        return JSON.stringify({ id: "s1", tmux_session: "agentdeck_t_1" });
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") return pane;
+      throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    const send = () => adapter.send({ profile: "march", sessionId: "s1", prompt: "go" });
+
+    const first = await send().catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(CastraComposerRefusedError);
+    expect((first as CastraComposerRefusedError).cached).toBe(false);
+    expect((first as Error).message).toMatch(/composer is occupied[\s\S]*half-typed draft/);
+    expect(tracker.refusedSessionIds()).toEqual(["s1"]);
+
+    // Same pane: no agent-deck send at all, the same refusal comes straight back.
+    const second = await send().catch((e: unknown) => e);
+    expect(second).toBeInstanceOf(CastraComposerRefusedError);
+    expect((second as CastraComposerRefusedError).cached).toBe(true);
+    expect((second as Error).message).toMatch(/composer_refused cooldown[\s\S]*Last refusal: agent-deck session send failed/);
+    expect(sendCalls(calls)).toHaveLength(1);
+
+    // The pane changed (the operator cleared the draft): agent-deck runs again.
+    pane = "❯ \n  ? for shortcuts";
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    expect(sendCalls(calls)).toHaveLength(2);
+  });
+
+  it("retries agent-deck once the cooldown has expired", async () => {
+    let now = 0;
+    let sends = 0;
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends++;
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      return "";
+    };
+    const tracker = new SendTracker({ cooldownMs: 1_000, now: () => now });
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    const send = () => adapter.send({ profile: "march", sessionId: "s1", prompt: "go" });
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    await expect(send()).rejects.toThrow(/cooldown/);
+    expect(sends).toBe(1);
+    now = 1_000;
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    expect(sends).toBe(2);
+  });
+
+  it("starts no cooldown for a send failure that is not a composer refusal", async () => {
+    const exec: ExecFn = async () => {
+      throw Object.assign(new Error("exit 1"), { stderr: "tmux: server exited" });
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).rejects.not.toBeInstanceOf(
+      CastraComposerRefusedError,
+    );
+    expect(tracker.refusedSessionIds()).toEqual([]);
+  });
+
+  function trustDialogHost(dir: string) {
+    let open = true;
+    let cursorOnYes = false;
+    const keys: string[] = [];
+    let sends = 0;
+    const pane = () =>
+      open
+        ? [
+            " Adding a new directory:",
+            ` ${dir}`,
+            "",
+            ` ${cursorOnYes ? " " : "❯"} No, exit`,
+            ` ${cursorOnYes ? "❯" : " "} Yes, add it`,
+            " Enter to confirm · Esc to cancel",
+          ].join("\n")
+        : "❯ \n  ? for shortcuts";
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends++;
+        if (open) throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+        return "";
+      }
+      if (cmd === "agent-deck" && args.includes("show")) {
+        return JSON.stringify({ id: "s1", tmux_session: "agentdeck_t_1" });
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") return pane();
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        expect(args.slice(0, 3)).toEqual(["send-keys", "-t", "agentdeck_t_1"]);
+        const key = args[3]!;
+        keys.push(key);
+        if (key === "Down") cursorOnYes = true;
+        if (key === "Enter" && cursorOnYes) open = false;
+        return "";
+      }
+      throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
+    };
+    return { exec, keys, sends: () => sends, isOpen: () => open };
+  }
+
+  it("answers 'Yes, add it' on Castra's own steward-dir trust dialog and redelivers the send", async () => {
+    const host = trustDialogHost("/home/u/.march/steward");
+    const tracker = new SendTracker();
+    const logs: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec: host.exec,
+      sendTracker: tracker,
+      sleep: noSleep,
+      logger: { info: (_o, msg) => logs.push(msg), warn: (_o, msg) => logs.push(msg) },
+    });
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).resolves.toBeUndefined();
+    expect(host.keys).toEqual(["Down", "Enter"]);
+    expect(host.isOpen()).toBe(false);
+    expect(host.sends()).toBe(2);
+    expect(tracker.refusedSessionIds()).toEqual([]);
+    expect(logs).toEqual(["castra answered the steward directory-trust dialog"]);
+  });
+
+  it("leaves another directory's trust dialog alone and reports it", async () => {
+    const host = trustDialogHost("/home/u/src/someone-elses-repo");
+    const logs: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec: host.exec,
+      sleep: noSleep,
+      logger: { info: (_o, msg) => logs.push(msg), warn: (_o, msg) => logs.push(msg) },
+    });
+    const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraComposerRefusedError);
+    expect((err as Error).message).toMatch(
+      /left the directory-trust dialog for \/home\/u\/src\/someone-elses-repo unanswered/,
+    );
+    expect(host.keys).toEqual([]);
+    expect(host.sends()).toBe(1);
+    expect(logs).toEqual(["castra left a directory-trust dialog unanswered"]);
   });
 });

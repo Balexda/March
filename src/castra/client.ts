@@ -3,6 +3,7 @@ import {
   type CastraSession,
   type RecoverReport,
   type SessionRecoveryResult,
+  type TrustDialogResult,
 } from "./types.js";
 import { CASTRA_TOKEN_ENV, CASTRA_URL_ENV, resolveCastraPort } from "./config.js";
 
@@ -124,7 +125,11 @@ interface RequestOptions {
 /** Normalize a `/v1/sessions/recover` response body into a {@link RecoverReport}. */
 function coerceRecoverReport(body: unknown): RecoverReport {
   const recovered = (body as { recovered?: unknown }).recovered;
-  return { recovered: Array.isArray(recovered) ? (recovered as SessionRecoveryResult[]) : [] };
+  const trustDialogs = (body as { trustDialogs?: unknown }).trustDialogs;
+  return {
+    recovered: Array.isArray(recovered) ? (recovered as SessionRecoveryResult[]) : [],
+    ...(Array.isArray(trustDialogs) ? { trustDialogs: trustDialogs as TrustDialogResult[] } : {}),
+  };
 }
 
 async function parseJsonBody(res: Response): Promise<unknown> {
