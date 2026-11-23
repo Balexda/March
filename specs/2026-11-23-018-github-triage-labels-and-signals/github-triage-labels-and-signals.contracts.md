@@ -77,7 +77,7 @@ interpretTriageLabels(issueSnapshot, observedChanges, verdictProvenance?) -> Tri
 | `state` | `untriaged`, `triaged`, `errored`, or `unresolved`. An issue with no state label is untriaged. |
 | `protectedGroups` | Managed label groups holding a same-content operator override, which a later verdict write must preserve. |
 | `reentry` | `qualified` with the [trigger](#re-entry-triggers) that qualified it, `notQualified`, or `unresolved` when history is too incomplete to decide. Co-occurring triggers qualify once. A consumer defers on `unresolved` and re-evaluates once history is complete. It never treats `unresolved` as `notQualified`. |
-| `intakeAuthorized` | `true` only for an observed addition of `triage:accepted` for the current, unambiguous triaged build recommendation on an open issue, with the signal still present. A point-in-time answer with the build outcome and content hash it was evaluated against. It is not durable authority on its own. |
+| `intakeAuthorized` | `true` only for an observed addition of `triage:accepted` for the current, unambiguous triaged build recommendation on an open issue, with the signal still present. A point-in-time answer with the build outcome, content hash, and identity of the observed `triage:accepted` addition it was evaluated against. It is not durable authority on its own. |
 
 Preserve operator edits on the same content by comparing verdict provenance with observed label changes. Operator and writer may share a GitHub identity, so attribute known writer changes using the recorded verdict and change history, never author identity alone. If attribution is uncertain, preserve observed same-content differences.
 
@@ -100,4 +100,11 @@ Apply these triggers to open issues, including those labeled `automated`. A pers
 
 ## Integration Boundaries
 
-Provisioning changes repository label definitions only. A later deterministic writer uses the catalog and ownership rules for issue assignments. Later Herald observation and continuous triage supply and consume the change history. Intake consumes the acceptance decision under its own stable issue identity and deduplication rules. When it acts, intake re-reads the issue live from GitHub and proceeds only if all of these still hold: the issue is open, `triage:triaged` is its only state label, exactly one outcome label and one confidence label are present with no managed-label conflict, `triage:accepted` is present, and the build outcome and title/body hash match the authorized interpretation. If any check fails, for example `triage:errored` replaced `triage:triaged`, intake does not act.
+Provisioning changes repository label definitions only. A later deterministic writer uses the catalog and ownership rules for issue assignments. Later Herald observation and continuous triage supply and consume the change history. Intake consumes the acceptance decision under its own stable issue identity and deduplication rules. When it acts, intake re-reads the issue live from GitHub, re-runs this interpretation against current history, and proceeds only if all of these still hold:
+
+- The recomputed `intakeAuthorized` is `true` for the same `triage:accepted` addition that was authorized. Acceptance has not been removed since that addition, so a later re-addition cannot inherit the earlier authorization.
+- The issue is open and `triage:accepted` is present.
+- `triage:triaged` is the only state label, and exactly one outcome label and one confidence label are present with no managed-label conflict.
+- The build outcome and title/body hash match the authorized interpretation.
+
+If any check fails, for example because `triage:errored` replaced `triage:triaged`, intake does not act.
