@@ -1,7 +1,5 @@
 # Brood Contract
 
-## Purpose
-
 Brood owns lifecycle state and cleanup for tracked March sessions. Its read
 surfaces give operators and automation visibility without moving registry,
 Docker, archive, worktree, branch, or Castra mutation into the CLI. This follows
@@ -14,9 +12,76 @@ surface over that authority.
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
-`GET /sessions` returns matching registry records in `sessions` and their
-derived read views in `views`. It accepts `kind`, `status`, `parentId`, and
-`reconcile`. Reconciliation defaults to off.
+### Health and readiness
+
+`GET /healthz` takes no inputs and returns 200 with `{ status: "ok" }`.
+`GET /readyz` takes no inputs and returns `{ ready, docker, git, castra }`, all
+booleans. It returns 200 when Docker and Git are available on PATH and 503
+otherwise. The best-effort Castra reachability probe does not gate readiness.
+
+### Registry
+
+`POST /sessions` accepts a JSON object with a required nonempty string `id`
+(trimmed) and `kind` of `spawn`, `steward`, or `legate`. Optional `status` is
+one of `created`, `running`, `stopped`, `failed`, `tearing-down`, or `torndown`.
+Optional `repoPath` and `worktreePath` must be absolute path strings. Optional
+`branch` must match `^[A-Za-z0-9][A-Za-z0-9._/-]*$` and contain no `..`.
+Other optional fields are the strings `parentId`, `containerId`,
+`agentDeckSessionId`, `profile`, `group`, `backend`, `imageId`, and
+`failureReason`, a numeric `exitCode`, and the `extractionResult` object
+described below. Unknown keys are ignored.
+
+Registration upserts by ID and returns 201 with a `SessionRecord`. New records
+default to `created`. Re-registration preserves the original kind and creation
+time. The record contains `id`, `kind`, `status`, and server-managed timestamp
+strings `createdAt` and `updatedAt`. It includes optional registration fields
+when present and may also include timestamp strings `startedAt`, `stoppedAt`,
+and `torndownAt`, string `teardownReason`, and boolean `teardownRequiresForce`.
+Invalid registration returns 400. Closed extraction or workspace reclaim
+returns 409. Both use `{ error: string }`, with an additional `code` for
+workspace reclaim.
+
+`GET /sessions` takes no body. Optional query filters `kind`, `status`, and
+`parentId` combine by exact match. Optional `reconcile` accepts `true` or
+`false` and defaults to off. Empty values are treated as omitted. Invalid
+enum or boolean values and repeated filters return 400. Unavailable requested
+container observation returns 503. Both use `{ error: string }`. Success
+returns 200 with `{ sessions: SessionRecord[], views: BroodReadView[] }`.
+Each view contains its `record`, an `age` string, booleans `needsAttention`,
+`disposed`, and `reconciled`, and `containerLive` as a boolean or null for
+rows without a tracked container. Without observation, liveness for a tracked
+container reflects whether its registry status is `running`.
+
+`GET /sessions/:id` takes the session ID as its only input. It returns 200
+with the `SessionRecord` or 404 with `{ error: string }` for an unknown ID.
+
+`PATCH /sessions/:id` takes the session ID and an optional JSON object.
+Only supplied allowlisted fields are applied. Those fields are `status`,
+`containerId`, `imageId`, `exitCode`, `failureReason`, `agentDeckSessionId`,
+`worktreePath`, `branch`, `profile`, `group`, `extractionResult`,
+`startedAt`, `stoppedAt`, and `torndownAt`. Status, path, and branch follow
+registration rules. `torndownAt` must be a nonempty string and is write-once.
+The response is 200 with the updated record, 400 for validation failures,
+404 for an unknown ID, or 409 for closed extraction or workspace reclaim.
+Errors use the same envelope as registration.
+
+### Extraction readiness
+
+`GET /sessions/:id/extraction-readiness` takes a spawn ID and no body or query
+inputs. It returns 404 with `{ error: string }` for unknown IDs and non-spawn
+sessions. A known spawn returns 200 with `{ spawnId, status, prReady }`.
+`status` is `missing`, `failed`, or `succeeded`. Only `succeeded` sets
+`prReady` to true. Both completed states include `result` with the stored
+`ExtractionResult`.
+
+An `ExtractionResult` has string `spawnId` and `extractedAt`, `backend` of
+`claude-code` or `codex`, a completed `status`, and optional string
+`diagnostic`. Failure carries a string `failureReason`. Success carries a
+`patch` object with `spawnId`, `backend`, string `patchText` (at most 1 MiB
+in UTF-8), string array `touchedPaths`, and a string `sha256` carrying the
+patch digest.
+
+### List consumers
 
 `BroodClient.listViews({ kind?, status?, reconcile? })` returns the service's
 `BroodReadView[]`. The existing `BroodClient.list()` returns the
@@ -36,7 +101,22 @@ on stderr for each unavailable source. Available sections are labeled partial,
 and interactive names are advertised as attachable only when Brood has
 confirmed that they do not collide.
 
-`POST /sessions/:id/teardown` accepts optional `force`, `kill`, and `reason`.
+### Session teardown
+
+`POST /sessions/:id/teardown` takes a session ID and an optional JSON object
+with booleans `force` and `kill` and a nonempty string `reason`. Only literal
+`true` enables either boolean. Empty or non-string reasons are ignored.
+With `kill: true`, Brood skips graceful stop and requests forced compute
+removal after the archive succeeds. Force admission still applies independently.
+It returns 200 with `{ id, status, steps, warnings }`. The `id` is the primary
+session ID and `status` is `torndown` or `tearing-down`. Each ordered step
+has a `step` name (`stop`, `archive`, `container`, `steward`, `worktree`, or
+`branch`), an `outcome` of `ok`, `skipped`, or `failed`, and optional string
+`detail`. The `warnings` field is a string array. An already-complete group
+returns `torndown` with empty steps and warnings. Errors use `{ error: string }`
+with 404 for unknown IDs, 409 when force is required, and 500 for unexpected
+teardown errors.
+
 A steward ID resolves to its owning spawn for admission. Created and running
 spawns require force. Brood records that requirement before archiving and
 enforces it on retries while teardown is in progress. Older in-progress spawn
@@ -55,9 +135,11 @@ SIGTERM to the agent's process group, so the signal reaches the agent, including
 `skipped` for already stopped or absent compute. An unsupported, unverified,
 or timed-out stop reports `failed`, defers the remaining steps, and leaves the
 session retryable. Removal after a verified stop targets the same container ID
-without forcing it. With `--kill`, Brood skips the stop step and requests
-immediate removal after the archive succeeds. Running and created spawns and
-their protected retries still require `--force`.
+without forcing it.
+
+At the slice's original source baseline (`9910481`), Brood accepted and
+ignored `kill`. The lifecycle teardown implementation added the skip-stop
+behavior described above.
 
 The host substrate resolves ephemeral compute by session kind and ID and
 verifies absence after removal. The recorded container ID supplies logs.
@@ -190,6 +272,23 @@ value is rejected with 400 and an existing timestamp is kept. Archive failures
 end errored spans, following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 
+### Admin sweep
+
+`POST /admin/sweep` takes no body or query inputs. If `MARCH_BROOD_ADMIN_TOKEN`
+is unset or blank, it returns 404. Otherwise it requires
+`Authorization: Bearer <token>` and returns 401 for missing or invalid
+credentials. Both rejections use `{ error: string }`.
+
+On 200 the sweep returns `{ scannedProfiles, reaped, adopted, skipped, failures }`.
+`scannedProfiles` lists profile names. The remaining arrays contain entries
+with string `profile` and `sessionId`. Reaped entries add `worktreePath`,
+`branch`, and `reason`. Skipped entries add `reason`. Failures add `detail`
+and use `sessionId: "*"` for a failed profile listing. This route leaves
+`adopted` empty. It only reaps stewards that have no live Brood owner and whose
+worktree is gone or whose PR is confirmed merged or closed. Castra removes them
+with worktree pruning disabled. Castra list and removal failures are reported
+in `failures` within HTTP 200.
+
 The orphan PR lookup used by `POST /admin/sweep` and periodic reconciliation
 requests a Tessera app/read token scoped to the repository at the profile's
 GitHub origin. Brood retries a GitHub 401 once using a refreshed entitlement.
@@ -200,7 +299,8 @@ token fallback is off.
 
 ### `GET /sessions/:id/logs`
 
-`GET /sessions/:id/logs` returns logs for one tracked `SessionRecord`.
+`GET /sessions/:id/logs` takes the session ID as its only input and returns
+the selected log as UTF-8 text or a JSON `{ error: string }` envelope.
 
 `march brood logs <id>` calls this endpoint through `BroodClient.logs(id)`
 and writes the returned text verbatim to stdout. Service and connection
@@ -215,6 +315,7 @@ errors go to stderr and exit non-zero. Brood selects and reads the log source.
 | No live source and no archived `container.log` exist | `409 { "error": "<message>" }` |
 | No live source was available and the archived `container.log` is unreadable | `409 { "error": "<message>" }` |
 | The Docker or Castra read fails and no readable archive exists | `502 { "error": "<message>" }` |
+| An unexpected error occurs | `500 { "error": "<message>" }` |
 
 The live read runs `docker logs` asynchronously, so it never blocks other
 Brood requests. It returns the container's stdout and stderr in the order they
@@ -233,11 +334,21 @@ The archived log for a session is read from
 spawn<->steward group under the *spawn* id, so a steward row's archive is
 resolved under its `parentId` when its own id has no archive.
 
-Steward live-session output is intentionally not part of this slice. A steward
-row can still use its group's archived `container.log` when present; live Castra
-session output is owned by the follow-up steward log-routing contract.
-
 ## Invariants
+
+After admission and any required graceful stop, Brood runs cleanup in this
+order.
+
+1. Archive the session evidence before removing resources.
+2. Remove the targeted ephemeral container and verify absence.
+3. Remove or verify absence of the group's stewards through Castra with
+   `pruneWorktree: false`. [Castra removal contract](../castra/contract.md#delete-v1sessionsid)
+4. Remove only the exact tracked worktree path in the tracked repository.
+5. Delete only the exact tracked branch in that repository.
+
+Brood never runs blanket `git worktree prune`. Each Git step requires the
+tracked repository and its corresponding tracked path or branch. A failed
+steward removal defers both Git steps and leaves teardown retryable.
 
 List reads leave registry and container state unchanged. Brood owns filter
 validation, read-view derivation, and any requested liveness observation.
@@ -258,14 +369,21 @@ validation, read-view derivation, and any requested liveness observation.
 
 ## Error Modes
 
-The service returns HTTP 400 for invalid filter values and HTTP 503 when
-requested liveness observation is unavailable. `listViews()` surfaces
-HTTP errors, transport failures, and responses missing the views array.
+Registration, listing, and update return 400 with `{ error: string }` for
+validation failures. Lookup and update return 404 for unknown session IDs.
+Requested liveness observation can return 503. `listViews()` surfaces HTTP
+errors, transport failures, and responses missing the views array.
 
 Teardown returns HTTP 404 for an unknown ID and HTTP 409 when force is required.
 Rejection precedes registry updates and cleanup. Rejections end an errored `brood.teardown`
 span under the inbound trace context when supplied. The CLI exits non-zero
 on these errors and when Brood is unreachable.
+
+Expected teardown-step failures return 200 with a `tearing-down` result and
+failed steps or warnings. A steward-removal failure reports `steward` as
+`failed` and `worktree` and `branch` as `skipped` with a deferral detail.
+A later teardown request can retry. Completion is signaled by `torndown`
+in the response body.
 
 If Brood cannot resolve the repository or obtain a credential, it skips the
 candidate's PR-based removal and continues the sweep. Lookup errors are

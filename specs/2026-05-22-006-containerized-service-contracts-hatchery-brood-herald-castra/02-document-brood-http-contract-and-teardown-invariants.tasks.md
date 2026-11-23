@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the Brood HTTP contract**
+- [x] **Author the Brood HTTP contract**
 
   Create `docs/subsystems/brood/contract.md` using the service-contract structure from the data model, the Brood route surface from the contracts artifact, and the current route behavior in `src/brood/service/`. Keep the AUTOGEN region empty, document only Brood's existing HTTP boundary and teardown invariant, and satisfy AS 2.1-2.3 without adding runtime service behavior.
 
