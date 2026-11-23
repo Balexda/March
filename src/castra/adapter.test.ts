@@ -998,6 +998,50 @@ describe("castra adapter — async sends (stuck-steward unbrick)", () => {
     expect(host.sends()).toBe(1);
     expect(logs).toEqual(["castra left a directory-trust dialog unanswered"]);
   });
+
+  it("answers the dialog but, with too little budget left to resend, says so and starts no cooldown", async () => {
+    const host = trustDialogHost("/home/u/.march/steward");
+    let now = 0;
+    const exec: ExecFn = async (cmd, args, opts) => {
+      const out = await host.exec(cmd, args, opts);
+      // Answering the dialog took most of the send budget.
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "Enter") now = 60_000;
+      return out;
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep, now: () => now, budgets: { sendMs: 100_000 } });
+    const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraComposerRefusedError);
+    expect((err as Error).message).toMatch(/answered the directory-trust dialog .* so it was not delivered\. No cooldown was started/s);
+    expect(host.isOpen()).toBe(false);
+    expect(host.sends()).toBe(1);
+    expect(tracker.refusedSessionIds()).toEqual([]);
+    // The next send reaches agent-deck and goes through.
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).resolves.toBeUndefined();
+    expect(host.sends()).toBe(2);
+  });
+
+  it("never treats a send Castra killed as a refusal, whatever it printed first", async () => {
+    for (const killed of [
+      new ExecError("agent-deck timed out after 45000ms and was killed", { stderr: REFUSAL, timedOut: true }),
+      Object.assign(new Error("agent-deck output exceeded 1048576 bytes and was killed"), { stderr: REFUSAL }),
+    ]) {
+      const calls: string[] = [];
+      const exec: ExecFn = async (cmd, args) => {
+        calls.push(`${cmd} ${args.includes("send") ? "send" : args.join(" ")}`);
+        if (cmd === "agent-deck" && args.includes("send")) throw killed;
+        return "";
+      };
+      const tracker = new SendTracker();
+      const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+      const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CastraAgentDeckError);
+      expect(err).not.toBeInstanceOf(CastraComposerRefusedError);
+      // No pane inspection, no trust-dialog retry, no cooldown.
+      expect(calls).toEqual(["agent-deck send"]);
+      expect(tracker.refusedSessionIds()).toEqual([]);
+    }
+  });
 });
 
 describe("castra adapter — review fixes (#702)", () => {
@@ -1098,6 +1142,92 @@ describe("castra adapter — review fixes (#702)", () => {
     ]);
     expect([a.sessionId, b.sessionId]).toEqual(["s-march/spawn/a", "s-march/spawn/b"]);
     expect(order).toEqual(["list", "launch", "list", "list", "launch", "list"]);
+  });
+
+  it("fails closed when an agent-deck that reported ids launches without one, then serializes again", async () => {
+    let reportIds = true;
+    const calls: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck") calls.push(sub ?? "");
+      if (cmd === "agent-deck" && sub === "list") return JSON.stringify(sessions);
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2) || r.id === args.at(-1)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        await new Promise((r) => setTimeout(r, 5));
+        const id = `s${sessions.length}`;
+        // Same repository and branch: only an id can tell these launches apart.
+        sessions.push(deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:0${sessions.length}Z`));
+        return reportIds ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    expect((await adapter.launch(launchInput)).sessionId).toBe("s0");
+
+    // A downgrade: two concurrent launches come back without ids. Neither can
+    // be told apart from the other, so both fail rather than guess.
+    reportIds = false;
+    calls.length = 0;
+    const results = await Promise.all([
+      adapter.launch(launchInput).catch((e: unknown) => e),
+      adapter.launch(launchInput).catch((e: unknown) => e),
+    ]);
+    for (const r of results) {
+      expect(r).toBeInstanceOf(CastraAgentDeckError);
+      expect((r as Error).message).toMatch(/reported no session id.*will not guess/s);
+    }
+    expect(calls).toEqual(["launch", "launch"]);
+
+    // The next launch takes the serialized before/after list path.
+    calls.length = 0;
+    await adapter.launch({ ...launchInput, branch: "march/spawn/y" }).catch(() => undefined);
+    expect(calls.slice(0, 2)).toEqual(["list", "launch"]);
+  });
+
+  it("finds the launch object after chatter that holds braces", () => {
+    expect(parseLaunchOutput('note: worktree {created}\n{"session_id":"s","worktree_path":"/w"}')).toEqual({ sessionId: "s", worktreePath: "/w" });
+    expect(parseLaunchOutput('{"note":1} then\n{\n  "session_id": "t"\n}\n')).toEqual({ sessionId: "t" });
+    expect(parseLaunchOutput("braces {but} no object")).toEqual({});
+  });
+
+  it("enables auto-mode only when its full timeout fits, and never with a cut one", async () => {
+    let now = 0;
+    const sets: number[] = [];
+    const exec: ExecFn = async (cmd, args, opts) => {
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "launch") {
+        now = 225_000; // the launch left 15s of the 240s budget
+        return '{"session_id":"ours"}';
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(deckRecord("ours", "/repo/feature-march-spawn-x"));
+      if (cmd === "agent-deck" && sub === "set") sets.push(opts?.timeoutMs ?? -1);
+      return "";
+    };
+    const warns: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec,
+      sleep: noSleep,
+      now: () => now,
+      logger: { info: () => undefined, warn: (_o, msg) => warns.push(msg) },
+    });
+    const launched = await adapter.launch(launchInput);
+    expect(launched.sessionId).toBe("ours");
+    expect(sets).toEqual([]);
+    expect(warns.some((w) => /auto-mode .*skipped/.test(w))).toBe(true);
+
+    // With room left it runs with its whole timeout.
+    now = 0;
+    const roomy: ExecFn = async (cmd, args, opts) => {
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "launch") return '{"session_id":"ours"}';
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(deckRecord("ours", "/repo/feature-march-spawn-x"));
+      if (cmd === "agent-deck" && sub === "set") sets.push(opts?.timeoutMs ?? -1);
+      return "";
+    };
+    await createAgentDeckAdapter({ exec: roomy, sleep: noSleep, now: () => 0 }).launch(launchInput);
+    expect(sets).toEqual([60_000]);
   });
 
   it("a remove killed at its timeout is an error, even if it printed 'not found' first", async () => {

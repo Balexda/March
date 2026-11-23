@@ -62,14 +62,25 @@ describe("execCommand (real child processes)", () => {
       // The grandchild was recorded before the timeout fired.
       const pid = Number(readFileSync(pidFile, "utf8"));
       expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
-      // Killing the group took the grandchild too: poll until it is gone (ESRCH only; EPERM is alive).
+      // Killing the group took the grandchild too: poll until it has stopped.
+      // Gone (ESRCH) counts; so does a zombie on Linux, which kill(pid, 0) still
+      // reaches until its adoptive parent reaps it. EPERM is alive.
+      const zombie = () => {
+        try {
+          // /proc/<pid>/stat: "pid (comm) S ...": the state follows the last ")".
+          const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+          return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) === "Z";
+        } catch {
+          return false;
+        }
+      };
       const alive = () => {
         try {
           process.kill(pid, 0);
-          return true;
         } catch (e) {
           return (e as NodeJS.ErrnoException).code !== "ESRCH";
         }
+        return !zombie();
       };
       const deadline = Date.now() + 3_000;
       while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));

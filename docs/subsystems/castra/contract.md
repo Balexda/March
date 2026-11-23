@@ -31,7 +31,7 @@ Readiness states:
 
 | State | When |
 |-------|------|
-| `down` (`ready: false`) | Event-loop lag is over 2000 ms: the worst p99 of any 5-second window in the last minute (`event_loop_lag_ms`). A peak, not a whole-minute p99, because a frozen loop takes no samples while frozen, so a whole-minute p99 would hide repeated multi-second stalls. Requests are stalling. |
+| `down` (`ready: false`) | Event-loop lag is over 2000 ms: the worst p99 of the consecutive 5-second sample windows in the last minute, including the window in progress (`event_loop_lag_ms`). A peak, not a whole-minute p99, because a frozen loop takes no samples while frozen, so a whole-minute p99 would hide repeated multi-second stalls. Requests are stalling. |
 | `degraded` | At least one session is in its composer-refusal cooldown (listed in `refused_sessions`), or 3 or more sends failed in the last 5 minutes (`recent_send_failures`; a `not_found` send is not a failure). |
 | `ok` | Neither of the above. |
 
@@ -98,7 +98,13 @@ reported `session_id`. With an agent-deck that reports no id, Castra
 serializes launches per profile and group, takes the new session from a
 before/after list, and checks that its worktree belongs to the requested
 repository (same `git rev-parse --git-common-dir`). A worktree from another
-repository, or one that cannot be confirmed, is `409` `conflict`.
+repository, or one that cannot be confirmed, is `409` `conflict`. If an
+agent-deck that has reported ids launches without one (a downgrade), that
+launch ran unserialized with no before-list, so Castra fails it closed with
+`502` `agent_deck_error` rather than guess; later launches take the serialized
+path. After a launch, Castra enables session `auto-mode` only when that
+command's full timeout still fits in the launch budget; otherwise it skips it
+and logs a warning, and the launch still succeeds.
 
 Castra provisions the host steward's credential shims at serve startup.
 Each launch, including attachment to an existing worktree, passes an
@@ -133,7 +139,7 @@ Send behavior:
 
 - Sends to one session run one at a time, in arrival order. Sends to different sessions run concurrently.
 - When agent-deck refuses a send because the session's Claude composer is occupied or unreadable, the send fails with `composer_refused`. The message carries the last lines of the session's pane only when Castra captured nonempty pane text; if `session show` or `capture-pane` fails, the refusal is still returned, without the pane tail.
-- If that pane shows Claude Code's "Adding a new directory … Yes, add it" trust dialog for Castra's own steward directory (the steward root, `~/.march/steward` by default, or its `plugin` directory), Castra selects "Yes, add it", confirms it, and sends the prompt once more. A success then returns `202`. Castra never answers a trust dialog for any other directory; the message says the dialog was left for the operator. If the pane cannot be read after a key, or a tmux key fails, the outcome is `failed` with that detail, never `resolved`.
+- If that pane shows Claude Code's "Adding a new directory … Yes, add it" trust dialog for Castra's own steward directory (the steward root, `~/.march/steward` by default, or its `plugin` directory), Castra selects "Yes, add it", confirms it, and sends the prompt once more, but only when a whole send (45s) still fits in the send budget. A success then returns `202`. When less than 45s is left, Castra answers the dialog but does not resend: it returns `502` `composer_refused` with a message saying the dialog was answered and the prompt was not delivered, and starts no cooldown, so the caller's next send goes through. Castra never answers a trust dialog for any other directory; the message says the dialog was left for the operator. If the pane cannot be read after a key, or a tmux key fails, the outcome is `failed` with that detail, never `resolved`.
 - After a refusal, further sends to that session fail at once with `composer_refused`, without running agent-deck, for 5 minutes or until the session's pane changes. The message names the cooldown and repeats the last refusal. A refusal recorded during a recovery sweep keeps its cooldown even when the sweep answers the dialog.
 
 ### `GET /v1/sessions/:id/output`
@@ -201,8 +207,11 @@ timeout (180s / 45s / 120s) still fits in what is left; otherwise Castra
 answers `502` `agent_deck_error` ("… budget ran out before …, so it was not
 started") without starting it. A caller that stops waiting cancels nothing: a
 step already started runs to completion or its own timeout. A client timeout
-means the outcome is unknown, and the caller re-reads `GET /v1/sessions`
-before retrying.
+means the outcome is unknown. For a launch or a remove, the caller can
+re-read `GET /v1/sessions` to see whether the session exists before retrying.
+A timed-out send stays unknown: the session list looks the same whether or not
+the prompt was typed, so it cannot decide whether to resend; only a separate
+sign of delivery (such as the steward acting on the prompt) can.
 
 ## Error Modes
 

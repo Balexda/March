@@ -294,7 +294,7 @@ and prompt bodies stay out of metrics (they belong in spans/logs).
 | `march.castra.uptime` (observable gauge, `s`) | `march_castra_uptime_seconds` | Process uptime of the Castra service |
 | `march.castra.sends` (counter, no unit) | `march_castra_sends_total` | Session sends by `{profile, outcome}`; `outcome` = `delivered`/`refused` (agent-deck ran and refused: composer occupied)/`refused_cached` (failed fast in the refusal cooldown, agent-deck not run)/`not_found`/`failed` |
 | `march.castra.refused_sessions` (observable gauge, no unit) | `march_castra_refused_sessions` | Sessions currently in their composer-refusal cooldown (5 min, or until the pane changes) |
-| `march.castra.event_loop_lag_ms` (observable gauge, no unit) | `march_castra_event_loop_lag_ms` | Event-loop lag p99 over the last minute (`perf_hooks.monitorEventLoopDelay`), in ms. Over 2000 makes `/readyz` `down` |
+| `march.castra.event_loop_lag_ms` (observable gauge, no unit) | `march_castra_event_loop_lag_ms` | The worst 5-second event-loop lag p99 in the last minute (`perf_hooks.monitorEventLoopDelay`), in ms; a peak, not a whole-minute p99. Over 2000 makes `/readyz` `down` |
 | `march.castra.trust_dialogs` (counter, no unit) | `march_castra_trust_dialogs_total` | Claude directory-trust dialogs Castra found, by `{profile, outcome, trigger}`; `outcome` = `resolved`/`not_owned`/`failed`, `trigger` = `send_refusal`/`recover` |
 
 **Readiness, not liveness.** On 2026-11-22 two stewards sat on Claude Code's

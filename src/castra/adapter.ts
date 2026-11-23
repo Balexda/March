@@ -291,15 +291,15 @@ export async function deriveWorktreeBranchResult(
 }
 
 /** Run `git <args>` capturing stdout. Rejects on non-zero exit / spawn failure / timeout. */
-async function runGit(exec: ExecFn, args: readonly string[]): Promise<string> {
-  const out = await exec("git", args, { capture: true, timeoutMs: GIT_TIMEOUT_MS });
+async function runGit(exec: ExecFn, args: readonly string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<string> {
+  const out = await exec("git", args, { capture: true, timeoutMs });
   return typeof out === "string" ? out : "";
 }
 
 /** The repository's shared git dir, absolute; undefined when git cannot say. */
-async function gitCommonDir(exec: ExecFn, dir: string): Promise<string | undefined> {
+async function gitCommonDir(exec: ExecFn, dir: string, timeoutMs: number = GIT_TIMEOUT_MS): Promise<string | undefined> {
   try {
-    const out = (await runGit(exec, ["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    const out = (await runGit(exec, ["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"], timeoutMs)).trim();
     return out ? path.resolve(out) : undefined;
   } catch {
     return undefined;
@@ -546,12 +546,18 @@ async function readSession(
 
 /** The session id and worktree `agent-deck launch --json` reported; empty when it printed none. */
 export function parseLaunchOutput(stdout: string): { sessionId?: string; worktreePath?: string } {
-  // The JSON object is the last thing printed; anything before it is chatter.
-  const start = stdout.indexOf("{");
-  if (start < 0) return {};
-  const parsed = parseJsonMaybe(stdout.slice(start).trim());
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-  const record = parsed as Record<string, unknown>;
+  // The JSON object is the last thing printed; anything before it is chatter,
+  // which may itself hold braces. Take the earliest brace from which the rest
+  // of stdout parses as one object: that is the trailing launch object.
+  let record: Record<string, unknown> | undefined;
+  for (let start = stdout.indexOf("{"); start >= 0; start = stdout.indexOf("{", start + 1)) {
+    const parsed = parseJsonMaybe(stdout.slice(start).trim());
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      record = parsed as Record<string, unknown>;
+      break;
+    }
+  }
+  if (!record) return {};
   const sessionId = firstString(record, ["session_id", "id"]);
   const worktreePath = firstString(record, ["worktree_path"]);
   return { ...(sessionId ? { sessionId } : {}), ...(worktreePath ? { worktreePath } : {}) };
@@ -713,7 +719,7 @@ export interface AgentDeckAdapterOptions {
   /** Sleep between trust-dialog keys; tests inject an instant one. */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly trustDialog?: ResolveTrustDialogOptions;
-  /** Clock for operation budgets; tests inject one. */
+  /** Monotonic clock for operation budgets (default `performance.now`); tests inject one. */
   readonly now?: () => number;
   /** Operation budgets (default budgets.ts); tests shrink them. */
   readonly budgets?: { readonly launchMs?: number; readonly sendMs?: number };
@@ -724,7 +730,8 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
   const tracker = options.sendTracker ?? new SendTracker();
   const logger = options.logger;
   const sleep = options.sleep ?? defaultSleep;
-  const now = options.now ?? Date.now;
+  // Budgets are durations: a wall-clock step (NTP, suspend) must not stretch or shrink them.
+  const now = options.now ?? (() => performance.now());
   const launchBudgetMs = options.budgets?.launchMs ?? CASTRA_LAUNCH_BUDGET_MS;
   const sendBudgetMs = options.budgets?.sendMs ?? CASTRA_SEND_BUDGET_MS;
   // Sends to one session run one at a time so two prompts are never typed into
@@ -879,6 +886,17 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       : "";
   }
 
+  /**
+   * agent-deck finished and refused the send. A send Castra killed (timeout or
+   * output limit) is never a refusal, whatever it printed first: its prompt may
+   * have been typed, so it must not be retried or cooled down as refused.
+   */
+  function completedRefusal(err: unknown): boolean {
+    const e = err as AgentDeckExecError;
+    if (e?.timedOut || e?.outputLimit) return false;
+    return looksLikeComposerRefusal(e?.stderr ?? "");
+  }
+
   /** A non-refusal send failure, mapped exactly as before. */
   function sendFailure(sessionId: string, err: unknown): Error {
     if (reportedMissing(err)) {
@@ -903,7 +921,6 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
     const { profile, sessionId } = input;
     const snap = await paneSnapshot(profile, sessionId, dl);
     let resolution: TrustDialogResolution | undefined;
-    let retrySkipped = false;
     if (snap.tmuxSession && parseTrustDialog(snap.pane)) {
       resolution = await handleTrustDialog(input, snap.tmuxSession, dl);
       if (resolution.outcome === "resolved" && allowRetry) {
@@ -919,12 +936,17 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
             tracker.clearRefusal(profile, sessionId);
             return;
           } catch (err) {
-            const stderr = (err as AgentDeckExecError).stderr ?? "";
-            if (!looksLikeComposerRefusal(stderr)) throw sendFailure(sessionId, err);
+            if (!completedRefusal(err)) throw sendFailure(sessionId, err);
             return handleRefusal(input, (err as Error).message, false, dl);
           }
         }
-        retrySkipped = true;
+        // The dialog is gone, so the session is not refusing: say the prompt
+        // was not delivered, but start no cooldown against the answered pane.
+        throw new CastraComposerRefusedError(
+          `agent-deck session send failed: ${message}\n` +
+            `Castra answered the directory-trust dialog for ${resolution.dir}, but too little of the send budget ` +
+            `was left to send the prompt again, so it was not delivered. No cooldown was started; the next send will go through.`,
+        );
       }
     }
     const tail = paneTail(snap.pane, REFUSED_SEND_PANE_LINES);
@@ -935,10 +957,7 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
     const full =
       `agent-deck session send failed: ${message}` +
       (tail ? `\nSteward pane at refusal (last lines):\n${tail}` : "") +
-      trustNote(resolution, !allowRetry) +
-      (retrySkipped
-        ? `\nCastra answered the directory-trust dialog for ${resolution!.dir}, but too little of the send budget was left to retry; the next send will go through.`
-        : "");
+      trustNote(resolution, !allowRetry);
     tracker.recordRefusal({
       profile,
       sessionId,
@@ -978,8 +997,7 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       );
     } catch (err) {
       if (err instanceof CastraAgentDeckError) throw err;
-      const stderr = (err as AgentDeckExecError).stderr ?? "";
-      if (!looksLikeComposerRefusal(stderr)) throw sendFailure(sessionId, err);
+      if (!completedRefusal(err)) throw sendFailure(sessionId, err);
       return handleRefusal(input, (err as Error).message, true, dl);
     }
   }
@@ -1044,10 +1062,19 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       const { launched, fromDiff } = launchReportsId
         ? await (async () => {
             const reported = await runLaunch();
-            // An agent-deck that stopped reporting ids (a downgrade) falls back to
-            // an unserialized diff for this one launch; the repo check below still runs.
-            if (!reported.sessionId) launchReportsId = false;
-            return identified(reported, reported.sessionId ? undefined : new Set());
+            if (!reported.sessionId) {
+              // An agent-deck that stopped reporting ids (a downgrade). This launch
+              // ran unserialized with no before-list, so a list diff could hand it
+              // another launch's session: fail closed. Later launches take the
+              // serialized list-diff path.
+              launchReportsId = false;
+              throw new CastraAgentDeckError(
+                "agent-deck launch reported no session id, though this agent-deck reported ids before; " +
+                  "the new session cannot be told apart from concurrent launches, so Castra will not guess. " +
+                  "Retry the launch; agent-deck may have left an unclaimed session in the group.",
+              );
+            }
+            return identified(reported);
           })()
         : await launchQueue.run(key, async () => {
             const before = await listSnapshot(exec, input.profile, dl.cap(AGENT_DECK_TIMEOUT_MS, "listing sessions before the launch"));
@@ -1089,7 +1116,13 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       // A session picked from a list diff must also belong to the requested
       // repository: a same-named branch in another repo has the same dir name.
       if (fromDiff) {
-        const [mine, theirs] = await Promise.all([gitCommonDir(exec, input.repoPath), gitCommonDir(exec, worktreePath)]);
+        // Both reads run at once, so one cap bounds the pair to what is left of
+        // the launch budget; one that cannot finish leaves the pick unverified.
+        const gitMs = dl.cap(GIT_TIMEOUT_MS, "checking the launched session's repository");
+        const [mine, theirs] = await Promise.all([
+          gitCommonDir(exec, input.repoPath, gitMs),
+          gitCommonDir(exec, worktreePath, gitMs),
+        ]);
         if (!mine || !theirs || mine !== theirs) {
           throw new CastraConflictError(
             `agent-deck session "${launched.sessionId}" at "${worktreePath}" ` +
@@ -1114,15 +1147,27 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       // Stewards need session-level auto-mode or the agent-deck classifier
       // pauses tool calls mid-workflow. Best-effort — a functional session
       // shouldn't fail the whole launch over this.
-      try {
-        await runAgentDeck(
-          exec,
-          buildSessionSetArgs(input.profile, launched.sessionId, "auto-mode", "true"),
-          false,
-          dl.cap(AGENT_DECK_TIMEOUT_MS, "setting auto-mode"),
+      // Like any mutation it starts only with its full timeout, never a cut one
+      // that could kill it part-way; when that no longer fits it is skipped.
+      if (dl.fits(AGENT_DECK_TIMEOUT_MS)) {
+        try {
+          await runAgentDeck(
+            exec,
+            buildSessionSetArgs(input.profile, launched.sessionId, "auto-mode", "true"),
+            false,
+            AGENT_DECK_TIMEOUT_MS,
+          );
+        } catch (err) {
+          logger?.warn(
+            { profile: input.profile, sessionId: launched.sessionId, err: (err as Error).message },
+            "castra: could not enable auto-mode on the launched session",
+          );
+        }
+      } else {
+        logger?.warn(
+          { profile: input.profile, sessionId: launched.sessionId },
+          "castra: launch budget too low to enable auto-mode on the launched session; skipped",
         );
-      } catch {
-        // Swallow — see comment above.
       }
 
       const branch = launched.branch || input.branch;
