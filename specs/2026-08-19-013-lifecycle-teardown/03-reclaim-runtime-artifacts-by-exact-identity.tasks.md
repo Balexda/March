@@ -9,9 +9,9 @@
 
 **Goal**: Reclaim the requested session's compute and workspace artifacts and surface unverified cleanup.
 
-**Justification**: Verified removal and the workspace isolation checks can ship together while retaining US1's admission behavior. [March vision](../../docs/vision.md) · [Operating philosophy](../../docs/operating-philosophy.md)
+**Justification**: Verified removal and the workspace isolation checks can ship together while retaining US1's admission behavior. Removal relies on US2's fail-closed archive (FR-007a), so this slice merges after US2. The legate consumer fix ships here so the new retryable outcomes are retried rather than dropped. [March vision](../../docs/vision.md) · [Operating philosophy](../../docs/operating-philosophy.md)
 
-**Addresses**: FR-006, FR-012, FR-012a, FR-012b, FR-013, FR-014 (workspace safety), FR-015, FR-016. AS 3.1–3.5.
+**Addresses**: FR-006, FR-012, FR-012a, FR-012b, FR-013, FR-014 (workspace safety), FR-014b, FR-015, FR-016. AS 3.1–3.5.
 
 ### Tasks
 
@@ -23,6 +23,14 @@
   - Spawn, legate, and other supported ephemeral session kinds use kind-agnostic cleanup with a container name derived from the session identity. The recorded container ID remains the log source. Shared compose service containers are excluded.
   - After the archive succeeds, remove only the resolved container. Verified absence succeeds, including an already absent container. A removal error other than a missing container, a deadline breach, or an unverified post-condition yields a failed container step and leaves teardown retryable.
   - Dispatch rollback retains best-effort removal. New failures surface in teardown tracing. Update the affected subsystem contracts with the verified removal behavior.
+
+- [ ] **Keep unfinished teardown in legate loop state**
+
+  Apply FR-014b so a failed or deferred step from this slice is retried instead of dropped. Cover the consumer at the legate client boundary.
+
+  _Acceptance criteria_
+  - `broodTeardown` returns `ok` only for a `torndown` response. A `tearing-down` or other non-terminal `2xx` response returns a distinct deferred result.
+  - The `cleanup`, `ghost-cleanup`, and `relaunch` callers keep the session in loop state until `ok`, so a later tick retries teardown.
 
 - [ ] **Preserve exact steward and workspace cleanup**
 
@@ -81,7 +89,7 @@ _None — no specification debt was recorded._
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
 | US1 Request A Safe Teardown | depends on | Both slices preserve request admission. S2 replaces US1's explicit-kill rejection when the distinct modes are ready. |
-| US2 Preserve Teardown Evidence | depends on | Only S2 depends on US2: it requires US2's fail-closed archive behavior at the stop/remove handoff, so S2 must not merge before US2. S1 does not depend on US2. US2 owns archive contents and sink handling. |
-| US4 Make Teardown Idempotent And Retryable | depended upon by | US3 preserves local failure outcomes and workspace deferral. US4 owns generalized retry behavior and Legate consumer handling. |
+| US2 Preserve Teardown Evidence | depends on | Both slices remove compute only after the archive succeeds, so both require US2's fail-closed archive (FR-007a, SD-010) and merge after US2. S2 also relies on it at the stop/remove handoff. US2 owns archive contents and sink handling. |
+| US4 Make Teardown Idempotent And Retryable | depended upon by | US3 preserves local failure outcomes and workspace deferral. S1 ships the FR-014b legate consumer fix because its new retryable outcomes need it. US4 owns the remaining generalized retry and idempotency behavior. |
 
 FR-020a's service-wide deadline work and US5's full outcome instrumentation remain outside the slices. New compute call-outs must have enforced deadlines.
