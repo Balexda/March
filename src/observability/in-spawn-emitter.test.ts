@@ -66,7 +66,7 @@ describe("in-spawn-emitter helpers", () => {
     ]);
     expect(wrapped[0]).toBe("sh");
     expect(wrapped[1]).toBe("-c");
-    expect(wrapped[2]).toContain("( claude -p hi )");
+    expect(wrapped[2]).toContain("sh -c 'claude -p hi' &");
     expect(wrapped[2]).toContain(`node ${IN_SPAWN_EMITTER_PATH}`);
     expect(wrapped[2]).toContain("exit $__rc");
   });

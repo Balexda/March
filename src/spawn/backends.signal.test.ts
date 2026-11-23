@@ -3,25 +3,61 @@
  *
  * Runs the real git-scaffolded spawn entrypoint under `sh` with a fake agent on
  * PATH, to prove that Brood's graceful stop (`docker kill --signal SIGTERM` on
- * the container's main process, which is this `sh`) reaches the agent.
+ * the container's main process, which is this `sh`) reaches the agent, both
+ * bare and inside the telemetry wrapper.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { wrapEntrypointWithEmitter } from "../observability/in-spawn-emitter.js";
 import { claudeCodeBackend, CONTAINER_WORKDIR, PATCH_SENTINEL } from "./backends.js";
 
 const hasSetsid = spawnSync("sh", ["-c", "command -v setsid"]).status === 0;
-const tmpDirs: string[] = [];
+interface Started {
+  readonly root: string;
+  readonly child: ChildProcess;
+  readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+const started: Started[] = [];
 
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+// A regression could leave the wrapper and the agent's separate process group
+// running, so kill both and wait for the wrapper before removing the files.
+afterEach(async () => {
+  for (const { root, child, exited } of started.splice(0)) {
+    for (const name of ["agent.pid", "grandchild.pid"]) {
+      const pid = readPid(path.join(root, name));
+      if (pid === undefined) continue;
+      const pgid = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim());
+      if (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid) signal(-pgid);
+      signal(pid);
+    }
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exited;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
-function setup(agentScript: string) {
+function signal(target: number): void {
+  try {
+    process.kill(target, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
+function readPid(file: string): number | undefined {
+  try {
+    const pid = Number(fs.readFileSync(file, "utf8").trim());
+    return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function setup(agentScript: string, options: { readonly telemetry?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-signal-"));
-  tmpDirs.push(root);
   const workspace = path.join(root, "workspace");
   const bin = path.join(root, "bin");
   fs.mkdirSync(workspace);
@@ -29,8 +65,10 @@ function setup(agentScript: string) {
   fs.writeFileSync(path.join(workspace, "README.md"), "base\n");
   fs.writeFileSync(path.join(root, "prompt.txt"), "do the thing\n");
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\n${agentScript}\n`, { mode: 0o755 });
-  const [shell, flag, script] = claudeCodeBackend.buildEntrypoint(path.join(root, "prompt.txt"));
-  const child = spawn(shell, [flag, script.replace(`cd ${CONTAINER_WORKDIR}`, `cd '${workspace}'`)], {
+  const [, , script] = claudeCodeBackend.buildEntrypoint(path.join(root, "prompt.txt"));
+  const scaffold = ["sh", "-c", script.replace(`cd ${CONTAINER_WORKDIR}`, `cd '${workspace}'`)];
+  const [shell, flag, command] = options.telemetry ? wrapEntrypointWithEmitter(scaffold) : scaffold;
+  const child = spawn(shell, [flag, command], {
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -46,6 +84,7 @@ function setup(agentScript: string) {
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.on("close", (code, signal) => resolve({ code, signal }));
   });
+  started.push({ root, child, exited });
   return { root, child, exited, stdout: () => stdout };
 }
 
@@ -83,13 +122,16 @@ async function goneWithin(pid: number, timeoutMs = 5_000): Promise<boolean> {
   return true;
 }
 
-describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", () => {
+describe.skipIf(!hasSetsid).each([
+  { label: "bare", telemetry: false },
+  { label: "telemetry-wrapped", telemetry: true },
+])("git-scaffolded spawn entrypoint signal handling ($label)", ({ telemetry }) => {
   it("forwards SIGTERM to the agent and exits without emitting a patch", async () => {
     const { root, child, exited, stdout } = setup([
       `trap 'echo agent-got-term; exit 0' TERM`,
       `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
       `while :; do sleep 0.05; done`,
-    ].join("\n"));
+    ].join("\n"), { telemetry });
     const agentPid = await waitForPid(path.join(root, "agent.pid"));
 
     child.kill("SIGTERM");
@@ -106,7 +148,7 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
       `sleep 30 & echo $! > "$MARCH_TEST_ROOT/grandchild.tmp" && mv "$MARCH_TEST_ROOT/grandchild.tmp" "$MARCH_TEST_ROOT/grandchild.pid"`,
       `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
       `wait`,
-    ].join("\n"));
+    ].join("\n"), { telemetry });
     const agentPid = await waitForPid(path.join(root, "agent.pid"));
     const grandchildPid = await waitForPid(path.join(root, "grandchild.pid"));
 
@@ -122,7 +164,7 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
     const { exited, stdout } = setup([
       `echo change > change.txt`,
       `git add change.txt && git commit -q -m change`,
-    ].join("\n"));
+    ].join("\n"), { telemetry });
 
     expect(await exited).toEqual({ code: 0, signal: null });
     expect(stdout()).toContain(`${PATCH_SENTINEL}:`);
