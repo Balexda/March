@@ -44,7 +44,13 @@ function shellQuote(value: string): string {
  */
 function composeGitScaffoldedEntrypoint(
   agentCommand: string,
+  prelude?: string,
 ): readonly string[] {
+  // The agent is exec'd so it keeps the setsid pid and leads its own group:
+  // a stop that lands before the exec ends the inner shell (default TERM
+  // handling, still a stop), and one that lands after reaches the agent.
+  // There is no window where an intermediate shell can swallow it.
+  const agentScript = `${prelude ? `${prelude} && ` : ""}exec ${agentCommand}`;
   const script = [
     `cd ${CONTAINER_WORKDIR}`,
     `git init -q`,
@@ -57,9 +63,9 @@ function composeGitScaffoldedEntrypoint(
     // on to its children. Run the agent in its own session/process group and
     // forward SIGTERM/SIGINT to that whole group so Brood's graceful stop
     // (`docker kill --signal SIGTERM`) reaches the agent. `kill -s TERM -- -PGID`
-    // is the form dash (the bookworm image `sh`) accepts. dash does not exec the
-    // command, so the inner `sh` catches TERM with a no-op (children still get
-    // default handling) and exits with the agent's own status.
+    // is the form dash (the bookworm image `sh`) accepts. The inner `sh` runs
+    // any prelude, then execs the agent, so the agent's own status is the
+    // group leader's exit status.
     `__march_agent=`,
     `__march_term=`,
     `__march_sigs=0`,
@@ -67,7 +73,7 @@ function composeGitScaffoldedEntrypoint(
     `# is retried (up to ~5s) until the group can be signaled or the pid is gone.`,
     `__march_stop_agent() { __march_try=0; while ! kill -s TERM -- "-$__march_agent" 2>/dev/null; do __march_try=$((__march_try + 1)); if [ "$__march_try" -ge 100 ] || ! kill -0 "$__march_agent" 2>/dev/null; then return 0; fi; sleep 0.05; done; }`,
     `trap '__march_term=1; __march_sigs=$((__march_sigs + 1)); [ -n "$__march_agent" ] && __march_stop_agent' TERM INT`,
-    `setsid sh -c ${shellQuote(`trap : TERM; ${agentCommand}`)} &`,
+    `setsid sh -c ${shellQuote(agentScript)} &`,
     `__march_agent=$!`,
     `if [ -n "$__march_term" ]; then __march_stop_agent; fi`,
     `# A trapped signal interrupts wait with 128+n, so a wait during which the`,
@@ -156,11 +162,12 @@ export const codexBackend: SpawnBackend = {
     },
   ],
   buildEntrypoint(promptFilePath: string): readonly string[] {
-    // Keep the credential-mount `cp` prelude; the git scaffold wraps the whole
-    // agent command. `--skip-git-repo-check` is now harmless (the scaffold
-    // creates a real repo) but left in so the codex command is unchanged.
+    // The credential-mount `cp` prelude runs before the scaffold execs codex.
+    // `--skip-git-repo-check` is now harmless (the scaffold creates a real
+    // repo) but left in so the codex command is unchanged.
     return composeGitScaffoldedEntrypoint(
-      `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${promptFilePath}`,
+      `codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${promptFilePath}`,
+      `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home`,
     );
   },
   allowedEgressHosts: ["chatgpt.com"],

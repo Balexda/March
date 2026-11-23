@@ -107,7 +107,7 @@ describe("spawn backends", () => {
     // The credential-mount `cp` prelude and the codex exec command are both
     // preserved verbatim inside the git scaffold.
     expect(entrypoint[2]).toContain(
-      `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < /march/prompt.txt`,
+      `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && exec codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < /march/prompt.txt`,
     );
     expect(entrypoint[2]).not.toContain("gemini");
     expect(entrypoint[2]).not.toContain("--sandbox=docker");
