@@ -548,11 +548,21 @@ function forceRemoveContainer(containerId: string): void {
   }
 }
 
+/**
+ * Bounds the synchronous `docker logs` read. Brood's `GET /sessions/:id/logs`
+ * calls this from inside a Fastify handler, so an unresponsive daemon or
+ * socket would otherwise block the event loop indefinitely and hang every
+ * other Brood endpoint. A timeout kill surfaces through the `catch` below as
+ * the contracted upstream read failure.
+ */
+const DOCKER_LOGS_TIMEOUT_MS = 15_000;
+
 export function readSpawnContainerLogs(containerId: string): string {
   try {
     const stdout = execFileSync("docker", ["logs", containerId], {
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+      timeout: DOCKER_LOGS_TIMEOUT_MS,
     });
     return Buffer.isBuffer(stdout) ? stdout.toString("utf-8") : stdout;
   } catch (err) {
