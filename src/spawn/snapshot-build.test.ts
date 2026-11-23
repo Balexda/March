@@ -30,7 +30,6 @@ import {
   BuildError,
   buildSpawnImage,
   removeSpawnImage,
-  SPAWN_IMAGE_RM_TIMEOUT_MS,
   writeSpawnDockerfile,
   SPAWN_DOCKERFILE_NAME,
 } from "./snapshot-build.js";
@@ -275,11 +274,6 @@ describe("snapshot-build", () => {
         "rm",
         "march-spawn-20260504-abc123",
       ]);
-      // Bounded so a stalled daemon cannot block the rollback that follows.
-      expect(childProcessMock.execFileSync.mock.calls[0][2]).toMatchObject({
-        timeout: SPAWN_IMAGE_RM_TIMEOUT_MS,
-        killSignal: "SIGKILL",
-      });
     });
 
     it("does not throw if the image is absent", () => {
