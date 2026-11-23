@@ -240,6 +240,127 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     });
   });
 
+  it("rejects extractionResult writes once teardown has begun", async () => {
+    const { app } = await buildApp();
+    const extractionResult = {
+      spawnId: "s-closing", backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    };
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "s-closing", kind: "spawn" } });
+    await app.inject({ method: "PATCH", url: "/sessions/s-closing", payload: { status: "tearing-down" } });
+
+    const patched = await app.inject({
+      method: "PATCH", url: "/sessions/s-closing", payload: { extractionResult },
+    });
+    const registered = await app.inject({
+      method: "POST", url: "/sessions", payload: { id: "s-closing", kind: "spawn", extractionResult },
+    });
+
+    expect(patched.statusCode).toBe(409);
+    expect(registered.statusCode).toBe(409);
+    expect((await app.inject({ method: "GET", url: "/sessions/s-closing" })).json())
+      .not.toHaveProperty("extractionResult");
+  });
+
+  it("keeps extractionResult closed after teardown even when status later changes", async () => {
+    const { app, store } = await buildApp();
+    const extractionResult = {
+      spawnId: "s-done", backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    };
+    for (const id of ["s-done", "s-admitted", "s-open"]) {
+      await app.inject({ method: "POST", url: "/sessions", payload: { id, kind: "spawn", status: "stopped" } });
+    }
+    store.beginTeardown("s-done", [], "{}\n", {});
+    store.completeTeardown("s-done", [], "2026-06-13T00:00:00.000Z");
+    store.beginTeardown("s-admitted", [], "{}\n", {});
+    for (const id of ["s-done", "s-admitted"]) {
+      const moved = await app.inject({ method: "PATCH", url: `/sessions/${id}`, payload: { status: "stopped" } });
+      expect(moved.statusCode, id).toBe(200);
+      expect(moved.json<{ status: string }>().status, id).toBe("stopped");
+      expect((await app.inject({
+        method: "PATCH", url: `/sessions/${id}`, payload: { extractionResult: { ...extractionResult, spawnId: id } },
+      })).statusCode, id).toBe(409);
+      expect((await app.inject({
+        method: "POST", url: "/sessions", payload: { id, kind: "spawn", extractionResult: { ...extractionResult, spawnId: id } },
+      })).statusCode, id).toBe(409);
+    }
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/s-open", payload: { extractionResult: { ...extractionResult, spawnId: "s-open" } },
+    })).statusCode).toBe(200);
+  });
+
+  it("keeps an admitted steward's extractionResult closed after a status-only PATCH", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "sp", kind: "spawn", status: "stopped" } });
+    for (const id of ["st-admitted", "st-other"]) {
+      await app.inject({ method: "POST", url: "/sessions", payload: { id, kind: "steward", parentId: "sp", status: "running" } });
+    }
+    store.beginTeardown("sp", ["st-admitted"], "{}\n", {});
+    const moved = await app.inject({ method: "PATCH", url: "/sessions/st-admitted", payload: { status: "stopped" } });
+    expect(moved.statusCode).toBe(200);
+    expect(moved.json<{ status: string }>().status).toBe("stopped");
+    const extraction = (spawnId: string) => ({
+      spawnId, backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    });
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/st-admitted", payload: { extractionResult: extraction("st-admitted") },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: "POST", url: "/sessions",
+      payload: { id: "st-admitted", kind: "steward", extractionResult: extraction("st-admitted") },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/st-other", payload: { status: "stopped", extractionResult: extraction("st-other") },
+    })).statusCode).toBe(200);
+  });
+
+  it("logs a nonterminal teardown even when every cleanup step succeeded", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const logger = pino({ level: "warn" }, { write: (line) => logs.push(JSON.parse(line)) });
+    const { app } = await buildApp(async (id) => ({
+      id,
+      status: "tearing-down",
+      steps: (["archive", "container", "steward", "worktree", "branch"] as const)
+        .map((step) => ({ step, outcome: "ok" as const })),
+      warnings: ["archive finalization failed: disk full"],
+    }), undefined, { logger: logger as unknown as FastifyInstance["log"] });
+    const response = await app.inject({ method: "POST", url: "/sessions/spawn-1/teardown" });
+    expect(response.statusCode).toBe(200);
+    const incomplete = logs.filter((entry) => entry.msg === "brood teardown cleanup incomplete");
+    expect(incomplete).toEqual([expect.objectContaining({
+      session_id: "spawn-1",
+      teardown_status: "tearing-down",
+      teardown_steps: [],
+      teardown_warnings: ["archive finalization failed: disk full"],
+    })]);
+  });
+
+  it("rejects a PATCH that clears torndownAt and keeps the first timestamp", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "s-done", kind: "spawn", status: "stopped" } });
+    store.beginTeardown("s-done", [], "{}\n", {});
+    store.completeTeardown("s-done", [], "2026-06-13T00:00:00.000Z");
+    for (const torndownAt of [null, ""]) {
+      expect((await app.inject({
+        method: "PATCH", url: "/sessions/s-done", payload: { status: "stopped", torndownAt },
+      })).statusCode).toBe(400);
+    }
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/s-done", payload: { torndownAt: "2027-01-01T00:00:00.000Z" },
+    })).statusCode).toBe(200);
+    expect(store.get("s-done")?.torndownAt).toBe("2026-06-13T00:00:00.000Z");
+    expect(store.get("s-done")?.status).toBe("torndown");
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/s-done",
+      payload: { status: "stopped", extractionResult: {
+        spawnId: "s-done", backend: "claude-code", status: "failed",
+        failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+      } },
+    })).statusCode).toBe(409);
+  });
+
   it("GET /sessions/:id/extraction-readiness exposes failed and missing states as not PR-ready", async () => {
     const { app } = await buildApp();
     await app.inject({
@@ -917,7 +1038,11 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       expect(result.steps.map(({ step }) => step))
         .toEqual(["archive", "container", "steward", "worktree", "branch"]);
 
-      const [parent, ...children] = spans;
+      const [parent, ...allChildren] = spans;
+      // Archive finalization and the registry transition add their own
+      // non-step child spans; the cleanup steps must still appear in order.
+      const stepSpanNames = new Set(result.steps.map(({ step }) => `brood.teardown.${step}`));
+      const children = allChildren.filter((child) => stepSpanNames.has(child.name));
       expect(parent.name).toBe("brood.teardown");
       expect(parent.spanContext().traceId).toBe(traceId);
       expect(parent.parentSpanContext?.spanId).toBe(spanId);

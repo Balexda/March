@@ -63,9 +63,11 @@ The `brood.teardown` span follows the inbound W3C trace parent when supplied.
 Cleanup steps appear as ordered events and child spans with their outcome and
 diagnostic detail when available. Step details are capped at 500 characters.
 A failed or deferred step marks the teardown span errored. Brood writes a
-structured request warning for incomplete cleanup, including on HTTP 200.
-The warning includes the primary session ID as `session_id`, the
-`teardown_status`, and the failed and deferred `teardown_steps`.
+structured request warning for incomplete cleanup, including on HTTP 200, and
+for any nonterminal result even when every cleanup step succeeded (for example,
+a journal finalization failure). The warning includes the primary session ID as
+`session_id`, the `teardown_status`, the failed and deferred `teardown_steps`,
+and, for a nonterminal result, the capped `teardown_warnings`.
 
 The Brood dashboard counts teardown results with `march.brood.teardowns`
 and tracks seconds with `march.brood.teardown.duration`. Both instruments
@@ -73,6 +75,60 @@ use only the `kind`, `outcome`, and `profile` dimensions. Outcomes are
 `success` for a torn-down session, `partial` for a retryable container or
 Git cleanup failure, and `error` when archiving or verifying steward
 removal failed. HTTP rejections are tracked by the HTTP request instruments.
+
+Brood archives teardown evidence under `~/.march/brood/archive/<primary-id>/`.
+Requests for a spawn and its steward share one archive and run serially within
+the Brood service. Brood saves the original registry group when it records
+admission, so an archive failure can be retried after restart. It publishes
+`record.json` once and preserves existing snapshots byte for byte, including
+legacy snapshots. Rejected and already-complete requests leave the archive
+untouched.
+
+Each attempt adds a numbered `started` entry to `teardown.ndjson` after the
+snapshot, then a `finished` entry with the response's status, steps, and warnings.
+Brood publishes the journal atomically with its prior entries intact. A start
+without a finish identifies an interrupted attempt. Available container logs go
+to `container.log`. Validated registry extraction results go to
+`artifacts/extraction-result.json`. Successful patches go to
+`artifacts/spawn.patch` with SHA-256 verification before writing and after reading
+back the saved bytes. The archive excludes worktree files.
+
+Unavailable sources produce warnings and preserve previously archived evidence.
+A source digest mismatch also preserves any earlier verified patch and its
+matching extraction result. A read-back mismatch fails the archive step.
+An archive write failure before removal yields a failed archive step and blocks
+all removal. A journal finalization failure leaves the row `tearing-down` and
+returns the completed step outcomes with a warning. If Brood stops after
+journaling `torndown` and before updating the registry, the next teardown request
+completes the registry transition without repeating removal, even after a
+status-only PATCH. Recovery applies only while the row keeps the container,
+repository, worktree, and branch the attempt reclaimed; a re-registered identity
+gets a full teardown instead. A spawn teardown removes and verifies every live
+steward under the spawn before it reclaims the shared worktree and branch; if
+any steward removal fails, or a steward registers under the spawn (or a removed
+steward's registration changes) while earlier steps are in progress, Git cleanup
+is deferred and the row stays retryable. Ordinary completion and recovery apply
+the same rule: a steward counts as removed only while its registration still
+matches what was removed. This includes a standalone steward that is its own
+primary: if its registration changes after removal, the result is
+`tearing-down` and a retry removes the new session (recovery likewise falls
+through to a full teardown). The
+journal's `finished` entry lists only the stewards whose removal that attempt
+verified.
+The journal records each verified steward's registration identity (row, parent,
+and Castra session and profile). Recovery marks only stewards whose current
+registration still matches that identity; a steward re-registered under the
+same spawn stays live and the result is `tearing-down` with a warning naming it
+until a retry removes it, and a steward that moved to another spawn keeps its
+status under its new owner. Completion only marks stewards that still belong to
+the primary and keeps any existing `torndownAt`. Once a teardown is admitted
+(for the primary or any steward it admitted), or the row carries `torndownAt`,
+`PATCH /sessions/:id` and re-registration reject an `extractionResult` with 409,
+even if a later lifecycle PATCH changes `status`, so the archived result is
+final. `torndownAt` is write-once: a PATCH may set it but a `null` or empty
+value is rejected with 400 and an existing timestamp is kept. Archive failures
+end errored spans, following the [March vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
 
 The orphan PR lookup used by `POST /admin/sweep` and periodic reconciliation
 requests a Tessera app/read token scoped to the repository at the profile's
