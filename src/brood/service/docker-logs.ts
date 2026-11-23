@@ -17,8 +17,9 @@ export interface DockerLogsOptions {
  * Read `docker logs <containerId>` without blocking the event loop.
  *
  * Docker replays a non-TTY container's stderr on its own stderr, so both
- * streams are captured and kept in arrival order — an error-only container
- * must not read back as an empty successful log. A non-zero exit, spawn
+ * streams are captured, decoded per stream, and kept in arrival order — an
+ * error-only container must not read back as an empty successful log. A
+ * non-zero exit, spawn
  * failure, timeout, or oversized output rejects, which the logs reader treats
  * as a live-source failure (archive fallback, else the contracted 502).
  */
@@ -31,8 +32,8 @@ export function readContainerLogsAsync(
   const maxBytes = opts.maxBytes ?? DOCKER_LOGS_MAX_BYTES;
 
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
+    const chunks: string[] = [];
+    const stderrChunks: string[] = [];
     let bytes = 0;
     let failure: string | undefined;
     let settled = false;
@@ -51,9 +52,14 @@ export function readContainerLogsAsync(
       timeoutMs,
     );
 
-    const collect = (isStderr: boolean) => (chunk: Buffer) => {
+    // Each stream gets its own UTF-8 decoder, so a multibyte character split
+    // across stdout chunks survives an interleaved stderr chunk; only decoded
+    // text is merged.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    const collect = (isStderr: boolean) => (chunk: string) => {
       if (failure) return;
-      bytes += chunk.length;
+      bytes += Buffer.byteLength(chunk, "utf8");
       if (bytes > maxBytes) {
         fail(`output exceeded ${maxBytes} bytes`);
         return;
@@ -79,14 +85,14 @@ export function readContainerLogsAsync(
     child.on("close", (code, signal) => {
       if (failure) return settle(failure);
       if (code !== 0) {
-        const tail = Buffer.concat(stderrChunks).toString("utf-8").trimEnd();
+        const tail = stderrChunks.join("").trimEnd();
         return settle(
           tail.length > 0
             ? `exit ${code ?? signal}:\n${tail.slice(-2000)}`
             : `exit ${code ?? signal}`,
         );
       }
-      settle(undefined, Buffer.concat(chunks).toString("utf-8"));
+      settle(undefined, chunks.join(""));
     });
   });
 }

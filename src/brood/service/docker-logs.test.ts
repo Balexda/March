@@ -38,6 +38,16 @@ describe("readContainerLogsAsync", () => {
     await expect(readContainerLogsAsync("c1", { bin })).resolves.toBe("out\nerr\n");
   });
 
+  it("keeps a stdout multibyte character split around a stderr chunk", async () => {
+    // stdout: E2 82 | stderr: "X" | stdout: AC  ->  "€" must survive intact.
+    const bin = fakeDocker(
+      'printf "\\342\\202"; sleep 0.1; printf "X" >&2; sleep 0.1; printf "\\254"',
+    );
+    const out = await readContainerLogsAsync("c1", { bin });
+    expect(out).toBe("X\u20ac");
+    expect(out).not.toContain("\ufffd");
+  });
+
   it("rejects with docker's stderr on a non-zero exit", async () => {
     const bin = fakeDocker('printf "No such container: c1\\n" >&2; exit 1');
     await expect(readContainerLogsAsync("c1", { bin })).rejects.toThrow(
