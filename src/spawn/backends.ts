@@ -57,16 +57,19 @@ function composeGitScaffoldedEntrypoint(
     // on to its children. Run the agent in its own session/process group and
     // forward SIGTERM/SIGINT to that whole group so Brood's graceful stop
     // (`docker kill --signal SIGTERM`) reaches the agent. `kill -s TERM -- -PGID`
-    // is the form dash (the bookworm image `sh`) accepts.
+    // is the form dash (the bookworm image `sh`) accepts. dash does not exec the
+    // command, so the inner `sh` catches TERM with a no-op (children still get
+    // default handling) and exits with the agent's own status.
     `__march_agent=`,
     `__march_term=`,
     `trap '__march_term=1; [ -n "$__march_agent" ] && kill -s TERM -- "-$__march_agent" 2>/dev/null' TERM INT`,
-    `setsid sh -c ${shellQuote(agentCommand)} &`,
+    `setsid sh -c ${shellQuote(`trap : TERM; ${agentCommand}`)} &`,
     `__march_agent=$!`,
     `if [ -n "$__march_term" ]; then kill -s TERM -- "-$__march_agent" 2>/dev/null; fi`,
     `__march_rc=0; wait "$__march_agent" || __march_rc=$?`,
-    `# A trapped signal interrupts wait early; keep waiting for the real exit.`,
-    `while kill -0 "$__march_agent" 2>/dev/null; do wait "$__march_agent"; __march_rc=$?; done`,
+    `# A trapped signal interrupts wait with 128+n; wait again (a reaped child's`,
+    `# status stays retrievable) until it repeats or the pid is unknown (127).`,
+    `while [ -n "$__march_term" ] && [ "$__march_rc" -gt 128 ]; do __march_next=0; wait "$__march_agent" || __march_next=$?; if [ "$__march_next" -eq 127 ] || [ "$__march_next" -eq "$__march_rc" ]; then break; fi; __march_rc=$__march_next; done`,
     `trap - TERM INT`,
     `if [ -n "$__march_term" ] && [ "$__march_rc" -eq 0 ]; then exit 143; fi`,
     `if [ "$__march_rc" -ne 0 ]; then exit "$__march_rc"; fi`,

@@ -89,7 +89,10 @@ function shellQuote(value: string): string {
  * The wrapping `sh` is the container's main process, so Docker delivers stop
  * signals only to it. It runs the original command as a child `sh` and forwards
  * SIGTERM (for SIGTERM or SIGINT) to that child, whose own trap stops the
- * agent. It keeps waiting until the child exits, then emits the span.
+ * agent. A trapped signal interrupts `wait` with 128+n even when the child
+ * then exits differently, so after a stop it waits again until the status
+ * repeats (or the pid is no longer a child), then emits the span with the
+ * child's real status.
  */
 export function wrapEntrypointWithEmitter(
   argv: readonly string[],
@@ -104,7 +107,7 @@ export function wrapEntrypointWithEmitter(
     `sh -c ${shellQuote(cmd)} & __march_child=$!`,
     `if [ -n "$__march_stop" ]; then kill -s TERM "$__march_child" 2>/dev/null; fi`,
     `__rc=0; wait "$__march_child" || __rc=$?`,
-    `while kill -0 "$__march_child" 2>/dev/null; do wait "$__march_child"; __rc=$?; done`,
+    `while [ -n "$__march_stop" ] && [ "$__rc" -gt 128 ]; do __next=0; wait "$__march_child" || __next=$?; if [ "$__next" -eq 127 ] || [ "$__next" -eq "$__rc" ]; then break; fi; __rc=$__next; done`,
     `trap - TERM INT`,
     `node ${IN_SPAWN_EMITTER_PATH} "$__ms" "$__rc" 2>/dev/null || true`,
     `exit $__rc`,

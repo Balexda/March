@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { wrapEntrypointWithEmitter } from "../observability/in-spawn-emitter.js";
+import { IN_SPAWN_EMITTER_PATH, wrapEntrypointWithEmitter } from "../observability/in-spawn-emitter.js";
 import { claudeCodeBackend, CONTAINER_WORKDIR, PATCH_SENTINEL } from "./backends.js";
 
 const hasSetsid = spawnSync("sh", ["-c", "command -v setsid"]).status === 0;
@@ -47,6 +47,14 @@ function signal(target: number): void {
   }
 }
 
+function emittedStatus(root: string): string | undefined {
+  try {
+    return fs.readFileSync(path.join(root, "emitted-rc"), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 function readPid(file: string): number | undefined {
   try {
     const pid = Number(fs.readFileSync(file, "utf8").trim());
@@ -67,7 +75,12 @@ function setup(agentScript: string, options: { readonly telemetry?: boolean } = 
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\n${agentScript}\n`, { mode: 0o755 });
   const [, , script] = claudeCodeBackend.buildEntrypoint(path.join(root, "prompt.txt"));
   const scaffold = ["sh", "-c", script.replace(`cd ${CONTAINER_WORKDIR}`, `cd '${workspace}'`)];
-  const [shell, flag, command] = options.telemetry ? wrapEntrypointWithEmitter(scaffold) : scaffold;
+  const [shell, flag, wrapped] = options.telemetry ? wrapEntrypointWithEmitter(scaffold) : scaffold;
+  // Record the status the wrapper hands to the span emitter instead of running it.
+  const command = wrapped.replace(
+    `node ${IN_SPAWN_EMITTER_PATH}`,
+    `sh -c 'printf %s "$2" > "$MARCH_TEST_ROOT/emitted-rc"' emit`,
+  );
   const child = spawn(shell, [flag, command], {
     env: {
       ...process.env,
@@ -141,6 +154,21 @@ describe.skipIf(!hasSetsid).each([
     expect(stdout()).toContain("agent-got-term");
     expect(stdout()).not.toContain(PATCH_SENTINEL);
     expect(await goneWithin(agentPid)).toBe(true);
+    expect(emittedStatus(root)).toBe(telemetry ? "143" : undefined);
+  }, 20_000);
+
+  it("keeps the agent's own exit status after a stop", async () => {
+    const { root, child, exited } = setup([
+      `trap 'exit 42' TERM`,
+      `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"), { telemetry });
+    await waitForPid(path.join(root, "agent.pid"));
+
+    child.kill("SIGTERM");
+
+    expect(await exited).toEqual({ code: 42, signal: null });
+    expect(emittedStatus(root)).toBe(telemetry ? "42" : undefined);
   }, 20_000);
 
   it("stops an agent with default SIGTERM handling and its descendants", async () => {
@@ -161,12 +189,13 @@ describe.skipIf(!hasSetsid).each([
   }, 20_000);
 
   it("still emits the patch when the agent finishes normally", async () => {
-    const { exited, stdout } = setup([
+    const { root, exited, stdout } = setup([
       `echo change > change.txt`,
       `git add change.txt && git commit -q -m change`,
     ].join("\n"), { telemetry });
 
     expect(await exited).toEqual({ code: 0, signal: null });
     expect(stdout()).toContain(`${PATCH_SENTINEL}:`);
+    expect(emittedStatus(root)).toBe(telemetry ? "0" : undefined);
   }, 20_000);
 });
