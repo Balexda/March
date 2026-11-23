@@ -197,17 +197,14 @@ async function runTeardown(
   const parent = target.kind === "steward" && target.parentId ? store.get(target.parentId) : undefined;
   const spawn = target.kind === "spawn" ? target : parent?.kind === "spawn" ? parent : undefined;
   const stewards = spawn ? store.list({ parentId: spawn.id, kind: "steward" }) : [];
-  // Prefer a live steward so a spawn-addressed retry never treats the group as
-  // complete while a later steward still runs.
+  const liveStewards = stewards.filter((row) => row.status !== "torndown");
+  // Keep the addressed steward for evidence. Cleanup covers every live member
+  // of the group, regardless of which row the request addresses.
   const steward =
     target.kind === "steward"
       ? target
-      : stewards.find((candidate) => candidate.status !== "torndown") ?? stewards[0];
-  // Every steward sharing the spawn's worktree must be verified gone before Git
-  // cleanup or a terminal result; the selected steward leads the list.
-  const groupStewards = steward
-    ? [steward, ...stewards.filter((row) => row.id !== steward.id && row.status !== "torndown")]
-    : [];
+      : liveStewards[0] ?? stewards[0];
+  const groupStewards = spawn ? liveStewards : steward ? [steward] : [];
   const groupStewardIds = groupStewards.map((row) => row.id);
 
   // `primary` owns the worktree/branch/container; fall back to the target row.
@@ -231,7 +228,7 @@ async function runTeardown(
     },
   });
 
-  if (primary.status === "torndown" && (!steward || steward.status === "torndown")) {
+  if (primary.status === "torndown" && liveStewards.length === 0) {
     return finish("success");
   }
 

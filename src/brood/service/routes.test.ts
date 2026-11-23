@@ -19,9 +19,9 @@ import {
 } from "./container-observer.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { broodArchiveDir, SessionStore } from "./store.js";
-import type { StopComputeResult } from "./substrate.js";
+import type { StopComputeResult, TeardownSubstrate } from "./substrate.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
-import { BroodConflictError, BroodNotFoundError, teardownSession } from "./teardown.js";
+import { BroodConflictError, BroodNotFoundError, teardownSession, type TeardownDeps } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
 import type { LogReaderDeps } from "./logs.js";
 
@@ -968,6 +968,86 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(ok.json()).toEqual(okResult);
     expect((await app.inject({ method: "POST", url: "/sessions/missing/teardown", payload: {} })).statusCode).toBe(404);
     expect((await app.inject({ method: "POST", url: "/sessions/live/teardown", payload: {} })).statusCode).toBe(409);
+  });
+
+  it("retries group cleanup by a torn-down steward ID and preserves the original archive", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "brood-group-teardown-"));
+    const archiveDir = broodArchiveDir("spawn-1", homeDir);
+    const snapshotPath = path.join(archiveDir, "record.json");
+    const journalPath = path.join(archiveDir, "teardown.ndjson");
+    const removeCompute = vi.fn(async () => {}); // Substrate verified absence.
+    const removeWorkspace = vi.fn<TeardownSubstrate["removeWorkspace"]>(
+      () => ({ worktreeRemoved: true, branchDeleted: true }),
+    );
+    let worktreeExists = false;
+    const removeSteward = vi.fn<NonNullable<TeardownDeps["removeSteward"]>>()
+      .mockResolvedValueOnce({ outcome: "absent", removedIds: [] })
+      .mockResolvedValueOnce({ outcome: "failed", removedIds: [], detail: "Castra unavailable" })
+      .mockResolvedValueOnce({ outcome: "removed", removedIds: ["steward-2"] });
+    const { app, store } = await buildApp((id, request) => teardownSession(store, id, request, {
+      homeDir,
+      substrate: { removeCompute, removeWorkspace },
+      removeSteward,
+      pathExists: () => worktreeExists,
+    }));
+    const teardown = async (id: string) => {
+      const response = await app.inject({ method: "POST", url: `/sessions/${id}/teardown` });
+      expect(response.statusCode).toBe(200);
+      return response.json<TeardownResult>();
+    };
+    try {
+      store.register({
+        id: "spawn-1", kind: "spawn", status: "stopped",
+        repoPath: "/repo", worktreePath: "/wt/spawn-1", branch: "topic/spawn-1",
+      });
+      store.register({ id: "steward-1", kind: "steward", parentId: "spawn-1", status: "stopped" });
+      expect(await teardown("spawn-1")).toMatchObject({
+        status: "torndown",
+        steps: [
+          { step: "archive", outcome: "ok" },
+          { step: "container", outcome: "ok", detail: "absence verified" },
+          { step: "steward", outcome: "skipped", detail: "already gone" },
+          { step: "worktree", outcome: "skipped", detail: "already removed" },
+          { step: "branch", outcome: "ok" },
+        ],
+      });
+      expect(removeWorkspace.mock.calls).toEqual([["/repo", { branch: "topic/spawn-1" }]]);
+      const originalSnapshot = fs.readFileSync(snapshotPath, "utf8");
+
+      store.register({ id: "steward-2", kind: "steward", parentId: "spawn-1", status: "running" });
+      worktreeExists = true;
+      removeWorkspace.mockClear();
+      const failed = await teardown("steward-1");
+      expect(failed.status).toBe("tearing-down");
+      expect(failed.warnings).toContain("steward removal failed: Castra unavailable");
+      expect(failed.steps.slice(-2)).toEqual(["worktree", "branch"].map((step) => ({
+        step, outcome: "skipped", detail: "deferred: steward removal failed",
+      })));
+      expect(removeWorkspace).not.toHaveBeenCalled();
+      expect(store.get("steward-2")?.status).toBe("tearing-down");
+
+      expect(await teardown("steward-1")).toMatchObject({ id: "spawn-1", status: "torndown" });
+      expect(removeSteward.mock.calls.map(([input]) => input.sessionId)).toEqual([
+        "steward-1", "steward-2", "steward-2",
+      ]);
+      expect(removeWorkspace.mock.calls).toEqual([
+        ["/repo", { worktreePath: "/wt/spawn-1" }],
+        ["/repo", { branch: "topic/spawn-1" }],
+      ]);
+      expect(fs.readFileSync(snapshotPath, "utf8")).toBe(originalSnapshot);
+      const journal = fs.readFileSync(journalPath, "utf8");
+      for (const id of ["spawn-1", "steward-1", "steward-2"]) {
+        expect(store.get(id)?.status).toBe("torndown");
+        expect(await teardown(id)).toEqual({ id: "spawn-1", status: "torndown", steps: [], warnings: [] });
+      }
+      expect(fs.readFileSync(journalPath, "utf8")).toBe(journal);
+      expect(fs.readFileSync(snapshotPath, "utf8")).toBe(originalSnapshot);
+      expect(removeCompute).toHaveBeenCalledTimes(3);
+      expect(removeSteward).toHaveBeenCalledTimes(3);
+      expect(removeWorkspace).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
   });
 
   it.each(["graceful", "kill", "unsupported", "unverified"] as const)(

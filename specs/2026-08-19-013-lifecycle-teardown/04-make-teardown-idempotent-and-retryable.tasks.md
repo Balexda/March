@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Apply the completion rule to the entire session group**
+- [x] **Apply the completion rule to the entire session group**
 
   Use the same rule whether the request addresses a spawn or one of its stewards. Reuse existing absence handling, archive journaling, and registry completion.
 
