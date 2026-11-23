@@ -63,6 +63,7 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
@@ -70,25 +71,20 @@
             {
               "type": "value",
               "options": {
-                "-1": {
-                  "text": "NOT DEPLOYED",
-                  "color": "text",
-                  "index": 1
-                },
                 "0": {
                   "text": "DOWN",
                   "color": "red",
-                  "index": 2
+                  "index": 1
                 },
                 "1": {
                   "text": "DEGRADED",
                   "color": "orange",
-                  "index": 3
+                  "index": 2
                 },
                 "2": {
                   "text": "OK",
                   "color": "green",
-                  "index": 4
+                  "index": 3
                 }
               }
             }
@@ -100,14 +96,6 @@
               {
                 "color": "red",
                 "value": null
-              },
-              {
-                "color": "text",
-                "value": -1
-              },
-              {
-                "color": "red",
-                "value": 0
               },
               {
                 "color": "orange",
@@ -152,7 +140,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(max(march_stack_service_state{service=\"brood\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"brood\",state=\"degraded\"}) - max(march_stack_service_state{service=\"brood\",state=\"absent\"}))\nor\n((sum(increase(march_brood_heartbeat_total[5m])) > bool 0) * 2)",
+          "expr": "(max(march_stack_service_state{service=\"brood\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"brood\",state=\"degraded\"}))\nor\n((sum(increase(march_brood_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Brood",
           "range": true,
           "refId": "A"
@@ -166,7 +154,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Hatchery spawn service. DOWN when it cannot start agents: no GitHub credential (Tessera unconfigured and no fallback), Castra or docker unreachable, or 5+ spawns failed in a row. DEGRADED on 2+ spawn failures in a row. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
+      "description": "Hatchery spawn service. DOWN when it cannot start agents: no GitHub credential from Tessera (Tessera not running or cannot vend), Castra or docker unreachable, or 5+ spawns failed in a row. DEGRADED on 2+ spawn failures in a row. A GitHub credential means one vended by Tessera; an ambient token does not count. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -179,6 +167,7 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
@@ -186,25 +175,20 @@
             {
               "type": "value",
               "options": {
-                "-1": {
-                  "text": "NOT DEPLOYED",
-                  "color": "text",
-                  "index": 1
-                },
                 "0": {
                   "text": "DOWN",
                   "color": "red",
-                  "index": 2
+                  "index": 1
                 },
                 "1": {
                   "text": "DEGRADED",
                   "color": "orange",
-                  "index": 3
+                  "index": 2
                 },
                 "2": {
                   "text": "OK",
                   "color": "green",
-                  "index": 4
+                  "index": 3
                 }
               }
             }
@@ -216,14 +200,6 @@
               {
                 "color": "red",
                 "value": null
-              },
-              {
-                "color": "text",
-                "value": -1
-              },
-              {
-                "color": "red",
-                "value": 0
               },
               {
                 "color": "orange",
@@ -268,7 +244,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(max(march_stack_service_state{service=\"hatchery\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"hatchery\",state=\"degraded\"}) - max(march_stack_service_state{service=\"hatchery\",state=\"absent\"}))\nor\n((sum(increase(march_hatchery_heartbeat_total[5m])) > bool 0) * 2)",
+          "expr": "(max(march_stack_service_state{service=\"hatchery\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"hatchery\",state=\"degraded\"}))\nor\n((sum(increase(march_hatchery_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Hatchery",
           "range": true,
           "refId": "A"
@@ -295,6 +271,7 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
@@ -302,25 +279,20 @@
             {
               "type": "value",
               "options": {
-                "-1": {
-                  "text": "NOT DEPLOYED",
-                  "color": "text",
-                  "index": 1
-                },
                 "0": {
                   "text": "DOWN",
                   "color": "red",
-                  "index": 2
+                  "index": 1
                 },
                 "1": {
                   "text": "DEGRADED",
                   "color": "orange",
-                  "index": 3
+                  "index": 2
                 },
                 "2": {
                   "text": "OK",
                   "color": "green",
-                  "index": 4
+                  "index": 3
                 }
               }
             }
@@ -332,14 +304,6 @@
               {
                 "color": "red",
                 "value": null
-              },
-              {
-                "color": "text",
-                "value": -1
-              },
-              {
-                "color": "red",
-                "value": 0
               },
               {
                 "color": "orange",
@@ -384,7 +348,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(max(march_stack_service_state{service=\"herald\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"herald\",state=\"degraded\"}) - max(march_stack_service_state{service=\"herald\",state=\"absent\"}))\nor\n((sum(increase(march_herald_heartbeat_total[5m])) > bool 0) * 2)",
+          "expr": "(max(march_stack_service_state{service=\"herald\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"herald\",state=\"degraded\"}))\nor\n((sum(increase(march_herald_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Herald",
           "range": true,
           "refId": "A"
@@ -490,7 +454,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Castra interactive-sessions host. DOWN when it stops answering. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
+      "description": "Castra interactive-sessions host. DOWN when it does not answer within the probe timeout, or its event loop stalls for more than 2s (a blocked agent-deck call freezes every request); DEGRADED when sessions are refusing sends. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -503,6 +467,7 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
@@ -510,25 +475,20 @@
             {
               "type": "value",
               "options": {
-                "-1": {
-                  "text": "NOT DEPLOYED",
-                  "color": "text",
-                  "index": 1
-                },
                 "0": {
                   "text": "DOWN",
                   "color": "red",
-                  "index": 2
+                  "index": 1
                 },
                 "1": {
                   "text": "DEGRADED",
                   "color": "orange",
-                  "index": 3
+                  "index": 2
                 },
                 "2": {
                   "text": "OK",
                   "color": "green",
-                  "index": 4
+                  "index": 3
                 }
               }
             }
@@ -540,14 +500,6 @@
               {
                 "color": "red",
                 "value": null
-              },
-              {
-                "color": "text",
-                "value": -1
-              },
-              {
-                "color": "red",
-                "value": 0
               },
               {
                 "color": "orange",
@@ -592,7 +544,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(max(march_stack_service_state{service=\"castra\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"castra\",state=\"degraded\"}) - max(march_stack_service_state{service=\"castra\",state=\"absent\"}))\nor\n((sum(increase(march_castra_heartbeat_total[5m])) > bool 0) * 2)",
+          "expr": "(max(march_stack_service_state{service=\"castra\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"castra\",state=\"degraded\"}))\nor\n((max(march_castra_event_loop_lag_ms) < bool 2000) * 2)\nor\n((sum(increase(march_castra_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Castra",
           "range": true,
           "refId": "A"
@@ -606,7 +558,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Tessera credential service. NOT DEPLOYED when no Tessera runs and none is configured; services then use the GH_TOKEN migration fallback (see the Tessera client dashboard). DEGRADED when it answers but its GitHub provider is unconfigured or degraded. DOWN when it is configured but unreachable. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
+      "description": "Tessera credential service \u2014 the only source of GitHub credentials for the stack. DOWN when it is not running, or is running but its GitHub App provider cannot vend (unconfigured / degraded / invalid). While it is DOWN, nothing can spawn or act on GitHub. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. Tessera has no heartbeat, so no data reads DOWN. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -618,7 +570,8 @@
               "options": {
                 "match": "null",
                 "result": {
-                  "text": "NOT DEPLOYED",
+                  "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
@@ -626,44 +579,31 @@
             {
               "type": "value",
               "options": {
-                "-1": {
-                  "text": "NOT DEPLOYED",
-                  "color": "text",
-                  "index": 1
-                },
                 "0": {
                   "text": "DOWN",
                   "color": "red",
-                  "index": 2
+                  "index": 1
                 },
                 "1": {
                   "text": "DEGRADED",
                   "color": "orange",
-                  "index": 3
+                  "index": 2
                 },
                 "2": {
                   "text": "OK",
                   "color": "green",
-                  "index": 4
+                  "index": 3
                 }
               }
             }
           ],
-          "noValue": "NOT DEPLOYED",
+          "noValue": "DOWN",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "red",
                 "value": null
-              },
-              {
-                "color": "text",
-                "value": -1
-              },
-              {
-                "color": "red",
-                "value": 0
               },
               {
                 "color": "orange",
@@ -708,7 +648,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(max(march_stack_service_state{service=\"tessera\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"tessera\",state=\"degraded\"}) - max(march_stack_service_state{service=\"tessera\",state=\"absent\"}))",
+          "expr": "(max(march_stack_service_state{service=\"tessera\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"tessera\",state=\"degraded\"}))",
           "legendFormat": "Tessera",
           "range": true,
           "refId": "A"
