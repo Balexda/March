@@ -10,6 +10,7 @@ import {
   createSpawnWorktree,
   generateSpawnId,
   removeSpawnWorktree,
+  removeSpawnWorktreeExactAsync,
   spawnBranchName,
   spawnWorktreePath,
   WorktreeError,
@@ -291,6 +292,47 @@ describe("worktree", () => {
       const combined = captured.join("");
       expect(combined).toContain("incomplete rollback");
       expect(combined).toContain(userDir);
+    });
+  });
+
+  describe("removeSpawnWorktreeExactAsync", () => {
+    it("removes and verifies only the recorded checkout and branch", async () => {
+      const repoRoot = makeRepo();
+      const target = createSpawnWorktree(repoRoot);
+      const adjacent = createSpawnWorktree(repoRoot);
+
+      await expect(removeSpawnWorktreeExactAsync(repoRoot, target)).resolves.toEqual({
+        worktreeRemoved: true, branchDeleted: true,
+      });
+      await expect(removeSpawnWorktreeExactAsync(repoRoot, target)).resolves.toEqual({
+        worktreeRemoved: true, branchDeleted: true,
+      });
+      expect(fs.existsSync(target.worktreePath)).toBe(false);
+      expect(fs.existsSync(adjacent.worktreePath)).toBe(true);
+      const branches = execFileSync("git", ["branch", "--list", "march/spawn/*"], {
+        cwd: repoRoot, encoding: "utf8",
+      });
+      expect(branches.trim()).toBe(`+ ${adjacent.branch}`);
+    });
+
+    it("removes exact Git registration even when the directory has vanished", async () => {
+      const repoRoot = makeRepo();
+      const target = createSpawnWorktree(repoRoot);
+      fs.rmSync(target.worktreePath, { recursive: true });
+
+      await expect(removeSpawnWorktreeExactAsync(repoRoot, target)).resolves.toEqual({
+        worktreeRemoved: true, branchDeleted: true,
+      });
+    });
+
+    it("leaves the exact checkout intact when the operation is canceled", async () => {
+      const repoRoot = makeRepo();
+      const target = createSpawnWorktree(repoRoot);
+      const reason = new Error("deadline expired");
+
+      await expect(removeSpawnWorktreeExactAsync(repoRoot, target, AbortSignal.abort(reason)))
+        .rejects.toBe(reason);
+      expect(fs.existsSync(target.worktreePath)).toBe(true);
     });
   });
 });

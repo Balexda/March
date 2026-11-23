@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
 /**
  * Error thrown by worktree operations. Carries a human-readable message
@@ -258,6 +259,99 @@ function isGitLinkedWorktree(dir: string): boolean {
 export interface RemoveWorktreeResult {
   readonly worktreeRemoved: boolean;
   readonly branchDeleted: boolean;
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Reclaim and verify the exact workspace under one cancellable deadline. */
+export async function removeSpawnWorktreeExactAsync(
+  repoRoot: string,
+  target: { readonly worktreePath?: string; readonly branch?: string },
+  signal = AbortSignal.timeout(10_000),
+): Promise<RemoveWorktreeResult> {
+  const git = async (args: string[]): Promise<string> => {
+    signal.throwIfAborted();
+    const command = execFileAsync("git", args, {
+      cwd: repoRoot,
+      killSignal: "SIGKILL",
+      signal,
+    });
+    try {
+      return (await command).stdout;
+    } catch (error) {
+      const { child } = command;
+      // execFile reports abort as soon as it sends the signal. Keep the
+      // operation pending until Git exits so a retry cannot race that process.
+      if (signal.aborted && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      }
+      throw error;
+    }
+  };
+  const tryRemove = async (args: string[]): Promise<boolean> => {
+    try {
+      await git(args);
+      return true;
+    } catch (error) {
+      signal.throwIfAborted();
+      // A concurrent removal may have won. Verify the postcondition below.
+      if (typeof (error as { code?: unknown }).code !== "number") throw error;
+      return false;
+    }
+  };
+
+  let worktreeRemoved = true;
+  if (target.worktreePath) {
+    const exactPath = path.resolve(target.worktreePath);
+    const entry = `worktree ${exactPath}`;
+    const listWorktrees = async () => (await git(["worktree", "list", "--porcelain", "-z"])).split("\0");
+    const worktrees = await listWorktrees();
+    if (worktrees[0] === entry || path.resolve(repoRoot) === exactPath) {
+      worktreeRemoved = false;
+    } else {
+      const removedByGit = worktrees.includes(entry) &&
+        await tryRemove(["worktree", "remove", "--force", "--", exactPath]);
+      // Retain the exact-path fallback for linked directories Git cannot remove.
+      // The caller holds the teardown fence until any in-flight fs.rm settles.
+      if (!removedByGit && (await lstatIfPresent(path.join(exactPath, ".git")))?.isFile()) {
+        signal.throwIfAborted();
+        await fs.promises.rm(exactPath, { recursive: true, force: true });
+      }
+      worktreeRemoved = !(await listWorktrees()).includes(entry) && !await lstatIfPresent(exactPath);
+    }
+  }
+
+  let branchDeleted = true;
+  if (target.branch) {
+    const branch = target.branch;
+    const ref = `refs/heads/${branch}`;
+    const branchExists = async () => {
+      try {
+        await git(["show-ref", "--verify", "--quiet", ref]);
+        return true;
+      } catch (error) {
+        signal.throwIfAborted();
+        if ((error as { code?: number }).code === 1) return false;
+        throw error;
+      }
+    };
+    if (await branchExists()) {
+      await tryRemove(["branch", "-D", "--", branch]);
+      branchDeleted = !await branchExists();
+    }
+  }
+  signal.throwIfAborted();
+  return { worktreeRemoved, branchDeleted };
+}
+
+async function lstatIfPresent(filePath: string): Promise<fs.Stats | undefined> {
+  try {
+    return await fs.promises.lstat(filePath);
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
 }
 
 /**

@@ -39,7 +39,7 @@ import {
 const SLICE_ID_HEADER = "x-march-slice-id";
 
 export interface BuildServerOptions {
-  /** agent-deck adapter; defaults to the real execFileSync-backed one. */
+  /** agent-deck adapter; defaults to the real subprocess-backed one. */
   readonly adapter?: AgentDeckAdapter;
   /** Override the live tmux inventory reader in tests. */
   readonly interactiveInventory?: typeof listInteractiveSessions;
@@ -502,14 +502,15 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         "castra.prune_worktree": pruneWorktree ?? false,
         ...sliceAttr(sliceId),
       };
-      const result = withCastraSpan(
+      const result = await withCastraSpan(
         { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
-        (span) => {
+        async (span) => {
+          const removal = await adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
           request.log.info(
             { "castra.op": "remove", ...removeFields, ...traceLogFields(span) },
             "castra session removed",
           );
-          return adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
+          return removal;
         },
       );
       return { ok: true, removed: result.removed };

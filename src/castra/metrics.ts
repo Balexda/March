@@ -130,7 +130,7 @@ export interface CastraSpanContext {
 /**
  * Run a mutating operation inside a `castra.<op>` span. No-op (just runs `fn`)
  * when telemetry is disabled. Records the exception and marks the span errored
- * if `fn` throws, so failures surface in traces rather than vanishing.
+ * if `fn` throws or rejects, so failures surface in traces rather than vanishing.
  *
  * `fn` receives the span's `{ traceId, spanId }` (or `undefined` when telemetry
  * is off). The handler attaches them to its log line EXPLICITLY — this codebase
@@ -147,13 +147,20 @@ export function withCastraSpan<T>(
     rootName: `castra.${input.op}`,
     attributes: input.attributes,
   });
-  try {
-    const result = fn(dispatch.spanContext());
-    dispatch.end();
-    return result;
-  } catch (err) {
+  const recordFailure = (err: unknown): void => {
     dispatch.recordException(err);
     dispatch.end({ error: true });
+  };
+  try {
+    const result = fn(dispatch.spanContext());
+    if (result instanceof Promise) {
+      void result.then(() => dispatch.end(), recordFailure);
+    } else {
+      dispatch.end();
+    }
+    return result;
+  } catch (err) {
+    recordFailure(err);
     throw err;
   }
 }

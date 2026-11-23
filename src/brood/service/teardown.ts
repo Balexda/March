@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { recordBroodTeardown } from "../../observability/brood-metrics.js";
 import {
@@ -23,6 +23,12 @@ import {
   type TeardownResources,
 } from "./teardown-archive.js";
 import { broodArchiveDir } from "./store.js";
+import {
+  TEARDOWN_FINALIZATION_MS,
+  TEARDOWN_REQUEST_MS,
+  TeardownDeadlineError,
+  teardownCall,
+} from "./teardown-deadline.js";
 import {
   hostTeardownSubstrate,
   type ComputeTarget,
@@ -75,8 +81,8 @@ export interface TeardownDeps {
     profile?: string;
     worktreePath?: string;
     branch?: string;
-  }) => Promise<StewardRemovalResult>;
-  pathExists?: (p: string) => boolean;
+  }, signal?: AbortSignal) => Promise<StewardRemovalResult>;
+  pathExists?: (p: string) => boolean | Promise<boolean>;
   homeDir?: string;
   now?: () => string;
   /** Inbound W3C traceparent so the teardown span nests under the caller's trace. */
@@ -91,8 +97,8 @@ interface ResolvedDeps {
     profile?: string;
     worktreePath?: string;
     branch?: string;
-  }) => Promise<StewardRemovalResult>;
-  pathExists: (p: string) => boolean;
+  }, signal: AbortSignal) => Promise<StewardRemovalResult>;
+  pathExists: (p: string) => boolean | Promise<boolean>;
   homeDir?: string;
   now: () => string;
 }
@@ -114,16 +120,27 @@ async function defaultRemoveSteward(input: {
   profile?: string;
   worktreePath?: string;
   branch?: string;
-}): Promise<StewardRemovalResult> {
-  return removeStewardViaCastra(defaultStewardGateway(), input);
+}, signal: AbortSignal): Promise<StewardRemovalResult> {
+  return removeStewardViaCastra(defaultStewardGateway(), input, signal);
+}
+
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await fs.stat(file);
+    return true;
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw error;
+  }
 }
 
 function resolveDeps(deps: TeardownDeps): ResolvedDeps {
   return {
     substrate: deps.substrate ?? hostTeardownSubstrate,
-    readContainerLogs: deps.readContainerLogs ?? readContainerLogsAsync,
+    readContainerLogs: deps.readContainerLogs ?? ((id) => readContainerLogsAsync(id, { timeoutMs: 4_000 })),
     removeSteward: deps.removeSteward ?? defaultRemoveSteward,
-    pathExists: deps.pathExists ?? fs.existsSync,
+    pathExists: deps.pathExists ?? pathExists,
     homeDir: deps.homeDir,
     now: deps.now ?? (() => new Date().toISOString()),
   };
@@ -142,6 +159,7 @@ export async function teardownSession(
   request: TeardownRequest = {},
   deps: TeardownDeps = {},
 ): Promise<TeardownResult> {
+  const deadline = performance.now() + TEARDOWN_REQUEST_MS;
   // Serialize requests for the same archive, including requests by steward ID.
   // Re-resolve the key after each wait: a queued steward can be re-registered
   // under another spawn while it waits, and must then queue on that archive.
@@ -149,10 +167,22 @@ export async function teardownSession(
     const key = archiveKey(store, id, deps.homeDir);
     const previous = activeTeardowns.get(key);
     if (previous) {
-      await previous.catch(() => undefined);
+      try {
+        await teardownCall("teardown queue", deadline, () => previous.catch(() => undefined));
+      } catch (error) {
+        const primaryId = path.basename(archiveKey(store, id, deps.homeDir));
+        const span = startBroodSpan({ name: "brood.teardown", key: primaryId, traceparent: deps.traceparent });
+        const detail = message(error);
+        const step: TeardownStep = { step: "archive", outcome: "failed", detail };
+        endStepSpan(span.startChild("brood.teardown.archive"), step);
+        span.event("teardown.archive", { outcome: step.outcome, detail });
+        span.setAttributes({ "march.teardown.outcome": "error" });
+        span.end({ error: true });
+        return { id: primaryId, status: "tearing-down", steps: [step], warnings: [detail] };
+      }
       continue;
     }
-    const current = runTeardown(store, id, request, deps);
+    const current = runTeardown(store, id, request, deps, key, deadline);
     activeTeardowns.set(key, current);
     try {
       return await current;
@@ -175,6 +205,8 @@ async function runTeardown(
   id: string,
   request: TeardownRequest,
   deps: TeardownDeps,
+  key: string,
+  deadline: number,
 ): Promise<TeardownResult> {
   const d = resolveDeps(deps);
   const target = store.get(id);
@@ -232,24 +264,53 @@ async function runTeardown(
     return finish("success");
   }
 
+  function call<T>(
+    name: string,
+    budget: number,
+    operation: (signal: AbortSignal) => T | Promise<T>,
+    fence = true,
+  ): Promise<T> {
+    return teardownCall(name, Math.min(deadline - TEARDOWN_FINALIZATION_MS, performance.now() + budget),
+      operation, fence ? key : undefined);
+  }
+
   const dir = path.resolve(broodArchiveDir(primary.id, d.homeDir));
   let archive: TeardownArchive | undefined;
   let archiveError: unknown;
+  const pending = store.pendingTeardownCompletion(primary.id);
   try {
     if (path.dirname(dir) !== path.resolve(broodArchiveDir("", d.homeDir)) ||
         path.basename(dir) !== primary.id) {
       throw new Error("Invalid session identity for teardown archive");
     }
     archive = new TeardownArchive(dir);
+    if (pending !== undefined) {
+      const evidence = archive;
+      await call("archive read", 3_000, (signal) => evidence.load(signal));
+      const current = store.get(primary.id);
+      if (!current || !sameResources(teardownResources(primary), teardownResources(current))) {
+        throw new Error("primary registration changed during archive recovery; retry teardown");
+      }
+    }
   } catch (error) {
+    archive = undefined;
     archiveError = error;
+    if (pending !== undefined) {
+      const detail = message(error);
+      const step: TeardownStep = { step: "archive", outcome: "failed", detail };
+      steps.push(step);
+      warnings.push(`archive recovery failed: ${detail}`);
+      endStepSpan(span.startChild("brood.teardown.archive"), step);
+      deferSteps(["container", "steward", "worktree", "branch"], "archive recovery failed");
+      return finish("error");
+    }
   }
   const completion = archive?.completion;
   const recoveredStewards = completion ? unchangedStewardIds(completion.stewards ?? []) : [];
   // A standalone steward is its own primary: recover it only while its
   // registration still matches the removed session; otherwise tear down anew.
   const primaryUnchanged = primary.kind !== "steward" || recoveredStewards.includes(primary.id);
-  if (completion && completion.attempt === store.pendingTeardownCompletion(primary.id) &&
+  if (completion && completion.attempt === pending &&
       sameResources(completion.resources, teardownResources(primary)) && primaryUnchanged) {
     // A crash after the terminal journal write can leave one or both rows
     // behind, possibly followed by a status-only PATCH. Finish the registry
@@ -313,7 +374,9 @@ async function runTeardown(
   let stopped: StopComputeResult | undefined;
   try {
     if (!archive) throw archiveError;
-    attempt = archive.start(snapshot, request, d.now());
+    const evidence = archive;
+    if (pending === undefined) await call("archive read", 3_000, (signal) => evidence.load(signal));
+    attempt = await call("archive start", 3_000, (signal) => evidence.start(snapshot, request, d.now(), signal));
     if (shouldStop) {
       const stopStep = await stopCompute();
       steps.push(stopStep);
@@ -322,15 +385,30 @@ async function runTeardown(
         return finalize("error");
       }
     }
-    await archiveTeardownEvidence(
-      dir,
-      primary,
-      d.readContainerLogs,
-      warnings,
-      // Read the result after the async log read so a result committed before
-      // teardown began is archived; later result writes are rejected.
-      () => store.get(primary.id) ?? primary,
-    );
+    let logs: string | undefined;
+    if (primary.containerId) {
+      const containerId = primary.containerId;
+      const logSpan = span.startChild("brood.teardown.archive.logs");
+      try {
+        logs = await call("container logs", 4_000, () => d.readContainerLogs(containerId), false);
+        logSpan.end();
+      } catch (error) {
+        const detail = message(error);
+        warnings.push(`container logs unavailable: ${detail}`);
+        logSpan.setAttributes({ "march.teardown.detail": detail });
+        logSpan.end({ error: true });
+      }
+    } else if (primary.kind === "spawn") {
+      warnings.push("container logs unavailable: no tracked container ID");
+    }
+    const evidenceWarnings: string[] = [];
+    const current = store.get(primary.id) ?? primary;
+    try {
+      await call("archive evidence write", 3_000, (signal) =>
+        archiveTeardownEvidence(dir, primary, logs, evidenceWarnings, current, signal));
+    } finally {
+      warnings.push(...evidenceWarnings);
+    }
     steps.push({ step: "archive", outcome: "ok" });
   } catch (err) {
     steps.push({ step: "archive", outcome: "failed", detail: message(err) });
@@ -353,8 +431,10 @@ async function runTeardown(
     try {
       const compute = resolveComputeTarget(primary);
       if (compute) {
-        if (stopped) await d.substrate.removeCompute(compute, stopped);
-        else await d.substrate.removeCompute(compute);
+        await call("container removal", 6_000, (signal) => {
+          requireCurrentPrimary();
+          return d.substrate.removeCompute(compute, stopped, signal);
+        });
         steps.push({ step: "container", outcome: "ok", detail: "absence verified" });
       } else {
         steps.push({ step: "container", outcome: "skipped" });
@@ -374,7 +454,12 @@ async function runTeardown(
     });
     if (groupStewards.length > 0) {
       const outcomes: TeardownStep[] = [];
-      for (const row of groupStewards) outcomes.push(await removeOneSteward(row));
+      const stewardDeadline = Math.min(deadline - TEARDOWN_FINALIZATION_MS, performance.now() + 8_000);
+      for (const row of groupStewards) {
+        const outcome = await removeOneSteward(row, stewardDeadline);
+        outcomes.push(outcome);
+        if (outcome.outcome === "failed" && performance.now() >= stewardDeadline - 1) break;
+      }
       const failedOutcomes = outcomes.filter((outcome) => outcome.outcome === "failed");
       if (failedOutcomes.length > 0) {
         stewardRemovalFailed = true;
@@ -401,8 +486,7 @@ async function runTeardown(
   }
 
   // A steward registered while earlier steps awaited shares the worktree but was
-  // never removed. Check membership here, synchronously adjacent to the Git
-  // steps (no await in between), and defer both rather than delete its workspace.
+  // never removed. Check membership before each Git mutation.
   const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(unchangedStewardIds(verifiedStewards));
   // Compute that may still be running (e.g. restarted after the stop check)
   // must keep its workspace; reclaim Git only after verified compute absence.
@@ -417,6 +501,7 @@ async function runTeardown(
       ? "deferred: steward registered or changed during teardown"
       : undefined;
 
+  let worktreeTimedOut = false;
   // 4. Worktree (re-check after steward; Castra may already have removed it).
   {
     const child = span.startChild("brood.teardown.worktree", {
@@ -428,18 +513,29 @@ async function runTeardown(
       steps.push({ step: "worktree", outcome: "skipped", detail: gitDeferral });
     } else if (primary.worktreePath && primary.repoPath) {
       try {
-        if (!d.pathExists(primary.worktreePath)) {
+        const worktreePath = primary.worktreePath;
+        const repoPath = primary.repoPath;
+        const result = await call("worktree removal", 4_000, async (signal) => {
+          const existed = await d.pathExists(worktreePath);
+          if (!existed && deps.pathExists) return undefined;
+          signal.throwIfAborted();
+          requireCurrentPrimary();
+          if (unremovedStewards(unchangedStewardIds(verifiedStewards))) {
+            throw new Error("worktree removal deferred: steward registered or changed during teardown");
+          }
+          const removal = await d.substrate.removeWorkspace(repoPath, { worktreePath }, signal);
+          return { ...removal, existed };
+        });
+        if (!result || (result.worktreeRemoved && !result.existed)) {
           steps.push({ step: "worktree", outcome: "skipped", detail: "already removed" });
         } else {
-          const res = d.substrate.removeWorkspace(primary.repoPath, {
-            worktreePath: primary.worktreePath,
-          });
-          if (!res.worktreeRemoved) {
+          if (!result.worktreeRemoved) {
             throw new Error(`worktree "${primary.worktreePath}" may still exist`);
           }
           steps.push({ step: "worktree", outcome: "ok" });
         }
       } catch (err) {
+        worktreeTimedOut = err instanceof TeardownDeadlineError;
         const detail = message(err);
         steps.push({ step: "worktree", outcome: "failed", detail });
         warnings.push(detail);
@@ -455,12 +551,19 @@ async function runTeardown(
     const child = span.startChild("brood.teardown.branch", {
       ...(primary.branch ? { "march.branch": primary.branch } : {}),
     });
-    if (gitDeferral) {
-      steps.push({ step: "branch", outcome: "skipped", detail: gitDeferral });
+    const branchDeferral = gitDeferral ??
+      (worktreeTimedOut ? "deferred: worktree removal timed out" :
+        unremovedStewards(unchangedStewardIds(verifiedStewards))
+          ? "deferred: steward registered or changed during teardown" : undefined);
+    if (branchDeferral) {
+      steps.push({ step: "branch", outcome: "skipped", detail: branchDeferral });
     } else if (primary.branch && primary.repoPath) {
       try {
-        const res = d.substrate.removeWorkspace(primary.repoPath, {
-          branch: primary.branch,
+        const repoPath = primary.repoPath;
+        const branch = primary.branch;
+        const res = await call("branch deletion", 4_000, (signal) => {
+          requireCurrentPrimary();
+          return d.substrate.removeWorkspace(repoPath, { branch }, signal);
         });
         if (!res.branchDeleted) {
           throw new Error(`branch "${primary.branch}" may still exist`);
@@ -494,7 +597,11 @@ async function runTeardown(
       if (!compute || !d.substrate.stopCompute) {
         throw new Error("Graceful stop is unsupported for this compute target");
       }
-      stopped = await d.substrate.stopCompute(compute);
+      const stop = d.substrate.stopCompute.bind(d.substrate);
+      stopped = await call("compute stop", 10_000, (signal) => {
+        requireCurrentPrimary();
+        return stop(compute, signal);
+      });
       step = stopped.outcome === "stopped"
         ? { step: "stop", outcome: "ok", detail: "graceful stop verified" }
         : {
@@ -517,18 +624,24 @@ async function runTeardown(
     }
   }
 
-  async function removeOneSteward(row: SessionRecord): Promise<TeardownStep> {
+  async function removeOneSteward(row: SessionRecord, stewardDeadline: number): Promise<TeardownStep> {
     const label = groupStewards.length > 1 ? ` (${row.id})` : "";
     try {
-      const res = await d.removeSteward({
-        sessionId: row.agentDeckSessionId ?? row.id,
-        profile: row.profile,
-        // The spawn (`primary`) carries the canonical worktree/branch the
-        // steward shares; fall back to the steward row. Worktree is the
-        // #155-safe match key Castra removal resolves the real id from (#304).
-        worktreePath: primary.worktreePath ?? row.worktreePath,
-        branch: primary.branch ?? row.branch,
-      });
+      const res = await teardownCall("steward removal", stewardDeadline, (signal) => {
+        requireCurrentPrimary();
+        if (!sameSteward(stewardIdentity(row), store.get(row.id))) {
+          throw new Error("steward registration changed during teardown; retry teardown");
+        }
+        return d.removeSteward({
+          sessionId: row.agentDeckSessionId ?? row.id,
+          profile: row.profile,
+          // The spawn (`primary`) carries the canonical worktree/branch the
+          // steward shares; fall back to the steward row. Worktree is the
+          // #155-safe match key Castra removal resolves the real id from (#304).
+          worktreePath: primary.worktreePath ?? row.worktreePath,
+          branch: primary.branch ?? row.branch,
+        }, signal);
+      }, key);
       if (res.outcome === "failed") {
         // Castra unreachable or the real session is still live — DEFER the
         // worktree/branch removal and leave the row retryable. Do NOT mark
@@ -595,27 +708,55 @@ async function runTeardown(
     }
   }
 
-  function finalize(outcome: "error" | "partial" | "success"): TeardownResult {
+  async function finalize(outcome: "error" | "partial" | "success"): Promise<TeardownResult> {
     if (archive && attempt !== undefined) {
       const at = d.now();
       const finalizationSpan = span.startChild("brood.teardown.archive.finish");
       try {
-        if (outcome === "success") store.prepareTeardownCompletion(primary.id, attempt);
-        archive.finish(attempt, {
-          id: primary.id,
-          status: outcome === "success" ? "torndown" : "tearing-down",
-          steps,
-          warnings,
-        }, at, { stewards: verifiedStewards, resources: teardownResources(primary) });
+        const evidence = archive;
+        const attemptNumber = attempt;
+        await teardownCall("archive finalization", Math.min(deadline, performance.now() + TEARDOWN_FINALIZATION_MS),
+          (signal) => evidence.finish(attemptNumber, {
+            id: primary.id,
+            status: outcome === "success" ? "torndown" : "tearing-down",
+            steps,
+            warnings,
+          }, at, { stewards: verifiedStewards, resources: teardownResources(primary) }, signal), key);
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
+        finalizationSpan.setAttributes({ "march.teardown.detail": message(error) });
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at, unchangedStewardIds(verifiedStewards));
+      if (outcome === "success") {
+        const verified = unchangedStewardIds(verifiedStewards);
+        if (!primaryStillMatches()) {
+          warnings.push("primary registration changed during teardown; retry teardown");
+          return finish("partial");
+        }
+        if (unremovedStewards(verified)) {
+          return finish("partial");
+        }
+        // Only acknowledge a terminal journal write that returned within the
+        // deadline. A late filesystem rename cannot authorize recovery.
+        store.prepareTeardownCompletion(primary.id, attempt);
+        completeRegistry(at, verified);
+      }
     }
     return finish(outcome);
+  }
+
+  function primaryStillMatches(): boolean {
+    const current = store.get(primary.id);
+    return current !== undefined && sameResources(teardownResources(primary), teardownResources(current)) &&
+      (primary.kind !== "steward" || sameSteward(stewardIdentity(primary), current));
+  }
+
+  function requireCurrentPrimary(): void {
+    if (!primaryStillMatches()) {
+      throw new Error("primary registration changed during teardown; retry teardown");
+    }
   }
 
   function finish(outcome: "error" | "partial" | "success"): TeardownResult {

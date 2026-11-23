@@ -70,6 +70,31 @@ prints the status, steps, and warnings in text mode or emits the service
 result with `--json`. Only `torndown` exits zero. A `tearing-down` result
 is rendered and exits non-zero even on HTTP 200.
 
+Teardown gives call-outs and admission queueing a combined 25-second budget
+under the default 30-second Brood client timeout. A request can spend that
+budget waiting for a concurrent teardown. Once admitted, cleanup call-outs
+reserve the final three seconds for journal finalization. Each call-out uses
+the smaller of its own limit and the remaining budget, including any lookup,
+verification, and retries within it.
+
+| Call-out | Maximum |
+| --- | ---: |
+| Archive journal read, snapshot and attempt start, evidence write, and attempt finish | 3s each |
+| Docker log read | 4s |
+| Graceful compute stop | 10s |
+| Compute removal | 6s |
+| Castra steward cleanup across the group | 8s |
+| Exact worktree removal and exact branch deletion | 4s each |
+
+A deadline reports the affected operation in the response and trace. A log
+read timeout warns and cleanup can continue. An archive sink timeout before
+removal blocks cleanup. A finalization timeout warns and leaves the group
+`tearing-down`. If archive I/O or a cleanup operation is still settling
+after a timeout, Brood defers a retry for the same archive until it settles.
+Cleanup then resumes with fresh verification. This follows March's clean-exit
+rule for autonomous components.
+[March vision](../../vision.md) · [Operating philosophy](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)
+
 The `brood.teardown` span follows the inbound W3C trace parent when supplied.
 Cleanup steps appear as ordered events and child spans with their outcome and
 diagnostic detail when available. Step details are capped at 500 characters.
@@ -96,7 +121,8 @@ legacy snapshots. Rejected and already-complete requests leave the archive
 untouched.
 
 Each attempt adds a numbered `started` entry to `teardown.ndjson` after the
-snapshot, then a `finished` entry with the response's status, steps, and warnings.
+snapshot, then a `finished` entry with the attempt's status, steps, and warnings.
+The response stays retryable if a registration changes during the final write.
 Brood publishes the journal atomically with its prior entries intact. A start
 without a finish identifies an interrupted attempt. Available container logs go
 to `container.log`. Validated registry extraction results go to
@@ -111,10 +137,13 @@ An archive write failure before removal yields a failed archive step and blocks
 all removal. After a graceful stop, this leaves the stopped container present
 so a retry can capture its evidence. A journal finalization failure leaves
 the row `tearing-down` and returns the completed step outcomes with a warning.
-If Brood stops after
-journaling `torndown` and before updating the registry, the next teardown request
-completes the registry transition without repeating removal, even after a
-status-only PATCH. Recovery applies only while the row keeps the container,
+If Brood stops after acknowledging a `torndown` journal write in the registry,
+the next teardown request completes the registry transition without repeating
+removal, even after a status-only PATCH. A retry verifies cleanup again when
+the write lacks that acknowledgment. Brood
+restores the unmatched start if a submitted rename finishes after the deadline
+and holds the archive fence until the filesystem work settles. Recovery applies
+only while the row keeps the container,
 repository, worktree, and branch the attempt reclaimed; a re-registered identity
 gets a full teardown instead. Requests by spawn ID or steward ID apply the
 same group completion rule. When the spawn and all its stewards are already

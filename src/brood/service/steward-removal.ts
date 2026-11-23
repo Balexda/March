@@ -104,20 +104,26 @@ function sessionMatchesSteward(
  * the verified-gone signal teardown needs before marking `torndown`. Any
  * unreachable-Castra / failed-removal path returns `failed` so teardown defers
  * rather than leaking.
+ * A teardown deadline stops subsequent requests. A request already in flight
+ * is allowed to settle so the teardown coordinator can fence retries.
  */
 export async function removeStewardViaCastra(
   gateway: CastraStewardGateway,
   steward: StewardIdentity,
+  signal?: AbortSignal,
 ): Promise<StewardRemovalResult> {
   const profile = steward.profile ?? "";
 
+  signal?.throwIfAborted();
   let sessions: CastraSession[];
   try {
     sessions = await gateway.listSessions(profile);
   } catch (err) {
+    signal?.throwIfAborted();
     // Cannot verify the steward's absence — DEFER rather than mark torndown.
     return { outcome: "failed", detail: `castra list failed: ${message(err)}`, removedIds: [] };
   }
+  signal?.throwIfAborted();
 
   const targets = sessions.filter((s) => sessionMatchesSteward(s, steward));
   if (targets.length === 0) {
@@ -127,6 +133,7 @@ export async function removeStewardViaCastra(
 
   const removedIds: string[] = [];
   for (const target of targets) {
+    signal?.throwIfAborted();
     try {
       const res = await gateway.removeSession({
         profile,
@@ -137,6 +144,7 @@ export async function removeStewardViaCastra(
       // (a benign race) — still verified gone for that id.
       if (res.removed) removedIds.push(target.sessionId);
     } catch (err) {
+      signal?.throwIfAborted();
       // A real removal failure: the session is still live. Defer + retry.
       return {
         outcome: "failed",
@@ -144,6 +152,7 @@ export async function removeStewardViaCastra(
         removedIds,
       };
     }
+    signal?.throwIfAborted();
   }
 
   return {

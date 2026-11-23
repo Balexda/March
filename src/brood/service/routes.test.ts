@@ -1011,7 +1011,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
           { step: "branch", outcome: "ok" },
         ],
       });
-      expect(removeWorkspace.mock.calls).toEqual([["/repo", { branch: "topic/spawn-1" }]]);
+      expect(removeWorkspace.mock.calls).toEqual([
+        ["/repo", { branch: "topic/spawn-1" }, expect.any(AbortSignal)],
+      ]);
       const originalSnapshot = fs.readFileSync(snapshotPath, "utf8");
 
       store.register({ id: "steward-2", kind: "steward", parentId: "spawn-1", status: "running" });
@@ -1031,8 +1033,8 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         "steward-1", "steward-2", "steward-2",
       ]);
       expect(removeWorkspace.mock.calls).toEqual([
-        ["/repo", { worktreePath: "/wt/spawn-1" }],
-        ["/repo", { branch: "topic/spawn-1" }],
+        ["/repo", { worktreePath: "/wt/spawn-1" }, expect.any(AbortSignal)],
+        ["/repo", { branch: "topic/spawn-1" }, expect.any(AbortSignal)],
       ]);
       expect(fs.readFileSync(snapshotPath, "utf8")).toBe(originalSnapshot);
       const journal = fs.readFileSync(journalPath, "utf8");
@@ -1046,6 +1048,149 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       expect(removeSteward).toHaveBeenCalledTimes(3);
       expect(removeWorkspace).toHaveBeenCalledTimes(2);
     } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { stalled: "archive read", budget: 3_000, step: "archive" },
+    { stalled: "archive start", budget: 3_000, step: "archive" },
+    { stalled: "compute stop", budget: 10_000, step: "stop" },
+    { stalled: "container logs", budget: 4_000, step: undefined },
+    { stalled: "archive evidence write", budget: 3_000, step: "archive" },
+    { stalled: "container removal", budget: 6_000, step: "container" },
+    { stalled: "steward removal", budget: 8_000, step: "steward" },
+    { stalled: "steward removal", budget: 1_000, step: "steward", priorElapsed: 21_000 },
+    { stalled: "worktree removal", budget: 4_000, step: "worktree" },
+    { stalled: "branch deletion", budget: 4_000, step: "branch" },
+    { stalled: "archive finalization", budget: 3_000, step: undefined },
+  ])("bounds $stalled to $budget ms at the HTTP boundary and permits a safe retry", async ({
+    stalled, budget, step, priorElapsed,
+  }) => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "brood-deadline-"));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let invocations = 0;
+    async function stall(label: string) {
+      if (label === stalled && ++invocations === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+    }
+    const archiveDir = broodArchiveDir("spawn-1", homeDir);
+    const journalPath = path.join(archiveDir, "teardown.ndjson");
+    const read = fs.promises.readFile;
+    const readSpy = vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) => {
+      if (file === journalPath) await stall("archive read");
+      return read(file, options);
+    });
+    const write = fs.promises.writeFile;
+    const writeSpy = vi.spyOn(fs.promises, "writeFile").mockImplementation(async (file, content, options) => {
+      if (typeof file === "string" && file.includes("/record.json.")) await stall("archive start");
+      if (typeof file === "string" && file.includes("/container.log.")) await stall("archive evidence write");
+      await write(file, content, options);
+    });
+    const rename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (temp, file) => {
+      if (file === journalPath && fs.existsSync(journalPath)) await stall("archive finalization");
+      await rename(temp, file);
+    });
+    const start = performance.now();
+    let elapsed = 0;
+    const clock = priorElapsed === undefined
+      ? undefined
+      : vi.spyOn(performance, "now").mockImplementation(() => start + elapsed);
+    const removeCompute = vi.fn(async () => {
+      await stall("container removal");
+      elapsed = priorElapsed ?? 0;
+    });
+    const { app, store } = await buildApp((id, request) => teardownSession(store, id, request, {
+      homeDir,
+      substrate: {
+        stopCompute: async () => {
+          await stall("compute stop");
+          return { outcome: "already-stopped", containerId: "recorded" };
+        },
+        removeCompute,
+        removeWorkspace: async (_repo, target) => {
+          await stall(target.worktreePath ? "worktree removal" : "branch deletion");
+          return { worktreeRemoved: true, branchDeleted: true };
+        },
+      },
+      removeSteward: async () => {
+        await stall("steward removal");
+        return { outcome: "absent", removedIds: [] };
+      },
+      readContainerLogs: async () => {
+        await stall("container logs");
+        return "container output";
+      },
+      pathExists: () => true,
+    }));
+    store.register({
+      id: "spawn-1", status: "stopped", kind: "spawn",
+      containerId: "recorded", repoPath: "/repo", worktreePath: "/wt/spawn-1", branch: "topic/spawn-1",
+    });
+    store.register({ id: "steward-1", kind: "steward", parentId: "spawn-1" });
+    const teardown = async (id: string) => {
+      const response = await app.inject({
+        method: "POST", url: `/sessions/${id}/teardown`,
+        payload: { force: stalled === "compute stop" },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json<TeardownResult>();
+    };
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const response = teardown("spawn-1");
+      await entered.promise;
+      expect((await app.inject({ method: "GET", url: "/healthz" })).statusCode).toBe(200);
+      await vi.advanceTimersByTimeAsync(budget);
+      vi.useRealTimers();
+      const expired = await response;
+      expect(expired.warnings.join("\n")).toContain(`${stalled} deadline exceeded`);
+      if (step) {
+        expect(expired.steps).toContainEqual({
+          step, outcome: "failed", detail: expect.stringContaining("deadline exceeded"),
+        });
+      }
+      if (step === "archive" || step === "stop") expect(removeCompute).not.toHaveBeenCalled();
+      if (stalled === "container logs") {
+        expect(expired.status).toBe("torndown");
+        release.resolve();
+        expect(fs.existsSync(path.join(broodArchiveDir("spawn-1", homeDir), "container.log"))).toBe(false);
+        return;
+      }
+
+      expect(expired.status).toBe("tearing-down");
+      expect(store.get("spawn-1")?.status).toBe("tearing-down");
+      const fenced = await teardown("steward-1");
+      expect(fenced.status).toBe("tearing-down");
+      expect(fenced.warnings.join("\n")).toContain("still settling");
+      expect(invocations).toBe(1);
+      if (stalled === "archive finalization") {
+        expect(store.pendingTeardownCompletion("spawn-1")).toBeUndefined();
+        expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).toMatchObject({ event: "started" });
+      }
+      release.resolve();
+      await vi.waitFor(async () => {
+        expect((await teardown("steward-1")).status).toBe("torndown");
+      });
+      if (stalled === "archive finalization") {
+        const journal = fs.readFileSync(journalPath, "utf8");
+        expect(journal.trim().split("\n").map((line) => JSON.parse(line))).toMatchObject([
+          { attempt: 1, event: "started" },
+          { attempt: 2, event: "started" },
+          { attempt: 2, event: "finished", status: "torndown" },
+        ]);
+      }
+    } finally {
+      release.resolve();
+      vi.useRealTimers();
+      readSpy.mockRestore();
+      writeSpy.mockRestore();
+      renameSpy.mockRestore();
+      clock?.mockRestore();
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -1123,7 +1268,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         }
         expect(stop).toHaveBeenCalledWith({
           sessionId: "live", kind: "spawn", containerName: "march-spawn-live",
-        });
+        }, expect.any(AbortSignal));
         expect(first.json().steps).toEqual([
           { step: "stop", outcome: "ok", detail: "graceful stop verified" },
           expect.objectContaining({ step: "archive", outcome: "failed" }),
