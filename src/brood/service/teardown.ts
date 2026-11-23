@@ -302,6 +302,8 @@ async function runTeardown(
     throw error;
   }
 
+  // Stewards whose Castra removal this attempt verified (`removed` or `absent`).
+  const verifiedStewardIds: string[] = [];
   let attempt: number | undefined;
   try {
     if (!archive) throw archiveError;
@@ -386,6 +388,16 @@ async function runTeardown(
     endStepSpan(child, steps[steps.length - 1]!);
   }
 
+  // A steward registered while earlier steps awaited shares the worktree but was
+  // never removed. Check membership here, synchronously adjacent to the Git
+  // steps (no await in between), and defer both rather than delete its workspace.
+  const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(verifiedStewardIds);
+  const gitDeferral = stewardRemovalFailed
+    ? "deferred: steward removal failed"
+    : unverifiedSteward
+      ? "deferred: steward registered during teardown"
+      : undefined;
+
   // 4. Worktree (re-check after steward; Castra may already have removed it).
   {
     const child = span.startChild("brood.teardown.worktree", {
@@ -393,12 +405,8 @@ async function runTeardown(
         ? { "march.worktree.path": primary.worktreePath }
         : {}),
     });
-    if (stewardRemovalFailed) {
-      steps.push({
-        step: "worktree",
-        outcome: "skipped",
-        detail: "deferred: steward removal failed",
-      });
+    if (gitDeferral) {
+      steps.push({ step: "worktree", outcome: "skipped", detail: gitDeferral });
     } else if (primary.worktreePath && primary.repoPath) {
       try {
         if (!d.pathExists(primary.worktreePath)) {
@@ -428,12 +436,8 @@ async function runTeardown(
     const child = span.startChild("brood.teardown.branch", {
       ...(primary.branch ? { "march.branch": primary.branch } : {}),
     });
-    if (stewardRemovalFailed) {
-      steps.push({
-        step: "branch",
-        outcome: "skipped",
-        detail: "deferred: steward removal failed",
-      });
+    if (gitDeferral) {
+      steps.push({ step: "branch", outcome: "skipped", detail: gitDeferral });
     } else if (primary.branch && primary.repoPath) {
       try {
         const res = d.substrate.removeWorkspace(primary.repoPath, {
@@ -455,10 +459,9 @@ async function runTeardown(
   }
 
   const failed = steps.some((step) => step.outcome === "failed");
-  if (!stewardRemovalFailed && !failed && unremovedStewards(groupStewardIds)) {
-    return finalize("partial");
-  }
-  return finalize(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
+  return finalize(
+    stewardRemovalFailed ? "error" : failed || unverifiedSteward ? "partial" : "success",
+  );
 
   async function removeOneSteward(row: SessionRecord): Promise<TeardownStep> {
     const label = groupStewards.length > 1 ? ` (${row.id})` : "";
@@ -482,6 +485,7 @@ async function runTeardown(
       }
       // `removed` — a real session was reaped; `absent` — Castra verified no
       // session for this worktree. Either way the steward is gone.
+      verifiedStewardIds.push(row.id);
       return {
         step: "steward",
         outcome: res.outcome === "removed" ? "ok" : "skipped",
@@ -533,14 +537,14 @@ async function runTeardown(
           status: outcome === "success" ? "torndown" : "tearing-down",
           steps,
           warnings,
-        }, at, { stewardIds: groupStewardIds, resources: teardownResources(primary) });
+        }, at, { stewardIds: verifiedStewardIds, resources: teardownResources(primary) });
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at, groupStewardIds);
+      if (outcome === "success") completeRegistry(at, verifiedStewardIds);
     }
     return finish(outcome);
   }

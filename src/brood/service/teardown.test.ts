@@ -42,6 +42,13 @@ interface Recorder {
 }
 
 /** Build injectable deps that record the order + arguments of side effects. */
+
+function lastFinished(home: string, id: string): { stewardIds?: string[] } {
+  const entries = fs.readFileSync(path.join(broodArchiveDir(id, home), "teardown.ndjson"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line) as { event?: string; stewardIds?: string[] });
+  return entries.filter((entry) => entry.event === "finished").at(-1) ?? {};
+}
+
 function recordingDeps(
   home: string,
   overrides: Partial<TeardownDeps> = {},
@@ -864,7 +871,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   it("defers worktree cleanup when a second steward under the spawn cannot be removed", async () => {
     const homeDir = makeHome();
     const store = new SessionStore({ homeDir });
-    const { spawnId } = seedSpawnGroup(store);
+    const { spawnId, stewardId } = seedSpawnGroup(store);
     store.register({ id: "ad-session-ccc", kind: "steward", parentId: spawnId, status: "running" });
     const rec = recordingDeps(homeDir);
     const remove = rec.deps.removeSteward!;
@@ -877,7 +884,65 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       expect(result.warnings.join("\n")).toContain("ad-session-ccc");
       expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
       expect(store.get("ad-session-ccc")?.status).not.toBe("torndown");
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([stewardId]);
     } finally {
+      store.close();
+    }
+  });
+
+  it("defers Git cleanup when a steward registers while another is being removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      if (!store.get("ad-session-late")) {
+        store.register({ id: "ad-session-late", kind: "steward", parentId: spawnId, status: "running" });
+      }
+      return remove(input);
+    };
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings.join("\n")).toContain('"ad-session-late"');
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(result.steps.find((step) => step.step === "worktree")?.detail)
+        .toBe("deferred: steward registered during teardown");
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([stewardId]);
+
+      rec.calls.length = 0;
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-late");
+      expect(store.get("ad-session-late")?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("journals no verified stewards when archiving fails before removal", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "registry patch";
+    const patchPath = path.join(broodArchiveDir(spawnId, homeDir), "artifacts", "spawn.patch");
+    store.update(spawnId, { extractionResult: {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(patchText).digest("hex") },
+    } });
+    const readFile = fs.readFileSync;
+    const spy = vi.spyOn(fs, "readFileSync").mockImplementation((file, options) =>
+      file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options));
+    const rec = recordingDeps(homeDir);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.steps[0]?.outcome).toBe("failed");
+      expect(rec.calls.some((call) => call.startsWith("steward:"))).toBe(false);
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([]);
+    } finally {
+      spy.mockRestore();
       store.close();
     }
   });
