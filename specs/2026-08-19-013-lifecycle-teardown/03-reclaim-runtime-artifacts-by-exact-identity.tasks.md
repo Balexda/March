@@ -47,7 +47,7 @@
 
 - [ ] **Separate graceful stop from verified removal**
 
-  Apply the target stop and remove contract using S1's exact compute identity. Coordinate the archive handoff with US2 before enabling the modes.
+  Apply the target stop and remove contract using S1's exact compute identity. Requires US2's fail-closed archive handoff; do not enable the modes before US2 merges.
 
   _Acceptance criteria_
   - Accepted ordinary forced teardown of running compute performs a bounded graceful stop that leaves the container available for evidence capture. Explicit kill skips the stop phase and uses immediate removal only after the archive succeeds. US1's force protection still applies.
@@ -81,7 +81,7 @@ _None — no specification debt was recorded._
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
 | US1 Request A Safe Teardown | depends on | Both slices preserve request admission. S2 replaces US1's explicit-kill rejection when the distinct modes are ready. |
-| US2 Preserve Teardown Evidence | integration boundary | S2 requires the fail-closed archive behavior at the stop/remove handoff. Coordinate delivery with US2 before enabling the modes. US2 owns archive contents and sink handling. |
+| US2 Preserve Teardown Evidence | depends on | Only S2 depends on US2: it requires US2's fail-closed archive behavior at the stop/remove handoff, so S2 must not merge before US2. S1 does not depend on US2. US2 owns archive contents and sink handling. |
 | US4 Make Teardown Idempotent And Retryable | depended upon by | US3 preserves local failure outcomes and workspace deferral. US4 owns generalized retry behavior and Legate consumer handling. |
 
 FR-020a's service-wide deadline work and US5's full outcome instrumentation remain outside the slices. New compute call-outs must have enforced deadlines.
