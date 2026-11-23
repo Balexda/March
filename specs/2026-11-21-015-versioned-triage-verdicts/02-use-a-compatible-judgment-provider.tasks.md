@@ -12,7 +12,7 @@
 
 **Justification**: Deliver the interface, consumer validation, and compatibility coverage together so callers can rely on the same verdict contract at merge.
 
-**Addresses**: FR-005, AS 2.1, AS 2.2, and SC-003.
+**Addresses**: FR-005 (shared validation boundary and open-core record; the baseline recommender itself is delivered by [RFC Milestone 2: Single-Issue Recommender and Operator Backfill](../../docs/rfcs/2026-003-issue-triage/issue-triage.rfc.md#milestone-2-single-issue-recommender-and-operator-backfill)), AS 2.1, AS 2.2, and SC-003.
 
 ### Tasks
 
@@ -31,7 +31,7 @@
   Keep the open-core exception discoverable for AS 2.2. Describe the provider surface in the [triage subsystem contract](../../docs/subsystems/triage/contract.md).
 
   _Acceptance criteria:_
-  - The [open-core boundary](../../docs/open-core-boundary.md#issue-triage-exception) records that the rubric, versioned vocabulary, and baseline recommender ship in the open engine. It identifies the shared validation contract and when the exception will be revisited.
+  - The [open-core boundary](../../docs/open-core-boundary.md#issue-triage-exception) records the open-engine exception for the rubric, versioned vocabulary, and baseline recommender. This slice delivers the rubric and vocabulary through the US1 contract. The record names RFC Milestone 2 as the delivery point for the baseline recommender. It identifies the shared validation contract and when the exception will be revisited.
   - The subsystem contract describes the read-only inputs, untrusted candidate output, and consumer validation. The deterministic writer owns any later GitHub writes.
 
 **PR Outcome**: A consumer can validate candidates from either provider through the same read-only interface, and maintainers can find the open-core commitment and provider contract.
