@@ -59,9 +59,11 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
     const maxBuffer = opts.maxBuffer ?? EXEC_MAX_BUFFER;
     let child: ReturnType<typeof spawn>;
     try {
+      // Its own process group, so a timeout can kill descendants too.
       child = spawn(cmd, args as string[], {
         stdio: ["ignore", opts.capture ? "pipe" : "ignore", "pipe"],
         env: opts.env ?? process.env,
+        detached: true,
       });
     } catch (err) {
       reject(new ExecError((err as Error).message, { code: (err as NodeJS.ErrnoException).code }));
@@ -76,11 +78,16 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
     let timedOut = false;
     let overflow = false;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, opts.timeoutMs);
-    timer.unref?.();
+    // Kill the whole process group: a descendant that inherited stdout/stderr
+    // would otherwise hold the pipes open past the child's death.
+    const killTree = () => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
 
     const stderrText = () => Buffer.concat(stderr).toString("utf-8").trimEnd();
     const fail = (err: ExecError) => {
@@ -90,11 +97,27 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
       reject(err);
     };
 
+    // The timeout bounds the call by itself: reject now, without waiting for
+    // the pipes to close (a stuck descendant may never let them).
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      fail(
+        new ExecError(`${cmd} timed out after ${opts.timeoutMs}ms and was killed`, {
+          stderr: stderrText(),
+          timedOut: true,
+        }),
+      );
+    }, opts.timeoutMs);
+    timer.unref?.();
+
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maxBuffer) {
         overflow = true;
-        child.kill("SIGKILL");
+        killTree();
         return;
       }
       stdout.push(chunk);
@@ -103,7 +126,7 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
       stderrBytes += chunk.length;
       if (stderrBytes > maxBuffer) {
         overflow = true;
-        child.kill("SIGKILL");
+        killTree();
         return;
       }
       stderr.push(chunk);

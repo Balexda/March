@@ -136,6 +136,27 @@ describe("resolveTrustDialog", () => {
     expect(keys).toEqual(["Enter"]);
   });
 
+  it("reads the whole directory: an owned prefix with a space or quote is not owned", async () => {
+    for (const dir of [`${ROOT} backup`, `${ROOT}"x`, `${ROOT}'s copy`]) {
+      const pane = fakePane(dir);
+      const result = await resolveTrustDialog(pane.io, { ownedDirs: [ROOT] });
+      expect(result).toEqual({ outcome: "not_owned", dir });
+      expect(pane.keys).toEqual([]);
+    }
+  });
+
+  it("fails closed on a directory wrapped onto the next line", async () => {
+    const pane = ` Adding a new directory:\n ${ROOT}\n-evil\n\n ❯ No, exit\n   Yes, add it`;
+    expect(parseTrustDialog(pane)).toBeNull();
+    const keys: string[] = [];
+    const result = await resolveTrustDialog(
+      { capture: async () => pane, sendKey: async (k) => { keys.push(k); }, sleep: async () => {} },
+      { ownedDirs: [ROOT] },
+    );
+    expect(result.outcome).not.toBe("resolved");
+    expect(keys).toEqual([]);
+  });
+
   it("types nothing for a directory Castra does not own", async () => {
     const pane = fakePane("/home/u/src/other-repo");
     const result = await resolveTrustDialog(pane.io, { ownedDirs: [ROOT] });

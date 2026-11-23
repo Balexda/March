@@ -43,6 +43,22 @@ describe("execCommand (real child processes)", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
+  it("rejects at the timeout even while a descendant holds stderr open, and kills it", async () => {
+    // The child spawns a grandchild that inherits stderr and outlives it.
+    const script = "const { spawn } = require('node:child_process');"
+      + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'ignore', 'inherit'] });"
+      + "process.stdout.write(String(g.pid)); setTimeout(() => {}, 30000);";
+    const started = Date.now();
+    const err = await execCommand(node, ["-e", script], { capture: true, timeoutMs: 300 }).catch((e: unknown) => e);
+    expect((err as ExecError).timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
+  it("carries the spawn error code for a missing command", async () => {
+    const err = await execCommand("castra-no-such-binary-xyz", [], { capture: true, timeoutMs: 10_000 }).catch((e: unknown) => e);
+    expect(["ENOENT", "EACCES"]).toContain((err as ExecError).code);
+  });
+
   it("rejects when the command does not exist", async () => {
     await expect(
       execCommand("castra-no-such-binary-xyz", [], { capture: true, timeoutMs: 10_000 }),

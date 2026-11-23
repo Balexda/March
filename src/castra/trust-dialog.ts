@@ -31,8 +31,8 @@ const HEADER = /Adding a new directory/i;
 const NO_OPTION = /No,\s*exit/i;
 const YES_OPTION = /Yes,\s*add it/i;
 const CURSOR = /[❯›>]/;
-/** Characters that end a path token: whitespace, quotes, and box-drawing borders. */
-const PATH_TOKEN = /(?:^|[\s:\u2500-\u257f])((?:~|\/)[^\s"'`\u2500-\u257f]*)/;
+/** Box-drawing borders around the dialog; never part of a directory. */
+const BORDER = /[\u2500-\u257f]/g;
 
 export interface TrustDialog {
   /** The directory the dialog asks to trust, as printed (may start with `~`). */
@@ -57,18 +57,21 @@ export function parseTrustDialog(pane: string): TrustDialog | null {
   const yesIdx = lines.findIndex((l, i) => i > headerIdx && YES_OPTION.test(l));
   if (noIdx < 0 || yesIdx < 0) return null;
 
-  // The directory follows the header on the same line, or on the next lines.
-  let dir: string | undefined;
-  const afterHeader = lines[headerIdx]!.split(HEADER)[1] ?? "";
-  const candidates = [afterHeader, ...lines.slice(headerIdx + 1, Math.min(noIdx, yesIdx))];
-  for (const text of candidates) {
-    const match = PATH_TOKEN.exec(text);
-    if (match && match[1]!.length > 1) {
-      dir = match[1];
-      break;
-    }
-  }
-  if (!dir) return null;
+  // The directory follows the header on the same line, or on the next line
+  // that has text. It is that WHOLE line (borders and edge whitespace aside):
+  // a directory with spaces or quotes is never cut down to an owned prefix.
+  // Fail closed when the line is not a path, or when the next line is not
+  // blank (a long path wrapped onto it, so this line is only a prefix).
+  const clean = (text: string) => text.replace(BORDER, " ").trim();
+  const afterHeader = clean((lines[headerIdx]!.split(HEADER)[1] ?? "").replace(/^\s*:/, ""));
+  const between = lines.slice(headerIdx + 1, Math.min(noIdx, yesIdx)).map(clean);
+  const candidates = [afterHeader, ...between];
+  const at = candidates.findIndex((text) => text.length > 0);
+  if (at < 0) return null;
+  const dir = candidates[at]!;
+  if (!/^(?:~|\/)/.test(dir) || dir.length < 2) return null;
+  const next = candidates[at + 1];
+  if (next !== undefined && next.length > 0) return null;
 
   const hasCursor = (line: string) => CURSOR.test(line.split(/No,|Yes,/)[0] ?? "");
   return {
