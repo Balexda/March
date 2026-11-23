@@ -325,6 +325,22 @@ describe("worktree", () => {
       });
     });
 
+    it("matches the Git registration when the tracked path goes through a symlinked ancestor", async () => {
+      const repoRoot = makeRepo();
+      const target = createSpawnWorktree(repoRoot);
+      const alias = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "brood-alias-")), "link");
+      fs.symlinkSync(path.dirname(target.worktreePath), alias);
+      const aliased = { worktreePath: path.join(alias, path.basename(target.worktreePath)), branch: target.branch };
+
+      await expect(removeSpawnWorktreeExactAsync(repoRoot, aliased)).resolves.toEqual({
+        worktreeRemoved: true, branchDeleted: true,
+      });
+      const registrations = execFileSync("git", ["worktree", "list", "--porcelain"], {
+        cwd: repoRoot, encoding: "utf8",
+      });
+      expect(registrations).not.toContain(path.basename(target.worktreePath));
+    });
+
     it("leaves the exact checkout intact when the operation is canceled", async () => {
       const repoRoot = makeRepo();
       const target = createSpawnWorktree(repoRoot);

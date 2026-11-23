@@ -303,21 +303,26 @@ export async function removeSpawnWorktreeExactAsync(
   let worktreeRemoved = true;
   if (target.worktreePath) {
     const exactPath = path.resolve(target.worktreePath);
-    const entry = `worktree ${exactPath}`;
+    // Git records the physical path, so a tracked path reached through a
+    // symlinked ancestor must match its canonical form as well (#717 review).
+    const physicalPath = await canonicalPath(exactPath);
+    const entries = new Set([`worktree ${exactPath}`, `worktree ${physicalPath}`]);
+    const registered = (list: string[]) => list.find((line) => entries.has(line));
     const listWorktrees = async () => (await git(["worktree", "list", "--porcelain", "-z"])).split("\0");
     const worktrees = await listWorktrees();
-    if (worktrees[0] === entry || path.resolve(repoRoot) === exactPath) {
+    if (entries.has(worktrees[0] ?? "") || await canonicalPath(path.resolve(repoRoot)) === physicalPath) {
       worktreeRemoved = false;
     } else {
-      const removedByGit = worktrees.includes(entry) &&
-        await tryRemove(["worktree", "remove", "--force", "--", exactPath]);
+      const entry = registered(worktrees);
+      const removedByGit = entry !== undefined &&
+        await tryRemove(["worktree", "remove", "--force", "--", entry.slice("worktree ".length)]);
       // Retain the exact-path fallback for linked directories Git cannot remove.
       // The caller holds the teardown fence until any in-flight fs.rm settles.
       if (!removedByGit && (await lstatIfPresent(path.join(exactPath, ".git")))?.isFile()) {
         signal.throwIfAborted();
         await fs.promises.rm(exactPath, { recursive: true, force: true });
       }
-      worktreeRemoved = !(await listWorktrees()).includes(entry) && !await lstatIfPresent(exactPath);
+      worktreeRemoved = registered(await listWorktrees()) === undefined && !await lstatIfPresent(exactPath);
     }
   }
 
@@ -342,6 +347,19 @@ export async function removeSpawnWorktreeExactAsync(
   }
   signal.throwIfAborted();
   return { worktreeRemoved, branchDeleted };
+}
+
+/** Resolve symlinked ancestors, keeping the unresolved tail of a missing path. */
+async function canonicalPath(filePath: string): Promise<string> {
+  try {
+    return await fs.promises.realpath(filePath);
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    const parent = path.dirname(filePath);
+    if (parent === filePath) return filePath;
+    return path.join(await canonicalPath(parent), path.basename(filePath));
+  }
 }
 
 async function lstatIfPresent(filePath: string): Promise<fs.Stats | undefined> {
