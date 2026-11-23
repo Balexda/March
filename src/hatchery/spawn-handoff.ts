@@ -81,6 +81,7 @@ import {
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
 import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+import { BroodWorkspaceReclaimingError } from "../brood/service/client.js";
 import { publishStewardAttachedToHerald } from "./service/herald-registration.js";
 
 export {
@@ -1334,7 +1335,10 @@ export async function runHatcherySpawn(
     // worker killed, crash). The launch-time row makes the steward Brood-trackable
     // so ghost-cleanup can reclaim it instead of deferring on a "registration gap".
     // Best-effort and MARCH_BROOD_URL-gated: a missing/unreachable registry never
-    // fails the dispatch. The onSucceeded hook later enriches this row.
+    // fails the dispatch. The onSucceeded hook later enriches this row. The
+    // exception is Brood refusing the row because it is reclaiming this group's
+    // workspace: that throws, and the rollback below removes the steward session
+    // and worktree instead of leaving it running unregistered (#717 review).
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
 
@@ -1700,7 +1704,10 @@ export async function runHatcherySpawn(
     // a manager worktree to preserve. Parking keeps the worker container/image and
     // renames the worktree/branch aside (the canonical names are freed for the
     // self-healing re-dispatch); the destructive rollback runs otherwise.
-    const park = parkFailedSpawnsEnabled() && !!mgr && !handedOff;
+    // Never park a launch Brood refused mid-reclaim: renaming the worktree aside
+    // would race Brood's exact-path Git cleanup of the same checkout.
+    const park = parkFailedSpawnsEnabled() && !!mgr && !handedOff &&
+      !(err instanceof BroodWorkspaceReclaimingError);
     await dispatch.spanAsync(
       "spawn.rollback",
       async () => {

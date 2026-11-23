@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BroodClient } from "../../brood/service/client.js";
+import { BroodClient, BroodWorkspaceReclaimingError } from "../../brood/service/client.js";
 import { SessionStore } from "../../brood/service/store.js";
 import { sqliteAvailable } from "../../brood/service/sqlite.js";
 import {
@@ -205,6 +205,36 @@ describe("registerStewardLaunchWithBrood", () => {
         warn,
       }),
     ).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("registerStewardLaunchWithBrood reclaim refusal", () => {
+  it("rethrows a workspace-reclaim 409 instead of warning", async () => {
+    const warn = vi.fn();
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () => new Response(JSON.stringify({
+        error: "workspace is being reclaimed", code: "workspace_reclaiming",
+      }), { status: 409 })) as unknown as typeof fetch,
+    });
+    await expect(registerStewardLaunchWithBrood({
+      spawnId: "s", stewardSessionId: "ad", repoPath: "/repo", branch: "b",
+      worktreePath: "/wt", backend: "codex", profile: "march", group: "g",
+    }, { client, warn })).rejects.toBeInstanceOf(BroodWorkspaceReclaimingError);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("still warns on an unrelated 409", async () => {
+    const warn = vi.fn();
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () => new Response(JSON.stringify({ error: "extraction closed" }), { status: 409 })) as unknown as typeof fetch,
+    });
+    await expect(registerStewardLaunchWithBrood({
+      spawnId: "s", stewardSessionId: "ad", repoPath: "/repo", branch: "b",
+      worktreePath: "/wt", backend: "codex", profile: "march", group: "g",
+    }, { client, warn })).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
   });
 });

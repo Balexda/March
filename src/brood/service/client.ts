@@ -11,6 +11,7 @@ import type {
   TeardownResult,
   UpdateSessionInput,
 } from "./types.js";
+import { WORKSPACE_RECLAIMING_CODE } from "./types.js";
 
 export class BroodClientError extends Error {
   constructor(message: string) {
@@ -33,6 +34,23 @@ export class BroodNotFoundError extends BroodClientError {
     super(message);
     this.name = "BroodNotFoundError";
   }
+}
+
+/**
+ * Brood refused a registration or update because the group's workspace is
+ * being reclaimed by teardown. Unlike other client errors this is not
+ * best-effort noise: the caller must not keep a session running there.
+ */
+export class BroodWorkspaceReclaimingError extends BroodClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "BroodWorkspaceReclaimingError";
+  }
+}
+
+function reclaimRefusal(status: number, body: unknown): boolean {
+  return status === 409 &&
+    (body as { code?: unknown } | null)?.code === WORKSPACE_RECLAIMING_CODE;
 }
 
 /**
@@ -194,6 +212,11 @@ export class BroodClient {
 
   async register(input: RegisterSessionInput): Promise<SessionRecord> {
     const { status, body } = await this.request("POST", "/sessions", input);
+    if (reclaimRefusal(status, body)) {
+      throw new BroodWorkspaceReclaimingError(
+        bodyError(body, "brood POST /sessions refused: workspace is being reclaimed"),
+      );
+    }
     if (status !== 201) {
       throw new BroodClientError(
         bodyError(body, `brood POST /sessions failed (${status})`),
@@ -211,6 +234,11 @@ export class BroodClient {
       `/sessions/${encodeURIComponent(id)}`,
       changes,
     );
+    if (reclaimRefusal(status, body)) {
+      throw new BroodWorkspaceReclaimingError(
+        bodyError(body, `brood PATCH /sessions/${id} refused: workspace is being reclaimed`),
+      );
+    }
     if (status !== 200) {
       throw new BroodClientError(
         bodyError(body, `brood PATCH /sessions/${id} failed (${status})`),

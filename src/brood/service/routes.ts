@@ -16,6 +16,7 @@ import {
 } from "./container-observer.js";
 import { parseExtractionResult } from "./extraction.js";
 import { workspaceReclaimActive } from "./teardown-deadline.js";
+import { WORKSPACE_RECLAIMING_CODE } from "./types.js";
 import { extractionReadiness } from "./extraction-readiness.js";
 import {
   BroodLogUnavailableError,
@@ -375,7 +376,10 @@ export async function registerRoutes(
     const { input } = validation;
     if (reclaimBlocks(store, input.id, input.parentId)) {
       reply.code(409);
-      return { error: `Session "${input.id}" joins a group whose workspace is being reclaimed; retry after teardown.` };
+      return {
+        error: `Session "${input.id}" joins a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
     }
     if (input.extractionResult !== undefined && extractionClosed(store, input.id)) {
       reply.code(409);
@@ -581,7 +585,10 @@ export async function registerRoutes(
     }
     if (reclaimBlocks(store, id)) {
       reply.code(409);
-      return { error: `Session "${id}" belongs to a group whose workspace is being reclaimed; retry after teardown.` };
+      return {
+        error: `Session "${id}" belongs to a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
     }
     const record = store.update(id, changes);
     if (!record) {

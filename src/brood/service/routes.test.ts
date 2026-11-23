@@ -1224,6 +1224,8 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
             method: "PATCH", url: "/sessions/steward-1", payload: { branch: "topic/moved" },
           });
           attempts[step] = [joined.statusCode, patched.statusCode];
+          expect(joined.json()).toMatchObject({ code: "workspace_reclaiming" });
+          expect(patched.json()).toMatchObject({ code: "workspace_reclaiming" });
           return { worktreeRemoved: true, branchDeleted: true };
         },
       },

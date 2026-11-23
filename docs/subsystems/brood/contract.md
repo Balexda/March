@@ -100,8 +100,11 @@ Cleanup then resumes with fresh verification.
 
 Brood holds a workspace reclaim lease from each Git step's steward membership
 check until its Git mutation settles. While the lease is held, steward
-registration into that group and `PATCH` of any row in it return 409. Callers
-retry after teardown. This follows March's clean-exit
+registration into that group and `PATCH` of any row in it return 409 with
+`{ "error": string, "code": "workspace_reclaiming" }`. `BroodClient` raises
+`BroodWorkspaceReclaimingError` for that refusal. Hatchery treats it as a launch
+failure: it removes the steward it just launched and does not continue the
+dispatch. Other callers retry after teardown. This follows March's clean-exit
 rule for autonomous components.
 [March vision](../../vision.md) · [Operating philosophy](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)
 
