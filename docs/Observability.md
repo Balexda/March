@@ -272,7 +272,7 @@ tick), caches the result for `GET /status` → `services`, and emits:
 
 | OTel instrument | Prometheus series | Meaning |
 |---|---|---|
-| `march.stack.service.state` (gauge, no unit) | `march_stack_service_state` | one series per `{service, state}` — `service` ∈ `castra`/`hatchery`/`brood`/`herald`/`tessera`, `state` ∈ `ok`/`degraded`/`down`/`absent` — valued `1` for the current state and `0` for the others, so `max by (service) (march_stack_service_state{state="down"})` is the red signal. `absent` = not deployed (Tessera today). |
+| `march.stack.service.state` (gauge, no unit) | `march_stack_service_state` | one series per `{service, state}` — `service` ∈ `castra`/`hatchery`/`brood`/`herald`/`tessera`, `state` ∈ `ok`/`degraded`/`down` — valued `1` for the current state and `0` for the others, so `max by (service) (march_stack_service_state{state="down"})` is the red signal. Tessera has no "not deployed" state: it is the only GitHub credential source, so not running, or running but unable to vend, is `down`. |
 
 Defined in [`src/observability/loop-metrics.ts`](../src/observability/loop-metrics.ts)
 (`recordStackServiceStates`), fed by
@@ -443,8 +443,9 @@ and can be observed as a service.
   image: [`docker/hatchery.Dockerfile`](../docker/hatchery.Dockerfile).
 - **API:** `POST /spawns` (creates a job, returns `202 {id}`),
   `GET /spawns/:id` (job status/result), `GET /healthz` (liveness),
-  `GET /readyz` (readiness: docker + Castra reachable, a GitHub credential
-  available, and the rolling spawn-failure window; `503` when `down`). Spawns can run up to an hour, so
+  `GET /readyz` (readiness: docker + Castra reachable, Tessera reachable and
+  vending GitHub credentials, and the rolling spawn-failure window; `503` when
+  `down`). Spawns can run up to an hour, so
   the API is an async job + poll. The `march hatchery spawn` CLI and the legate
   loop are both clients: the loop's dispatch runner POSTs a spawn and polls the
   job to completion (via `MARCH_HATCHERY_URL`), writing the same result shape its

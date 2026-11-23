@@ -91,9 +91,9 @@ describe("loop-metrics", () => {
 
   it("recordStackServiceStates is a no-op when disabled and folds when enabled", () => {
     initOtel({});
-    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "absent" })).not.toThrow();
+    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "down" })).not.toThrow();
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
-    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "absent" })).not.toThrow();
+    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "down" })).not.toThrow();
   });
 
   it("recordDependencyUnblock is a no-op when disabled and counts when enabled", () => {

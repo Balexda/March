@@ -12,7 +12,7 @@ import { defaultTokenPath } from "./up.js";
 /**
  * `march status` — stack health + reachability pre-flight.
  *
- * For each of the six March services it reports three independent facts —
+ * For each March service it reports three independent facts —
  * container state (running/stopped/absent), HTTP reachability on the loopback
  * port, and whether the shared `CASTRA_API_TOKEN` authenticates (where a route
  * is gated on it) — then surfaces the common misconfig classes: token drift, a
@@ -185,6 +185,34 @@ export async function fetchProbe(
   }
 }
 
+/**
+ * Readiness from either body shape: a readyz `{ state, reasons }` (hatchery), or
+ * Tessera's `/status` `providers[]`, which is ready only when the `github-app`
+ * provider is `ok` (Tessera is the only GitHub credential source). Undefined
+ * when the body is neither.
+ */
+export function readinessFromBody(
+  body: unknown,
+): { state: "ok" | "degraded" | "down"; reasons: string[] } | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const b = body as { state?: unknown; reasons?: unknown; providers?: unknown };
+  if (b.state === "ok" || b.state === "degraded" || b.state === "down") {
+    const reasons = Array.isArray(b.reasons) ? b.reasons.filter((r): r is string => typeof r === "string") : [];
+    return { state: b.state, reasons };
+  }
+  if (Array.isArray(b.providers)) {
+    const app = b.providers.find((p) => (p as { provider?: unknown })?.provider === "github-app") as
+      | { state?: unknown }
+      | undefined;
+    if (app?.state === "ok") return { state: "ok", reasons: [] };
+    return {
+      state: "down",
+      reasons: [`cannot vend GitHub credentials: github-app provider ${app ? String(app.state) : "missing"}`],
+    };
+  }
+  return undefined;
+}
+
 async function statusForService(
   svc: MarchService,
   deps: {
@@ -272,15 +300,11 @@ async function statusForService(
   let readiness: "ok" | "degraded" | "down" | undefined;
   if (svc.readinessPath && reachable === "ok") {
     const ready = await deps.probeHttp(`http://127.0.0.1:${port}${svc.readinessPath}`);
-    const body = ready.body as { state?: unknown; reasons?: unknown } | undefined;
-    const state = body?.state;
-    if (state === "ok" || state === "degraded" || state === "down") {
-      readiness = state;
-      const reasons = Array.isArray(body?.reasons)
-        ? body.reasons.filter((r): r is string => typeof r === "string")
-        : [];
-      for (const r of reasons) issues.push(`${state === "down" ? "not ready" : "degraded"}: ${r}`);
-      if (state === "down" && reasons.length === 0) issues.push(`not ready (${svc.readinessPath} state=down)`);
+    const parsed = readinessFromBody(ready.body);
+    if (parsed) {
+      readiness = parsed.state;
+      for (const r of parsed.reasons) issues.push(`${parsed.state === "down" ? "not ready" : "degraded"}: ${r}`);
+      if (parsed.state === "down" && parsed.reasons.length === 0) issues.push(`not ready (${svc.readinessPath} state=down)`);
     } else if (ready.reachable && ready.status !== undefined && ready.status >= 500) {
       readiness = "down";
       issues.push(`not ready (${svc.readinessPath} answered HTTP ${ready.status})`);

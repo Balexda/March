@@ -4,7 +4,8 @@
  *
  * Once per tick the legate probes each service it depends on — Hatchery and
  * Brood `/readyz`, Castra and Herald `/healthz`, Tessera `/status` — with a short
- * timeout, folds each answer into one {@link ServiceHealth} (state + human
+ * timeout (a service slower than that reads `down`, "not answering: timeout"),
+ * folds each answer into one {@link ServiceHealth} (state + human
  * reasons + a one-line operator remedy), and caches the map. `GET /status`
  * serves the cached map under `services`; it never probes inline. The same map
  * drives the `march_stack_service_state{service,state}` gauge. A probe that
@@ -14,7 +15,7 @@
 export const STACK_SERVICES = ["castra", "hatchery", "brood", "herald", "tessera"] as const;
 export type StackServiceName = (typeof STACK_SERVICES)[number];
 
-export const SERVICE_STATES = ["ok", "degraded", "down", "absent"] as const;
+export const SERVICE_STATES = ["ok", "degraded", "down"] as const;
 export type ServiceState = (typeof SERVICE_STATES)[number];
 
 export interface ServiceHealth {
@@ -102,8 +103,13 @@ export function startRemedy(name: StackServiceName): string {
   return `Start it: march up (or docker compose -f docker/${name}.docker-compose.yml up -d).`;
 }
 
+/** Tessera is the ONLY GitHub credential source: without it the stack is down. */
+export const TESSERA_REMEDY =
+  "Start Tessera and give it the GitHub App credentials: docker compose -f docker/tessera.docker-compose.yml up -d (see docs/subsystems/tessera/contract.md)";
+
 export const HATCHERY_CREDENTIAL_REMEDY =
-  "Hatchery has no GitHub credential: recreate it with MARCH_TESSERA_GH_TOKEN_FALLBACK=1 GH_TOKEN=$(gh auth token) (march up), or configure Tessera.";
+  "Hatchery has no GitHub credential from Tessera: " + TESSERA_REMEDY
+  + ", and set MARCH_TESSERA_HATCHERY_CLIENT_KEY, then recreate Hatchery (march up).";
 
 function notAnswering(name: StackServiceName, error: string, checkedAt: string): ServiceHealth {
   return { state: "down", checked_at: checkedAt, reasons: [`not answering: ${error}`], remedy: startRemedy(name), detail: null };
@@ -155,19 +161,21 @@ export function livenessHealth(name: "castra" | "herald", result: ProbeResult, c
 }
 
 /**
- * Fold Tessera's `/status` into a ServiceHealth. `absent` (not deployed — the
- * normal state today) when it does not answer AND either no URL is configured
- * or the host does not resolve; `down` when a configured, resolvable Tessera is
- * not answering. Reachable: `ok` when the github-app provider is ok, else
- * `degraded` (unconfigured/degraded/invalid provider).
+ * Fold Tessera's `/status` into a ServiceHealth. Tessera is the only GitHub
+ * credential source, so there is no "not deployed" state: not answering (DNS
+ * failure, refused, unconfigured URL) is `down`, and a running Tessera whose
+ * github-app provider is not `ok` is `down` too — it cannot vend credentials.
  */
-export function tesseraHealth(result: ProbeResult, urlConfigured: boolean, checkedAt: string): ServiceHealth {
+export function tesseraHealth(result: ProbeResult, checkedAt: string): ServiceHealth {
   if (!result.answered) {
-    const dns = result.error === "ENOTFOUND" || result.error === "EAI_AGAIN";
-    if (!urlConfigured || dns) {
-      return { state: "absent", checked_at: checkedAt, reasons: ["not deployed"], remedy: null, detail: null };
-    }
-    return notAnswering("tessera", result.error, checkedAt);
+    const notRunning = result.error === "ENOTFOUND" || result.error === "EAI_AGAIN" || result.error === "ECONNREFUSED";
+    return {
+      state: "down",
+      checked_at: checkedAt,
+      reasons: [notRunning ? "not running" : `not answering: ${result.error}`],
+      remedy: TESSERA_REMEDY,
+      detail: null,
+    };
   }
   const body = isObject(result.body) ? result.body : undefined;
   const providers = body && Array.isArray(body.providers) ? body.providers.filter(isObject) : [];
@@ -182,12 +190,12 @@ export function tesseraHealth(result: ProbeResult, urlConfigured: boolean, check
     };
   }
   if (app.state === "ok") return { state: "ok", checked_at: checkedAt, reasons: [], remedy: null, detail: body ?? null };
-  const lastError = typeof app.last_error === "string" && app.last_error ? `: ${app.last_error}` : "";
+  const lastError = typeof app.last_error === "string" && app.last_error ? ` (${app.last_error})` : "";
   return {
-    state: "degraded",
+    state: "down",
     checked_at: checkedAt,
-    reasons: [`github-app provider is ${String(app.state)}${lastError}`],
-    remedy: "Configure Tessera's GitHub App (TESSERA_GITHUB_APP_ID, TESSERA_GITHUB_INSTALLATION_ID, TESSERA_GITHUB_APP_KEY_FILE) and recreate it.",
+    reasons: [`Tessera is running but cannot vend GitHub credentials: github-app provider ${String(app.state)}${lastError}`],
+    remedy: TESSERA_REMEDY,
     detail: body ?? null,
   };
 }
@@ -223,7 +231,7 @@ export async function probeServices(opts: ProbeServicesOptions = {}): Promise<Se
           case "herald":
             return [name, livenessHealth(name, result, checkedAt)];
           case "tessera":
-            return [name, tesseraHealth(result, !!env.MARCH_TESSERA_URL?.trim(), checkedAt)];
+            return [name, tesseraHealth(result, checkedAt)];
         }
       } catch {
         return [name, notAnswering(name, "error", checkedAt)];

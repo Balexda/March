@@ -1,9 +1,13 @@
 /**
  * @l0 @deterministic @ci
  */
-import { describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  fetchProbe,
   HATCHERY_CREDENTIAL_REMEDY,
+  TESSERA_REMEDY,
   probeServices,
   serviceUrl,
   startRemedy,
@@ -115,28 +119,67 @@ describe("probeServices", () => {
     expect(services.herald).toMatchObject({ state: "down", reasons: ["healthz answered HTTP 500"] });
   });
 
-  describe("tessera", () => {
-    it("is absent when unreachable and MARCH_TESSERA_URL is unset", async () => {
+  describe("tessera (the only GitHub credential source — no 'absent' state)", () => {
+    it("is down 'not running' when unreachable, even with MARCH_TESSERA_URL unset", async () => {
       const services = await run({ "tessera/status": { answered: false, error: "ECONNREFUSED" } }, {});
-      expect(services.tessera).toMatchObject({ state: "absent", reasons: ["not deployed"], remedy: null });
+      expect(services.tessera).toMatchObject({ state: "down", reasons: ["not running"], remedy: TESSERA_REMEDY });
     });
 
-    it("is absent when configured but the host does not resolve (not deployed)", async () => {
+    it("is down 'not running' when the host does not resolve (not deployed)", async () => {
       const services = await run({ "tessera/status": { answered: false, error: "ENOTFOUND" } });
-      expect(services.tessera?.state).toBe("absent");
+      expect(services.tessera).toMatchObject({ state: "down", reasons: ["not running"], remedy: TESSERA_REMEDY });
     });
 
-    it("is down when configured, resolvable, and not answering", async () => {
+    it("is down with the not-answering code on a timeout", async () => {
       const services = await run({ "tessera/status": { answered: false, error: "timeout" } });
       expect(services.tessera).toMatchObject({ state: "down", reasons: ["not answering: timeout"] });
     });
 
-    it("is degraded when reachable but the github-app provider is unconfigured/degraded", async () => {
-      const unconfigured = await run({ "tessera/status": answered(200, tesseraStatus("unconfigured")) });
-      expect(unconfigured.tessera).toMatchObject({ state: "degraded", reasons: ["github-app provider is unconfigured"] });
-      const degraded = await run({ "tessera/status": answered(200, tesseraStatus("degraded", "mint failed")) });
-      expect(degraded.tessera?.reasons).toEqual(["github-app provider is degraded: mint failed"]);
+    it("is down when running but the github-app provider is unconfigured/degraded/invalid", async () => {
+      for (const state of ["unconfigured", "degraded", "invalid"]) {
+        const services = await run({ "tessera/status": answered(200, tesseraStatus(state)) });
+        expect(services.tessera).toMatchObject({
+          state: "down",
+          reasons: [`Tessera is running but cannot vend GitHub credentials: github-app provider ${state}`],
+          remedy: TESSERA_REMEDY,
+        });
+      }
+      const withError = await run({ "tessera/status": answered(200, tesseraStatus("degraded", "mint failed")) });
+      expect(withError.tessera?.reasons[0]).toContain("github-app provider degraded (mint failed)");
     });
+
+    it("never reports a state outside ok|degraded|down", async () => {
+      const services = await run({ "tessera/status": { answered: false, error: "ENOTFOUND" } }, {});
+      for (const h of Object.values(services)) expect(["ok", "degraded", "down"]).toContain(h!.state);
+    });
+  });
+});
+
+describe("castra answering slower than the probe timeout", () => {
+  let server: Server | undefined;
+  afterEach(async () => {
+    server?.closeAllConnections();
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    server = undefined;
+  });
+
+  it("reads down 'not answering: timeout' through the real fetch probe", async () => {
+    // A live /healthz that answers only after 1.5s, against a 100ms probe timeout.
+    server = createServer((_req, res) => {
+      setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end('{"status":"ok"}'), 1_500).unref();
+    });
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    expect(await fetchProbe(`http://127.0.0.1:${port}/healthz`, 100)).toEqual({ answered: false, error: "timeout" });
+
+    const started = Date.now();
+    const services = await probeServices({
+      env: { CASTRA_URL: `http://127.0.0.1:${port}`, MARCH_HATCHERY_URL: "http://127.0.0.1:1", MARCH_BROOD_URL: "http://127.0.0.1:1", MARCH_HERALD_URL: "http://127.0.0.1:1", MARCH_TESSERA_URL: "http://127.0.0.1:1" },
+      timeoutMs: 100,
+      now: () => NOW,
+    });
+    expect(Date.now() - started).toBeLessThan(1_400);
+    expect(services.castra).toMatchObject({ state: "down", reasons: ["not answering: timeout"], remedy: startRemedy("castra") });
   });
 });
 

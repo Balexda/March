@@ -24,13 +24,14 @@ export interface LogsService {
 }
 
 /**
- * The six March services, in the canonical bring-up order so the interleaved
+ * The March services, in the canonical bring-up order so the interleaved
  * "all services" view reads dependency-first. Container names are the
  * `container_name:` values from `docker/*.docker-compose.yml`.
  */
 export const LOG_SERVICES: readonly LogsService[] = [
   { name: "otel-lgtm", container: "march-otel-lgtm" },
   { name: "castra", container: "march-castra" },
+  { name: "tessera", container: "march-tessera" },
   { name: "hatchery", container: "march-hatchery" },
   { name: "brood", container: "march-brood" },
   { name: "herald", container: "march-herald" },
@@ -62,7 +63,7 @@ const defaultSpawner: LogsSpawner = (file, args) =>
   spawn(file, args, { stdio: ["ignore", "pipe", "pipe"] });
 
 export interface LogsOptions {
-  /** A single service name to scope to; undefined tails all six. */
+  /** A single service name to scope to; undefined tails all of them. */
   readonly service?: string;
   /** Stream new lines as they arrive (`docker logs --follow`). */
   readonly follow?: boolean;
@@ -95,7 +96,7 @@ export interface LogsResult {
 const TAG_COLORS = [36, 32, 33, 35, 34, 31]; // cyan, green, yellow, magenta, blue, red
 
 /**
- * Resolve the services to tail. With no name, that's all six; with a name, just
+ * Resolve the services to tail. With no name, that's every service; with a name, just
  * the matching service. An unknown name throws so the caller can report the
  * valid set (the command surfaces it as a usage error).
  */
@@ -117,7 +118,7 @@ export function buildDockerLogsArgs(
   const args = ["logs"];
   if (opts.follow) args.push("--follow");
   if (opts.since) args.push("--since", opts.since);
-  // Bound the backfill so `march logs` (all six) doesn't dump entire histories.
+  // Bound the backfill so `march logs` (all services) doesn't dump entire histories.
   args.push("--tail", opts.tail ?? "100");
   args.push(container);
   return args;

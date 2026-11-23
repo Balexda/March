@@ -75,17 +75,15 @@ services:
       - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       - CODEX_HOME=${MARCH_HOST_HOME:-/home/jmbattista}/.codex
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Hatchery app/read issuance (#628: base pinning needs it, so a spawn
-      # cannot start without either Tessera or the fallback below). Defaults
-      # match the legate and Herald compose files.
+      # Hatchery REQUIRES Tessera for GitHub app/read issuance (#628: base
+      # pinning needs it, so no spawn can start without it). Start Tessera with
+      # its GitHub App credentials (docker/tessera.docker-compose.yml) and set
+      # MARCH_TESSERA_HATCHERY_CLIENT_KEY; /readyz reports `down` until Tessera
+      # is reachable and its github-app provider is ok.
       - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
       - MARCH_TESSERA_CLIENT_KEY=${MARCH_TESSERA_HATCHERY_CLIENT_KEY:-}
-      # Explicit migration fallback (on by default until the Hatchery client key
-      # is distributed): when issuance fails, use the forwarded GH_TOKEN /
-      # GITHUB_TOKEN below, logged + counted as a fallback. With it empty and no
-      # Tessera, every spawn fails `tessera:unconfigured`. Set to 0 once Tessera
-      # issues for Hatchery.
-      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-1}
+      # Off: the ambient-token fallback is not a supported credential path.
+      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-}
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Castra — the interactive-sessions host the Hatchery drives over HTTP.

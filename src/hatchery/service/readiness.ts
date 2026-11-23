@@ -15,7 +15,8 @@ export type GitHubCredentialSource = "tessera" | "fallback" | "none";
 export interface GitHubCredentialCheck {
   readonly ok: boolean;
   readonly source: GitHubCredentialSource;
-  /** Low-cardinality reason when no credential is available, else null. */
+  /** Why no credential is available (`tessera:unconfigured`, `tessera:unreachable`,
+   *  `tessera:provider_<state>`, or {@link FALLBACK_UNSUPPORTED_REASON}), else null. */
   readonly reason: string | null;
 }
 
@@ -45,23 +46,96 @@ export const DEGRADED_CONSECUTIVE_FAILURES = 2;
 /** Consecutive spawn failures at which readiness is `down`. */
 export const DOWN_CONSECUTIVE_FAILURES = 5;
 
+/** Reason when only the ambient-token migration fallback is configured. */
+export const FALLBACK_UNSUPPORTED_REASON =
+  "using ambient GH_TOKEN instead of Tessera (fallback is not a supported credential path)";
+
+/** How long a Tessera `/status` answer is reused (readyz is polled every tick). */
+export const TESSERA_STATUS_TTL_MS = 5_000;
+/** Tessera `/status` probe timeout — short, so `/readyz` never hangs. */
+export const TESSERA_STATUS_TIMEOUT_MS = 1_500;
+
+export interface GitHubCredentialCheckerOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly fetchImpl?: typeof fetch;
+  readonly ttlMs?: number;
+  readonly timeoutMs?: number;
+  readonly now?: () => number;
+}
+
 /**
- * Which GitHub credential a spawn would get — a LOCAL check (no network, no
- * mint), mirroring the Tessera client's decision: a complete Tessera config
- * (URL + client key) → `tessera`; else the explicit migration fallback with an
- * ambient token → `fallback` (the sanctioned path today, so it stays `ok`);
- * else `none`, which is exactly the `tessera:unconfigured` spawn failure.
+ * Can a spawn get a GitHub app/read credential? Tessera is the ONLY supported
+ * source: `ok` requires Tessera to be configured (URL + client key), reachable,
+ * and its `github-app` provider to report `ok`. The ambient-token fallback is
+ * reported (`source: "fallback"`) but is NOT ok — the stack is down without
+ * Tessera. The `/status` probe is unauthenticated, times out quickly and is
+ * cached for a few seconds, so `/readyz` stays cheap and never hangs.
  */
-export function githubCredentialCheck(env: NodeJS.ProcessEnv = process.env): GitHubCredentialCheck {
-  if (resolveTesseraConfig({ env })) return { ok: true, source: "tessera", reason: null };
-  const fallback = env.MARCH_TESSERA_GH_TOKEN_FALLBACK === "1";
-  if (fallback) {
-    // Same acceptance rule as the client: trimmed, CR/LF means absent.
-    const token = [env.GH_TOKEN, env.GITHUB_TOKEN].map((v) => v?.trim()).find((v) => v && !/[\r\n]/.test(v));
-    if (token) return { ok: true, source: "fallback", reason: null };
-    return { ok: false, source: "none", reason: "fallback:no_token" };
+export class GitHubCredentialChecker {
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly fetchImpl: typeof fetch;
+  private readonly ttlMs: number;
+  private readonly timeoutMs: number;
+  private readonly now: () => number;
+  private cached?: { key: string; at: number; result: GitHubCredentialCheck };
+  private last?: GitHubCredentialCheck;
+
+  constructor(options: GitHubCredentialCheckerOptions = {}) {
+    this.env = options.env ?? process.env;
+    this.fetchImpl = options.fetchImpl ?? ((...args) => fetch(...args));
+    this.ttlMs = options.ttlMs ?? TESSERA_STATUS_TTL_MS;
+    this.timeoutMs = options.timeoutMs ?? TESSERA_STATUS_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
   }
-  return { ok: false, source: "none", reason: "tessera:unconfigured" };
+
+  /** The most recent result, for the readiness gauge (undefined before the first check). */
+  get latest(): GitHubCredentialCheck | undefined {
+    return this.last;
+  }
+
+  async check(): Promise<GitHubCredentialCheck> {
+    const result = await this.compute();
+    this.last = result;
+    return result;
+  }
+
+  private async compute(): Promise<GitHubCredentialCheck> {
+    const config = resolveTesseraConfig({ env: this.env });
+    if (!config) {
+      const fallback = this.env.MARCH_TESSERA_GH_TOKEN_FALLBACK === "1"
+        && [this.env.GH_TOKEN, this.env.GITHUB_TOKEN].some((v) => v?.trim() && !/[\r\n]/.test(v));
+      return fallback
+        ? { ok: false, source: "fallback", reason: FALLBACK_UNSUPPORTED_REASON }
+        : { ok: false, source: "none", reason: "tessera:unconfigured" };
+    }
+    const at = this.now();
+    if (this.cached && this.cached.key === config.baseUrl && at - this.cached.at < this.ttlMs) return this.cached.result;
+    const result = await this.probe(config.baseUrl);
+    this.cached = { key: config.baseUrl, at, result };
+    return result;
+  }
+
+  private async probe(baseUrl: string): Promise<GitHubCredentialCheck> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let body: unknown;
+    try {
+      const res = await this.fetchImpl(baseUrl + "/status", { method: "GET", signal: controller.signal, redirect: "error" });
+      if (res.status !== 200) return { ok: false, source: "tessera", reason: "tessera:unreachable" };
+      body = JSON.parse(await res.text());
+    } catch {
+      return { ok: false, source: "tessera", reason: "tessera:unreachable" };
+    } finally {
+      clearTimeout(timer);
+    }
+    const providers = (body as { providers?: unknown } | null)?.providers;
+    const app = Array.isArray(providers)
+      ? (providers.find((p) => (p as { provider?: unknown })?.provider === "github-app") as { state?: unknown } | undefined)
+      : undefined;
+    const state = typeof app?.state === "string" && /^[a-z_]{1,32}$/.test(app.state) ? app.state : "invalid";
+    if (state === "ok") return { ok: true, source: "tessera", reason: null };
+    return { ok: false, source: "tessera", reason: `tessera:provider_${state}` };
+  }
 }
 
 interface SpawnOutcome {
@@ -114,6 +188,21 @@ export class SpawnWindow {
   }
 }
 
+function githubReasonSentence(github: GitHubCredentialCheck): string {
+  switch (github.reason) {
+    case "tessera:unconfigured":
+      return "no GitHub credential: Tessera is not configured for Hatchery (MARCH_TESSERA_URL + MARCH_TESSERA_CLIENT_KEY) (tessera:unconfigured)";
+    case "tessera:unreachable":
+      return "no GitHub credential: Tessera is not reachable (tessera:unreachable)";
+    case FALLBACK_UNSUPPORTED_REASON:
+      return "no GitHub credential: " + FALLBACK_UNSUPPORTED_REASON;
+    default:
+      return github.reason?.startsWith("tessera:provider_")
+        ? `no GitHub credential: Tessera's github-app provider is ${github.reason.slice("tessera:provider_".length)} (${github.reason})`
+        : `no GitHub credential (${github.reason ?? "unknown"})`;
+  }
+}
+
 /** Derive the `/readyz` body from its independent checks. Pure. */
 export function deriveReadiness(input: {
   docker: boolean;
@@ -135,11 +224,7 @@ export function deriveReadiness(input: {
   }
   if (!github.ok) {
     down = true;
-    reasons.push(
-      github.reason === "fallback:no_token"
-        ? "no GitHub credential: MARCH_TESSERA_GH_TOKEN_FALLBACK=1 but GH_TOKEN/GITHUB_TOKEN is empty (fallback:no_token)"
-        : `no GitHub credential: Tessera is not configured and the token fallback is off (${github.reason ?? "tessera:unconfigured"})`,
-    );
+    reasons.push(githubReasonSentence(github));
   }
   const n = spawns.consecutive_failures;
   if (n >= DOWN_CONSECUTIVE_FAILURES) {

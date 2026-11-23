@@ -169,21 +169,34 @@ describe("routes", () => {
     });
   });
 
-  it("GET /readyz is 200 ok on the fallback credential; /healthz stays pure liveness", async () => {
+  it("GET /readyz is 200 ok only when Tessera vends; /healthz stays pure liveness", async () => {
+    const fetchImpl = (async () => Response.json({
+      providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }],
+    })) as unknown as typeof fetch;
+    app = await makeApp({
+      docker: () => true, castra: async () => true, fetchImpl,
+      env: { MARCH_TESSERA_URL: "http://tessera:9477", MARCH_TESSERA_CLIENT_KEY: "k" },
+    });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ready: true, state: "ok", github: { ok: true, source: "tessera" }, reasons: [] });
+    const live = await app.inject({ method: "GET", url: "/healthz" });
+    expect(live.json()).toEqual({ status: "ok" });
+  });
+
+  it("GET /readyz is 503 down on the ambient-token fallback (not a supported credential path)", async () => {
     app = await makeApp({
       docker: () => true, castra: async () => true,
       env: { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "t" },
     });
     const res = await app.inject({ method: "GET", url: "/readyz" });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ ready: true, state: "ok", github: { ok: true, source: "fallback" }, reasons: [] });
-    const live = await app.inject({ method: "GET", url: "/healthz" });
-    expect(live.json()).toEqual({ status: "ok" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ state: "down", github: { ok: false, source: "fallback" } });
   });
 
   it("GET /readyz goes down after 5 consecutive spawn failures", async () => {
     const store = new JobStore({ executor: async () => { throw new Error("Hatchery GitHub read failed (tessera:unconfigured)"); } });
-    app = await makeApp({ docker: () => true, castra: async () => true, env: { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "t" } }, store);
+    app = await makeApp({ docker: () => true, castra: async () => true, github: async () => ({ ok: true, source: "tessera", reason: null }) }, store);
     for (let i = 0; i < 5; i++) store.create({ prompt: "p", backend: "codex", repoPath: "/r" });
     await vi.waitFor(() => expect(store.spawnWindow.consecutiveFailures).toBe(5));
     const res = await app.inject({ method: "GET", url: "/readyz" });

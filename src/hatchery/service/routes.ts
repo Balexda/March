@@ -8,7 +8,7 @@ import {
   recordHatcheryRequest,
   registerHatcheryReadinessSource,
 } from "../../observability/hatchery-metrics.js";
-import { deriveReadiness, githubCredentialCheck } from "./readiness.js";
+import { deriveReadiness, GitHubCredentialChecker, type GitHubCredentialCheck } from "./readiness.js";
 import type { JobStore } from "./jobs.js";
 import type { SpawnRequest } from "./types.js";
 
@@ -16,8 +16,11 @@ import type { SpawnRequest } from "./types.js";
 export interface ReadinessProbes {
   readonly docker?: () => boolean;
   readonly castra?: () => Promise<boolean>;
-  /** Env the GitHub-credential check reads (defaults to process.env). */
+  /** GitHub-credential check (defaults to a {@link GitHubCredentialChecker} over process.env). */
+  readonly github?: () => Promise<GitHubCredentialCheck>;
+  /** Env + fetch the default checker uses (tests). */
   readonly env?: NodeJS.ProcessEnv;
+  readonly fetchImpl?: typeof fetch;
 }
 
 export interface RoutesOptions {
@@ -92,14 +95,15 @@ export async function registerRoutes(
   // reachability — not a local agent-deck binary — gates readiness.
   const probeDocker = opts.readiness?.docker ?? (() => isFinderAvailable() && isOnPath("docker"));
   const probeCastra = opts.readiness?.castra ?? (() => createCastraClientFromEnv().reachable());
-  const readinessEnv = opts.readiness?.env ?? process.env;
-  // Last observed docker/castra results, for the readiness gauges (the legate
-  // polls /readyz every tick, so these stay fresh). The GitHub check and the
-  // spawn window are read live at collect time.
+  const checker = new GitHubCredentialChecker({ env: opts.readiness?.env, fetchImpl: opts.readiness?.fetchImpl });
+  const probeGithub = opts.readiness?.github ?? (() => checker.check());
+  // Last observed check results, for the readiness gauges (the legate polls
+  // /readyz every tick, so these stay fresh). The spawn window is read live.
   let lastDocker: boolean | undefined;
   let lastCastra: boolean | undefined;
+  let lastGithub: boolean | undefined;
   registerHatcheryReadinessSource(() => ({
-    checks: { docker: lastDocker, castra: lastCastra, github: githubCredentialCheck(readinessEnv).ok },
+    checks: { docker: lastDocker, castra: lastCastra, github: lastGithub },
     consecutiveFailures: store.spawnWindow.consecutiveFailures,
   }));
 
@@ -122,18 +126,18 @@ export async function registerRoutes(
   // Readiness: can Hatchery actually spawn? 200 unless `state` is "down".
   app.get("/readyz", async (_request, reply) => {
     const docker = probeDocker();
-    let castra = false;
-    try {
-      castra = await probeCastra();
-    } catch {
-      castra = false;
-    }
+    // Castra and Tessera are independent network probes — run them together.
+    const [castra, github] = await Promise.all([
+      probeCastra().catch(() => false),
+      probeGithub().catch((): GitHubCredentialCheck => ({ ok: false, source: "tessera", reason: "tessera:unreachable" })),
+    ]);
     lastDocker = docker;
     lastCastra = castra;
+    lastGithub = github.ok;
     const body = deriveReadiness({
       docker,
       castra,
-      github: githubCredentialCheck(readinessEnv),
+      github,
       spawns: store.spawnWindow.snapshot(),
     });
     reply.code(body.state === "down" ? 503 : 200);

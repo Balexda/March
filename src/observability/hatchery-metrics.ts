@@ -133,7 +133,7 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
 /** What the readiness gauges observe. A check left undefined is not yet known
  *  (e.g. castra before the first `/readyz`) and is not emitted. */
 export interface HatcheryReadinessSample {
-  readonly checks: { readonly docker?: boolean; readonly castra?: boolean; readonly github: boolean };
+  readonly checks: { readonly docker?: boolean; readonly castra?: boolean; readonly github?: boolean };
   readonly consecutiveFailures: number;
 }
 

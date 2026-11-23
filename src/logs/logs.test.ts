@@ -50,10 +50,11 @@ function fakeSpawner(children: Map<string, FakeChild>): {
 }
 
 describe("resolveLogServices", () => {
-  it("returns all six services in bring-up order when unscoped", () => {
+  it("returns every service in bring-up order when unscoped", () => {
     expect(resolveLogServices().map((s) => s.name)).toEqual([
       "otel-lgtm",
       "castra",
+      "tessera",
       "hatchery",
       "brood",
       "herald",

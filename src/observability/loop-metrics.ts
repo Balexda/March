@@ -195,7 +195,7 @@ let latestSpawnBudget: SpawnBudgetMetrics | undefined;
 let latestServiceStates: Readonly<Record<string, string>> = {};
 
 /** The bounded `state` label values of `march.stack.service.state`. */
-export const STACK_SERVICE_STATES = ["ok", "degraded", "down", "absent"] as const;
+export const STACK_SERVICE_STATES = ["ok", "degraded", "down"] as const;
 
 // The dwell max-age gauges read this map (one sample PER PROFILE) so a stuck
 // slice in any profile surfaces, not just the last profile to tick. Module-level;
@@ -635,7 +635,7 @@ export function recordSpawnBudget(budget: SpawnBudgetMetrics): void {
 
 /**
  * Refresh the `march.stack.service.state` gauge from the legate's per-tick
- * service probe (service → ok/degraded/down/absent). Once per tick, profile-less.
+ * service probe (service → ok/degraded/down). Once per tick, profile-less.
  * No-op when telemetry is disabled.
  */
 export function recordStackServiceStates(states: Readonly<Record<string, string>>): void {

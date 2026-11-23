@@ -14,7 +14,7 @@ import {
   type StatusOptions,
 } from "./status.js";
 
-/** All six services running, reachable, image present, token accepted. */
+/** All services running, reachable, image present, token accepted. */
 function healthyOptions(over: Partial<StatusOptions> = {}): StatusOptions {
   return {
     containerState: () => "running",
@@ -345,5 +345,40 @@ describe("stackStatus — hatchery readiness (/readyz)", () => {
     const status = await stackStatus(withReadyz({ ready: true, state: "ok", reasons: [] }));
     expect(status.healthy).toBe(true);
     expect(status.services.find((s) => s.service === "hatchery")?.readiness).toBe("ok");
+  });
+});
+
+describe("stackStatus — tessera readiness (/status providers)", () => {
+  const withTessera = (appState: string): StatusOptions =>
+    healthyOptions({
+      probeHttp: async (url, token) => {
+        if (url.includes("/v1/")) return token === "tok-123" ? { reachable: true, status: 200 } : { reachable: true, status: 401 };
+        if (url.endsWith("/status")) {
+          return { reachable: true, status: 200, body: { providers: [{ provider: "github-app", state: appState }, { provider: "github-user", state: "ok" }] } };
+        }
+        return { reachable: true, status: 200 };
+      },
+    });
+
+  it("manages tessera: probes it on 9477 (/healthz then /status)", async () => {
+    const probed: string[] = [];
+    await stackStatus(healthyOptions({ probeHttp: async (url) => { probed.push(url); return { reachable: true, status: 200 }; } }));
+    expect(probed).toContain("http://127.0.0.1:9477/healthz");
+    expect(probed).toContain("http://127.0.0.1:9477/status");
+  });
+
+  it("a running Tessera that cannot vend GitHub credentials is unhealthy", async () => {
+    const status = await stackStatus(withTessera("unconfigured"));
+    const tessera = status.services.find((s) => s.service === "tessera")!;
+    expect(tessera).toMatchObject({ readiness: "down", healthy: false });
+    expect(tessera.issues).toContain("not ready: cannot vend GitHub credentials: github-app provider unconfigured");
+    expect(status.healthy).toBe(false);
+    // Its consumers name the unhealthy dependency.
+    expect(status.services.find((s) => s.service === "hatchery")?.issues).toContain("depends on tessera, which is not healthy");
+  });
+
+  it("a vending Tessera is healthy", async () => {
+    const status = await stackStatus(withTessera("ok"));
+    expect(status.services.find((s) => s.service === "tessera")).toMatchObject({ readiness: "ok", healthy: true });
   });
 });

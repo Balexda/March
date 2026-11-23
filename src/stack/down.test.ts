@@ -23,6 +23,7 @@ describe("stackDown — service ordering", () => {
       "herald",
       "brood",
       "hatchery",
+      "tessera",
       "castra",
       "otel-lgtm",
     ]);
