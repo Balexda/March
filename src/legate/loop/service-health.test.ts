@@ -27,7 +27,7 @@ const tesseraStatus = (appState: string, lastError: string | null = null) => ({
 });
 const okHatchery = {
   ready: true, state: "ok", docker: true, castra: true,
-  github: { ok: true, source: "fallback", reason: null },
+  github: { ok: true, source: "tessera", reason: null },
   spawns: { recent: 3, failed: 0, consecutive_failures: 0, last_error: null, last_error_at: null, last_success_at: "T" },
   reasons: [],
 };
@@ -36,7 +36,7 @@ const okHatchery = {
 function probeWith(over: Record<string, ProbeResult | Error> = {}): { probe: ProbeFn; urls: string[] } {
   const urls: string[] = [];
   const defaults: Record<string, ProbeResult> = {
-    "castra/healthz": answered(200, { status: "ok" }),
+    "castra/readyz": answered(200, { ready: true, state: "ok", reasons: [], event_loop_lag_ms: 20, refused_sessions: [], recent_send_failures: 0 }),
     "herald/healthz": answered(200, { status: "ok" }),
     "hatchery/readyz": answered(200, okHatchery),
     "brood/readyz": answered(200, { ready: true, docker: true, git: true, castra: true }),
@@ -56,12 +56,12 @@ const run = (over: Record<string, ProbeResult | Error> = {}, env: NodeJS.Process
   probeServices({ env, probe: probeWith(over).probe, now: () => NOW });
 
 describe("probeServices", () => {
-  it("probes readyz for hatchery/brood, healthz for castra/herald, status for tessera", async () => {
+  it("probes readyz for hatchery/brood/castra, healthz for herald, status for tessera", async () => {
     const { probe, urls } = probeWith();
     await probeServices({ env: { MARCH_HATCHERY_URL: "http://h:1/" }, probe, now: () => NOW });
     expect(urls.sort()).toEqual([
       "http://brood:9748/readyz",
-      "http://castra:9264/healthz",
+      "http://castra:9264/readyz",
       "http://h:1/readyz",
       "http://herald:8818/healthz",
       "http://tessera:9477/status",
@@ -99,6 +99,25 @@ describe("probeServices", () => {
     expect(services.hatchery?.remedy).toBe("Every recent spawn failed (worker_exit); see `march logs hatchery`.");
   });
 
+  it("castra with a stalled event loop is down, and sessions refusing input degrade it, each with a remedy", async () => {
+    const stalled = await run({ "castra/readyz": answered(503, {
+      ready: false, state: "down", reasons: ["event loop lag p99 3400ms over the last minute"],
+      event_loop_lag_ms: 3400, refused_sessions: [], recent_send_failures: 0,
+    }) });
+    expect(stalled.castra).toMatchObject({
+      state: "down", reasons: ["event loop lag p99 3400ms over the last minute"],
+      remedy: "Castra's event loop is stalled, so every session call waits; see `march logs castra`.",
+    });
+    const refusing = await run({ "castra/readyz": answered(200, {
+      ready: true, state: "degraded", reasons: ["1 session refusing input"],
+      event_loop_lag_ms: 20, refused_sessions: ["bc0d6044-1787157628"], recent_send_failures: 1,
+    }) });
+    expect(refusing.castra).toMatchObject({
+      state: "degraded",
+      remedy: "Steward session bc0d6044-1787157628 refuses input; run `march castra recover`, then check the pane.",
+    });
+  });
+
   it("an older hatchery/brood readyz without `state` falls back to `ready` and names false checks", async () => {
     const services = await run({ "brood/readyz": answered(503, { ready: false, docker: true, git: false, castra: true }) });
     expect(services.brood).toMatchObject({ state: "down", reasons: ["git check failed"] });
@@ -106,7 +125,7 @@ describe("probeServices", () => {
 
   it("a service not answering is down with a start remedy; a throwing probe never rejects", async () => {
     const services = await run({
-      "castra/healthz": { answered: false, error: "ECONNREFUSED" },
+      "castra/readyz": { answered: false, error: "ECONNREFUSED" },
       "herald/healthz": new Error("boom"),
     });
     expect(services.castra).toMatchObject({ state: "down", reasons: ["not answering: ECONNREFUSED"], remedy: startRemedy("castra") });
@@ -164,13 +183,13 @@ describe("castra answering slower than the probe timeout", () => {
   });
 
   it("reads down 'not answering: timeout' through the real fetch probe", async () => {
-    // A live /healthz that answers only after 1.5s, against a 100ms probe timeout.
+    // A live /readyz that answers only after 1.5s, against a 100ms probe timeout.
     server = createServer((_req, res) => {
-      setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end('{"status":"ok"}'), 1_500).unref();
+      setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end('{"ready":true,"state":"ok","reasons":[]}'), 1_500).unref();
     });
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const { port } = server.address() as AddressInfo;
-    expect(await fetchProbe(`http://127.0.0.1:${port}/healthz`, 100)).toEqual({ answered: false, error: "timeout" });
+    expect(await fetchProbe(`http://127.0.0.1:${port}/readyz`, 100)).toEqual({ answered: false, error: "timeout" });
 
     const started = Date.now();
     const services = await probeServices({

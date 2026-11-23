@@ -3,7 +3,7 @@
  * outage: every spawn failed for 5h while every liveness signal stayed green).
  *
  * Once per tick the legate probes each service it depends on — Hatchery and
- * Brood `/readyz`, Castra and Herald `/healthz`, Tessera `/status` — with a short
+ * Brood and Castra `/readyz`, Herald `/healthz`, Tessera `/status` — with a short
  * timeout (a service slower than that reads `down`, "not answering: timeout"),
  * folds each answer into one {@link ServiceHealth} (state + human
  * reasons + a one-line operator remedy), and caches the map. `GET /status`
@@ -48,7 +48,7 @@ const URL_ENV: Record<StackServiceName, string> = {
 };
 
 const PROBE_PATH: Record<StackServiceName, string> = {
-  castra: "/healthz",
+  castra: "/readyz",
   hatchery: "/readyz",
   brood: "/readyz",
   herald: "/healthz",
@@ -129,8 +129,18 @@ function hatcheryRemedy(body: Record<string, unknown>): string | null {
   return "See `march logs hatchery`.";
 }
 
+/** Remedy for a non-ok Castra readiness body (stalled event loop, or sessions refusing input). */
+function castraRemedy(body: Record<string, unknown>): string {
+  const refused = stringList(body.refused_sessions);
+  if (body.state === "down") return "Castra's event loop is stalled, so every session call waits; see `march logs castra`.";
+  if (refused.length > 0) {
+    return `Steward session${refused.length === 1 ? "" : "s"} ${refused.join(", ")} ${refused.length === 1 ? "refuses" : "refuse"} input; run \`march castra recover\`, then check the pane.`;
+  }
+  return "Recent session sends are failing; see `march logs castra`.";
+}
+
 /** Fold a `/readyz` answer (Hatchery's rich body, or Brood's booleans) into a ServiceHealth. */
-export function readinessHealth(name: "hatchery" | "brood", result: ProbeResult, checkedAt: string): ServiceHealth {
+export function readinessHealth(name: "hatchery" | "brood" | "castra", result: ProbeResult, checkedAt: string): ServiceHealth {
   if (!result.answered) return notAnswering(name, result.error, checkedAt);
   const body = isObject(result.body) ? result.body : undefined;
   let state: ServiceState;
@@ -143,12 +153,15 @@ export function readinessHealth(name: "hatchery" | "brood", result: ProbeResult,
     const failed = body ? Object.entries(body).filter(([k, v]) => k !== "ready" && v === false).map(([k]) => `${k} check failed`) : [];
     reasons = failed.length > 0 ? failed : [`readyz answered HTTP ${result.status}`];
   }
-  const remedy = state === "ok" ? null : name === "hatchery" && body ? hatcheryRemedy(body) : `See \`march logs ${name}\`.`;
+  const remedy = state === "ok" ? null
+    : name === "hatchery" && body ? hatcheryRemedy(body)
+    : name === "castra" && body ? castraRemedy(body)
+    : `See \`march logs ${name}\`.`;
   return { state, checked_at: checkedAt, reasons, remedy, detail: body ?? null };
 }
 
-/** Fold a `/healthz` liveness answer (Castra, Herald) into a ServiceHealth. */
-export function livenessHealth(name: "castra" | "herald", result: ProbeResult, checkedAt: string): ServiceHealth {
+/** Fold a `/healthz` liveness answer (Herald) into a ServiceHealth. */
+export function livenessHealth(name: "herald", result: ProbeResult, checkedAt: string): ServiceHealth {
   if (!result.answered) return notAnswering(name, result.error, checkedAt);
   const ok = result.status >= 200 && result.status < 300;
   return {
@@ -226,8 +239,8 @@ export async function probeServices(opts: ProbeServicesOptions = {}): Promise<Se
         switch (name) {
           case "hatchery":
           case "brood":
-            return [name, readinessHealth(name, result, checkedAt)];
           case "castra":
+            return [name, readinessHealth(name, result, checkedAt)];
           case "herald":
             return [name, livenessHealth(name, result, checkedAt)];
           case "tessera":
