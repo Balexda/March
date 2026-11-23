@@ -44,7 +44,7 @@ function setup(agentScript: string) {
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", () => {});
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    child.on("exit", (code, signal) => resolve({ code, signal }));
+    child.on("close", (code, signal) => resolve({ code, signal }));
   });
   return { root, child, exited, stdout: () => stdout };
 }
