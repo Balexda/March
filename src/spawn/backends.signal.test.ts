@@ -49,10 +49,15 @@ function setup(agentScript: string) {
   return { root, child, exited, stdout: () => stdout };
 }
 
-async function waitForFile(file: string, timeoutMs = 10_000): Promise<string> {
+// Pid files are published by rename, so a present file holds a complete pid.
+async function waitForPid(file: string, timeoutMs = 10_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (fs.existsSync(file)) return fs.readFileSync(file, "utf8").trim();
+    if (fs.existsSync(file)) {
+      const pid = Number(fs.readFileSync(file, "utf8").trim());
+      if (Number.isInteger(pid) && pid > 1) return pid;
+      throw new Error(`invalid pid in ${file}`);
+    }
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error(`timed out waiting for ${file}`);
@@ -71,10 +76,10 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
   it("forwards SIGTERM to the agent and exits without emitting a patch", async () => {
     const { root, child, exited, stdout } = setup([
       `trap 'echo agent-got-term; exit 0' TERM`,
-      `echo $$ > "$MARCH_TEST_ROOT/agent.pid"`,
+      `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
       `while :; do sleep 0.05; done`,
     ].join("\n"));
-    const agentPid = Number(await waitForFile(path.join(root, "agent.pid")));
+    const agentPid = await waitForPid(path.join(root, "agent.pid"));
 
     child.kill("SIGTERM");
     const result = await exited;
@@ -87,12 +92,12 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
 
   it("stops an agent with default SIGTERM handling and its descendants", async () => {
     const { root, child, exited } = setup([
-      `sleep 30 & echo $! > "$MARCH_TEST_ROOT/grandchild.pid"`,
-      `echo $$ > "$MARCH_TEST_ROOT/agent.pid"`,
+      `sleep 30 & echo $! > "$MARCH_TEST_ROOT/grandchild.tmp" && mv "$MARCH_TEST_ROOT/grandchild.tmp" "$MARCH_TEST_ROOT/grandchild.pid"`,
+      `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
       `wait`,
     ].join("\n"));
-    const agentPid = Number(await waitForFile(path.join(root, "agent.pid")));
-    const grandchildPid = Number(await waitForFile(path.join(root, "grandchild.pid")));
+    const agentPid = await waitForPid(path.join(root, "agent.pid"));
+    const grandchildPid = await waitForPid(path.join(root, "grandchild.pid"));
 
     child.kill("SIGTERM");
     const result = await exited;
