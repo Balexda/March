@@ -15,6 +15,8 @@ import {
   type ContainerObserver,
 } from "./container-observer.js";
 import { parseExtractionResult } from "./extraction.js";
+import { workspaceReclaimActive } from "./teardown-deadline.js";
+import { WORKSPACE_RECLAIMING_CODE } from "./types.js";
 import { extractionReadiness } from "./extraction-readiness.js";
 import {
   BroodLogUnavailableError,
@@ -372,6 +374,13 @@ export async function registerRoutes(
     // BroodClient sends so the Hatchery's client-side `brood.register` and this
     // handler land in one trace (#233).
     const { input } = validation;
+    if (reclaimBlocks(store, input.id, input.parentId)) {
+      reply.code(409);
+      return {
+        error: `Session "${input.id}" joins a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
+    }
     if (input.extractionResult !== undefined && extractionClosed(store, input.id)) {
       reply.code(409);
       return { error: `Session "${input.id}" is being torn down; extractionResult is closed.` };
@@ -574,6 +583,13 @@ export async function registerRoutes(
       }
       changes.extractionResult = parsedExtraction;
     }
+    if (reclaimBlocks(store, id)) {
+      reply.code(409);
+      return {
+        error: `Session "${id}" belongs to a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
+    }
     const record = store.update(id, changes);
     if (!record) {
       reply.code(404);
@@ -656,6 +672,17 @@ export async function registerRoutes(
       return { error: (err as Error).message };
     }
   });
+}
+
+// Teardown holds a reclaim lease from its steward-membership check through each
+// Git mutation. Registration into that group, or a change to one of its rows,
+// would otherwise land after the check and lose its checkout (#717 review).
+// The check and the store write run in one synchronous step.
+function reclaimBlocks(store: SessionRepository, id: string, parentId?: string): boolean {
+  const existing = store.get(id);
+  return workspaceReclaimActive(id) ||
+    workspaceReclaimActive(parentId) ||
+    workspaceReclaimActive(existing?.parentId);
 }
 
 // Durable teardown evidence closes extraction writes: a later lifecycle PATCH

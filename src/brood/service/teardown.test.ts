@@ -426,7 +426,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(removeCompute).toHaveBeenCalledOnce();
     expect(removeCompute).toHaveBeenCalledWith({
       sessionId: "ephemeral", kind: "legate", containerName: "march-legate-ephemeral",
-    }, { outcome: "already-stopped", containerId: "ephemeral" });
+    }, { outcome: "already-stopped", containerId: "ephemeral" }, expect.any(AbortSignal));
     expect(result.status).toBe("torndown");
     // The standalone legate row itself is archived, captured before tearing-down.
     const snapshot = JSON.parse(
@@ -586,10 +586,10 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       const blocked = path.join(broodArchiveDir(spawnId, home), blockedFile);
       let failedAppend: ReturnType<typeof vi.spyOn> | undefined;
       if (blockedFile === "teardown.ndjson") {
-        const rename = fs.renameSync;
-        failedAppend = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+        const rename = fs.promises.rename;
+        failedAppend = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
           if (target === blocked) throw new Error("journal unavailable");
-          rename(source, target);
+          await rename(source, target);
         });
       } else {
         fs.mkdirSync(blocked, { recursive: true });
@@ -620,8 +620,8 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
         sha256: createHash("sha256").update(readBack ? patchText : "different text").digest("hex") },
     } });
     const rec = recordingDeps(home);
-    const readFile = fs.readFileSync;
-    const spy = readBack ? vi.spyOn(fs, "readFileSync").mockImplementation((file, options) =>
+    const readFile = fs.promises.readFile;
+    const spy = readBack ? vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) =>
       file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options)) : undefined;
     try {
       const result = await teardownSession(store, spawnId, {}, rec.deps);
@@ -685,10 +685,10 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const { spawnId } = seedSpawnGroup(store);
     const dir = broodArchiveDir(spawnId, home);
     const journal = path.join(dir, "teardown.ndjson");
-    const rename = fs.renameSync;
-    const spy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+    const rename = fs.promises.rename;
+    const spy = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
       if (target === journal && fs.existsSync(journal)) throw new Error("archive unavailable");
-      rename(source, target);
+      await rename(source, target);
     });
     const rec = recordingDeps(home);
     try {
@@ -742,6 +742,18 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       const finished = JSON.parse(history.trim().split("\n").at(-1)!);
       expect(finished).toMatchObject({ event: "finished", status: "torndown" });
       rec.calls.length = 0;
+      const read = fs.promises.readFile;
+      const unavailable = vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) => {
+        if (file === journal) throw new Error("archive unavailable");
+        return read(file, options);
+      });
+      try {
+        const deferred = await teardownSession(restarted, stewardId, {}, rec.deps);
+        expect(deferred).toMatchObject({ status: "tearing-down", warnings: ["archive recovery failed: archive unavailable"] });
+        expect(restarted.pendingTeardownCompletion(spawnId)).toBe(finished.attempt);
+      } finally {
+        unavailable.mockRestore();
+      }
       const result = await teardownSession(restarted, stewardId, {}, rec.deps);
       expect(result).toMatchObject({ status: "torndown", steps: [], warnings: [] });
       for (const id of [spawnId, stewardId]) {
@@ -1004,8 +1016,8 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
         sha256: createHash("sha256").update(patchText).digest("hex") },
     } });
-    const readFile = fs.readFileSync;
-    const spy = vi.spyOn(fs, "readFileSync").mockImplementation((file, options) =>
+    const readFile = fs.promises.readFile;
+    const spy = vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) =>
       file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options));
     const rec = recordingDeps(homeDir);
     try {

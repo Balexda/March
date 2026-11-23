@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { execTextInGroup } from "../shared/exec-group.js";
 import {
   CastraAgentDeckError,
   CastraConflictError,
@@ -28,6 +29,7 @@ import {
  */
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
+const REMOVE_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // argv builders (pure)
@@ -469,7 +471,7 @@ export interface AgentDeckAdapter {
     profile: string;
     sessionId: string;
     pruneWorktree: boolean;
-  }): { removed: boolean };
+  }): Promise<{ removed: boolean }> | { removed: boolean };
   output(input: {
     profile: string;
     sessionId: string;
@@ -671,18 +673,22 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
       }
     },
 
-    remove({ profile, sessionId, pruneWorktree }) {
+    async remove({ profile, sessionId, pruneWorktree }) {
       try {
-        runAgentDeck(buildSessionRemoveArgs(profile, sessionId, pruneWorktree), false);
+        await execTextInGroup("agent-deck", buildSessionRemoveArgs(profile, sessionId, pruneWorktree), {
+          env: resolveAgentDeckEnv(process.env, process.getuid?.()),
+          timeout: REMOVE_TIMEOUT_MS,
+          maxBuffer: EXEC_MAX_BUFFER,
+        });
         sessionMeta.delete(sessionId);
         branchCache.delete(sessionId);
         return { removed: true };
       } catch (err) {
-        const stderr = (err as AgentDeckExecError).stderr ?? "";
+        const failure = err as NodeJS.ErrnoException & { stderr?: unknown };
         // Tolerant cleanup: a missing session is the desired end state, so
         // report removed:false rather than 404 — matches the loop's idempotent
         // teardown semantics.
-        if (looksLikeNotFound(stderr)) {
+        if (typeof failure.code === "number" && looksLikeNotFound(stderrText(failure.stderr))) {
           return { removed: false };
         }
         throw new CastraAgentDeckError(

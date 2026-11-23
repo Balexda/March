@@ -247,3 +247,10 @@ export interface SessionLogResponse {
   };
   content: string;
 }
+
+/**
+ * Error code on the 409 Brood returns while a group's workspace is being
+ * reclaimed. A producer that just launched a steward into that workspace must
+ * roll the launch back rather than keep running unregistered.
+ */
+export const WORKSPACE_RECLAIMING_CODE = "workspace_reclaiming";

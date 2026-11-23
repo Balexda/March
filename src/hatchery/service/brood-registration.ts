@@ -1,5 +1,9 @@
 import { loadSpawnRecord } from "../../brood/spawn-record.js";
-import { BroodClient, broodConfigured } from "../../brood/service/client.js";
+import {
+  BroodClient,
+  BroodWorkspaceReclaimingError,
+  broodConfigured,
+} from "../../brood/service/client.js";
 import { DEFAULT_AGENT_DECK_PROFILE } from "../defaults.js";
 // Type-only import — erased at build time, so it does not reintroduce the
 // runtime cycle that moving DEFAULT_AGENT_DECK_PROFILE to `defaults.ts` broke
@@ -42,9 +46,14 @@ export interface StewardLaunchInput {
  * containerId/imageId/status/exitCode on top without clobbering or duplicating.
  *
  * Best-effort and gated on `MARCH_BROOD_URL`, exactly like the success path: when
- * brood is unconfigured or unreachable this is a no-op (a warning, never a throw),
- * because the JSON SpawnRecord remains the durable within-process state and a
- * missing registry must never fail a dispatch.
+ * brood is unconfigured or unreachable this is a no-op (a warning), because the
+ * JSON SpawnRecord remains the durable within-process state and a missing
+ * registry must never fail a dispatch.
+ *
+ * The one exception is a {@link BroodWorkspaceReclaimingError}: Brood is tearing
+ * down this group and reclaiming its worktree, so the just-launched steward
+ * would keep running unregistered in a checkout Git is about to remove. That
+ * refusal is rethrown so dispatch fails and its rollback removes the steward.
  */
 export async function registerStewardLaunchWithBrood(
   input: StewardLaunchInput,
@@ -83,6 +92,7 @@ export async function registerStewardLaunchWithBrood(
       worktreePath: input.worktreePath,
     });
   } catch (err) {
+    if (err instanceof BroodWorkspaceReclaimingError) throw err;
     warn(
       `brood launch registration failed for spawn ${input.spawnId}: ${
         err instanceof Error ? err.message : String(err)

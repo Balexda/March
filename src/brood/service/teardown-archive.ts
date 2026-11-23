@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { parseExtractionResult } from "./extraction.js";
 import type { SessionRecord, TeardownRequest, TeardownResult } from "./types.js";
@@ -70,9 +70,9 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-function readOptional(file: string): string {
+async function readOptional(file: string, signal: AbortSignal): Promise<string> {
   try {
-    return fs.readFileSync(file, "utf8");
+    return await fs.readFile(file, { encoding: "utf8", signal });
   } catch (error) {
     if (!isMissing(error)) throw error;
     return "";
@@ -80,34 +80,44 @@ function readOptional(file: string): string {
 }
 
 // Publish complete files so failed writes leave the previous evidence intact.
-function publish(file: string, content: string, once = false): void {
+async function publish(file: string, content: string, signal: AbortSignal, once = false): Promise<void> {
+  signal.throwIfAborted();
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temp, content, { flag: "wx" });
+    await fs.writeFile(temp, content, { flag: "wx", signal });
+    signal.throwIfAborted();
     if (once) {
       try {
-        fs.linkSync(temp, file);
+        await fs.link(temp, file);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
     } else {
-      fs.renameSync(temp, file);
+      await fs.rename(temp, file);
+      return;
     }
-  } finally {
-    fs.rmSync(temp, { force: true });
+  } catch (error) {
+    await fs.rm(temp, { force: true });
+    throw error;
   }
+  await fs.rm(temp, { force: true });
 }
 
 export class TeardownArchive {
   private readonly journal: string;
-  private history: string;
+  private history = "";
   private last?: AttemptStarted | AttemptFinished;
 
   constructor(private readonly dir: string) {
     this.journal = path.join(dir, "teardown.ndjson");
-    this.history = readOptional(this.journal);
-    for (const line of this.history.trimEnd().split("\n")) {
-      if (line) this.last = JSON.parse(line) as AttemptStarted | AttemptFinished;
+  }
+
+  async load(signal: AbortSignal): Promise<void> {
+    this.history = await readOptional(this.journal, signal);
+    const end = this.history.trimEnd().length;
+    if (end > 0) {
+      const start = this.history.lastIndexOf("\n", end - 1) + 1;
+      this.last = JSON.parse(this.history.slice(start, end)) as AttemptStarted | AttemptFinished;
     }
   }
 
@@ -117,45 +127,53 @@ export class TeardownArchive {
       : undefined;
   }
 
-  start(snapshot: string, request: TeardownRequest, at: string): number {
-    fs.mkdirSync(this.dir, { recursive: true });
+  async start(snapshot: string, request: TeardownRequest, at: string, signal: AbortSignal): Promise<number> {
+    await fs.mkdir(this.dir, { recursive: true });
+    signal.throwIfAborted();
     const file = path.join(this.dir, "record.json");
     try {
-      if (!fs.statSync(file).isFile()) throw new Error(`Invalid teardown snapshot: ${file}`);
+      if (!(await fs.stat(file)).isFile()) throw new Error(`Invalid teardown snapshot: ${file}`);
     } catch (error) {
       if (!isMissing(error)) throw error;
-      publish(file, snapshot, true);
+      await publish(file, snapshot, signal, true);
     }
     const attempt = (this.last?.attempt ?? 0) + 1;
-    this.append({
+    await this.append({
       attempt,
       event: "started",
       at,
       request: { force: request.force ?? false, kill: request.kill ?? false, reason: request.reason },
-    });
+    }, signal);
     return attempt;
   }
 
-  finish(
+  async finish(
     attempt: number,
     result: TeardownResult,
     at: string,
     verified: { stewards: StewardIdentity[]; resources: TeardownResources },
-  ): void {
+    signal: AbortSignal,
+  ): Promise<void> {
     const { status, steps, warnings } = result;
-    this.append({
+    await this.append({
       attempt, event: "finished", at, status, steps, warnings,
       stewardIds: verified.stewards.map((steward) => steward.id),
       stewards: verified.stewards,
       resources: verified.resources,
-    });
+    }, signal);
   }
 
-  private append(entry: AttemptStarted | AttemptFinished): void {
+  private async append(entry: AttemptStarted | AttemptFinished, signal: AbortSignal): Promise<void> {
     // Preserve all existing bytes. Atomically publish the extended journal so
     // a short write cannot corrupt the last entry or prevent a later retry.
     const history = this.history + JSON.stringify(entry) + "\n";
-    publish(this.journal, history);
+    await publish(this.journal, history, signal);
+    if (entry.event === "finished" && signal.aborted) {
+      // A rename already submitted to the filesystem cannot be cancelled.
+      // Restore the unmatched start before releasing the archive fence.
+      await publish(this.journal, this.history, new AbortController().signal);
+      signal.throwIfAborted();
+    }
     this.history = history;
     this.last = entry;
   }
@@ -168,23 +186,13 @@ function sha256(content: string | Buffer): string {
 export async function archiveTeardownEvidence(
   dir: string,
   primary: SessionRecord,
-  readContainerLogs: (id: string) => string | Promise<string>,
+  logs: string | undefined,
   warnings: string[],
-  readCurrent: () => SessionRecord = () => primary,
+  current: SessionRecord,
+  signal: AbortSignal,
 ): Promise<void> {
-  let logs: string | undefined;
-  if (primary.containerId) {
-    try {
-      logs = await readContainerLogs(primary.containerId);
-    } catch (error) {
-      warnings.push(`container logs unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } else if (primary.kind === "spawn") {
-    warnings.push("container logs unavailable: no tracked container ID");
-  }
-  if (logs !== undefined) publish(path.join(dir, "container.log"), logs);
+  if (logs !== undefined) await publish(path.join(dir, "container.log"), logs, signal);
 
-  const current = readCurrent();
   const extraction = parseExtractionResult(current.extractionResult);
   if (!extraction) {
     if (primary.kind === "spawn" || current.extractionResult !== undefined) {
@@ -197,11 +205,13 @@ export async function archiveTeardownEvidence(
   const resultPath = path.join(artifacts, "extraction-result.json");
   const patchPath = path.join(artifacts, "spawn.patch");
   const resultJson = JSON.stringify(extraction, null, 2) + "\n";
-  fs.mkdirSync(artifacts, { recursive: true });
+  signal.throwIfAborted();
+  await fs.mkdir(artifacts, { recursive: true });
 
   if (extraction.status === "failed") {
-    publish(resultPath, resultJson);
-    fs.rmSync(patchPath, { force: true });
+    await publish(resultPath, resultJson, signal);
+    signal.throwIfAborted();
+    await fs.rm(patchPath, { force: true });
     return;
   }
 
@@ -209,13 +219,18 @@ export async function archiveTeardownEvidence(
   if (sha256(patchText) !== expected) {
     warnings.push("registry extraction patch digest mismatch");
     // Preserve any previously archived patch and the JSON that describes it.
-    if (!fs.existsSync(patchPath)) publish(resultPath, resultJson);
+    try {
+      await fs.stat(patchPath);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      await publish(resultPath, resultJson, signal);
+    }
     return;
   }
 
-  publish(patchPath, patchText);
-  if (sha256(fs.readFileSync(patchPath)) !== expected) {
+  await publish(patchPath, patchText, signal);
+  if (sha256(await fs.readFile(patchPath, { signal })) !== expected) {
     throw new Error("archived extraction patch digest mismatch");
   }
-  publish(resultPath, resultJson);
+  await publish(resultPath, resultJson, signal);
 }

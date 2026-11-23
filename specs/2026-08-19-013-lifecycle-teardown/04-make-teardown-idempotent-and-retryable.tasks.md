@@ -39,7 +39,7 @@
 
 ### Tasks
 
-- [ ] **Enforce server-side deadlines for teardown call-outs**
+- [x] **Enforce server-side deadlines for teardown call-outs**
 
   Bound archive I/O, Docker log reads and compute operations, Castra steward cleanup, and exact Git worktree and branch operations. Reuse provider deadlines where they bound the entire call-out and keep blocking I/O off the Brood event loop.
 

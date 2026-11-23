@@ -2,7 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { execTextInGroup } from "./sense-io.js";
+import { execTextInGroup } from "./exec-group.js";
 
 function alive(pid: number): boolean {
   try {

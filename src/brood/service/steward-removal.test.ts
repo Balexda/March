@@ -95,6 +95,33 @@ describe("removeStewardViaCastra", () => {
     expect(gw.sessions.map(({ sessionId }) => sessionId)).toEqual(["adjacent"]);
   });
 
+  it("ends a stalled in-flight Castra request when the teardown deadline aborts", async () => {
+    const gw: CastraStewardGateway = {
+      listSessions: (_profile, _group, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+      removeSession: vi.fn(),
+    };
+    const controller = new AbortController();
+    const reason = new Error("steward removal deadline exceeded");
+    const removal = removeStewardViaCastra(gw, { sessionId: "s", profile: "smithy", worktreePath: "/wt/aaa" },
+      controller.signal);
+    controller.abort(reason);
+
+    await expect(removal).rejects.toBe(reason);
+    expect(gw.removeSession).not.toHaveBeenCalled();
+  });
+
+  it("passes the teardown deadline to each Castra removal request", async () => {
+    const gw = fakeGateway([session({ sessionId: "live", worktreePath: "/wt/aaa" })]);
+    const remove = vi.spyOn(gw, "removeSession");
+    const { signal } = new AbortController();
+
+    await removeStewardViaCastra(gw, { sessionId: "live", profile: "smithy", worktreePath: "/wt/aaa" }, signal);
+
+    expect(remove).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "live", signal }));
+  });
+
   it("reports absent only when Castra is reachable and has no matching session", async () => {
     const gw = fakeGateway([
       session({ sessionId: "other", worktreePath: "/wt/zzz" }),

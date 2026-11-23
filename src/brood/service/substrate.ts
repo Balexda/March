@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
-  removeSpawnWorktreeExact,
+  removeSpawnWorktreeExactAsync,
   type RemoveWorktreeResult,
 } from "../worktree.js";
 
@@ -18,28 +18,43 @@ export type StopComputeResult =
 /** Substrate-specific call-outs for reclaiming session compute and workspace. */
 export interface TeardownSubstrate {
   /** Stop without escalation or removal. Throw when a graceful stop cannot be verified. */
-  stopCompute?(target: ComputeTarget): Promise<StopComputeResult>;
+  stopCompute?(target: ComputeTarget, signal?: AbortSignal): Promise<StopComputeResult>;
 
   /** Resolve only after verifying absence. Throw on failed or unverified removal. */
-  removeCompute(target: ComputeTarget, stopped?: StopComputeResult): Promise<void>;
+  removeCompute(target: ComputeTarget, stopped?: StopComputeResult, signal?: AbortSignal): Promise<void>;
 
   /** Reclaim only the supplied worktree path or branch. */
   removeWorkspace(
     repoRoot: string,
     target: { worktreePath?: string; branch?: string },
-  ): RemoveWorktreeResult;
+    signal?: AbortSignal,
+  ): RemoveWorktreeResult | Promise<RemoveWorktreeResult>;
 }
 
 const execFileAsync = promisify(execFile);
 const dockerOptions = { timeout: 10_000, killSignal: "SIGKILL" } as const;
 
-async function findContainer(name: string, signal?: AbortSignal): Promise<string> {
-  const { stdout } = await execFileAsync("docker", [
+async function docker(args: string[], signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const command = execFileAsync("docker", args, { ...dockerOptions, signal });
+  try {
+    return (await command).stdout.trim();
+  } catch (error) {
+    const { child } = command;
+    // Keep the retry fence until the local client has actually exited.
+    if (signal.aborted && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    throw error;
+  }
+}
+
+async function findContainer(name: string, signal: AbortSignal): Promise<string> {
+  return docker([
     "container", "ls", "--all", "--no-trunc",
     "--filter", "name=^/" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
     "--format", '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}',
-  ], signal ? { ...dockerOptions, signal } : dockerOptions);
-  return stdout.trim();
+  ], signal);
 }
 
 function verifiedId(containerName: string, found: string): string {
@@ -50,18 +65,16 @@ function verifiedId(containerName: string, found: string): string {
   return id;
 }
 
-async function stopHostCompute({ containerName }: ComputeTarget): Promise<StopComputeResult> {
-  const signal = AbortSignal.timeout(dockerOptions.timeout);
-  const options = { ...dockerOptions, signal };
+async function stopHostCompute(
+  { containerName }: ComputeTarget,
+  signal = AbortSignal.timeout(dockerOptions.timeout),
+): Promise<StopComputeResult> {
   const found = await findContainer(containerName, signal);
   if (!found) return { outcome: "absent" };
   const containerId = verifiedId(containerName, found);
-  const inspectStatus = async () => {
-    const { stdout } = await execFileAsync("docker", [
-      "container", "inspect", "--format", "{{.State.Status}}", "--", containerId,
-    ], options);
-    return stdout.trim();
-  };
+  const inspectStatus = () => docker([
+    "container", "inspect", "--format", "{{.State.Status}}", "--", containerId,
+  ], signal);
   const status = await inspectStatus();
   if (status === "exited" || status === "created") {
     return { outcome: "already-stopped", containerId };
@@ -71,11 +84,10 @@ async function stopHostCompute({ containerName }: ComputeTarget): Promise<StopCo
   }
 
   // Send only SIGTERM. Docker stop can escalate on its own when its grace period expires.
-  await execFileAsync("docker", [
+  await docker([
     "container", "kill", "--signal", "SIGTERM", "--", containerId,
-  ], options);
-  const { stdout } = await execFileAsync("docker", ["container", "wait", "--", containerId], options);
-  const exitCode = stdout.trim();
+  ], signal);
+  const exitCode = await docker(["container", "wait", "--", containerId], signal);
   if (!/^\d+$/.test(exitCode) || exitCode === "137" || await inspectStatus() !== "exited") {
     throw new Error(`Container "${containerName}" did not reach a verified graceful stop (exit: ${exitCode})`);
   }
@@ -85,8 +97,9 @@ async function stopHostCompute({ containerName }: ComputeTarget): Promise<StopCo
 async function removeHostCompute(
   { containerName }: ComputeTarget,
   stopped?: StopComputeResult,
+  signal = AbortSignal.timeout(dockerOptions.timeout),
 ): Promise<void> {
-  const found = await findContainer(containerName);
+  const found = await findContainer(containerName, signal);
   if (!found) return;
   const id = verifiedId(containerName, found);
   if (stopped && (stopped.outcome === "absent" || stopped.containerId !== id)) {
@@ -94,9 +107,9 @@ async function removeHostCompute(
   }
   // Delete by immutable ID so a replacement at the same name is never removed.
   try {
-    await execFileAsync("docker", [
+    await docker([
       "container", "rm", ...(stopped ? [] : ["--force"]), "--", id,
-    ], dockerOptions);
+    ], signal);
   } catch (err) {
     const failure = err as { code?: number; signal?: string; stderr?: string };
     if (failure.code !== 1 || failure.signal ||
@@ -104,7 +117,7 @@ async function removeHostCompute(
       throw err;
     }
   }
-  if (await findContainer(containerName)) {
+  if (await findContainer(containerName, signal)) {
     throw new Error(`Container "${containerName}" still exists after removal`);
   }
 }
@@ -113,5 +126,5 @@ async function removeHostCompute(
 export const hostTeardownSubstrate: TeardownSubstrate = {
   stopCompute: stopHostCompute,
   removeCompute: removeHostCompute,
-  removeWorkspace: removeSpawnWorktreeExact,
+  removeWorkspace: removeSpawnWorktreeExactAsync,
 };

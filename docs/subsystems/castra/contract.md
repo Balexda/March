@@ -130,7 +130,7 @@ failure appears in the startup diagnostic and the errored
 | Request envelope | Header `Authorization: Bearer <token>`. Path param `id` is the session id. Query requires `profile`; optional `pruneWorktree` is a boolean and defaults to false. |
 | Response envelope | `200` with `{ "ok": true, "removed": boolean }`. |
 | Authentication behavior | Bearer-token protected. Missing or invalid bearer tokens return `401` with `unauthorized`. |
-| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false`; agent-deck remove failures return `502`; unexpected failures return `500`. |
+| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false`; agent-deck remove failures return `502`; unexpected failures return `500`. Castra gives the remove command 10 seconds and kills its process group on timeout. A timeout returns `502` and marks the `castra.remove` span errored. |
 
 `CastraSession` response shape:
 

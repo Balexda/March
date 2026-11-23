@@ -2,7 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { removeSpawnWorktreeExact } from "../worktree.js";
+import { removeSpawnWorktreeExactAsync } from "../worktree.js";
 import { hostTeardownSubstrate } from "./substrate.js";
 
 const { docker } = vi.hoisted(() => ({ docker: vi.fn() }));
@@ -74,12 +74,13 @@ describe("hostTeardownSubstrate", () => {
       "--filter", "name=^/march-legate-legate\\.test$",
       "--format", '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}',
     ];
-    const deadline = { timeout: 10_000, killSignal: "SIGKILL" };
+    const deadline = { timeout: 10_000, killSignal: "SIGKILL", signal: expect.any(AbortSignal) };
     expect(docker.mock.calls).toEqual([
       ["docker", lookup, deadline],
       ["docker", ["container", "rm", "--force", "--", id], deadline],
       ["docker", lookup, deadline],
     ]);
+    expect(new Set(docker.mock.calls.map((call) => call[2].signal)).size).toBe(1);
   });
 
   it("succeeds when the container is already absent", async () => {
@@ -118,7 +119,7 @@ describe("hostTeardownSubstrate", () => {
     expect(docker).toHaveBeenCalledTimes(1);
   });
 
-  it("delegates workspace reclamation to removeSpawnWorktreeExact", () => {
-    expect(hostTeardownSubstrate.removeWorkspace).toBe(removeSpawnWorktreeExact);
+  it("delegates workspace reclamation to the cancellable exact Git helper", () => {
+    expect(hostTeardownSubstrate.removeWorkspace).toBe(removeSpawnWorktreeExactAsync);
   });
 });

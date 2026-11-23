@@ -112,6 +112,8 @@ export interface RemoveSessionRequest {
   readonly sessionId: string;
   readonly pruneWorktree: boolean;
   readonly traceKey?: string;
+  /** Caller deadline; aborts the request in addition to the client timeout. */
+  readonly signal?: AbortSignal;
 }
 
 interface RequestOptions {
@@ -119,6 +121,7 @@ interface RequestOptions {
   readonly json?: unknown;
   readonly expectStatus: number;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 /** Normalize a `/v1/sessions/recover` response body into a {@link RecoverReport}. */
@@ -135,6 +138,11 @@ async function parseJsonBody(res: Response): Promise<unknown> {
   } catch {
     return {};
   }
+}
+
+function timeoutSignal(opts: RequestOptions): AbortSignal {
+  const timeout = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  return opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
 }
 
 export class CastraClient {
@@ -163,10 +171,10 @@ export class CastraClient {
   }
 
   /** GET /v1/sessions — list sessions (optionally filtered by group). */
-  async listSessions(profile: string, group?: string): Promise<CastraSession[]> {
+  async listSessions(profile: string, group?: string, signal?: AbortSignal): Promise<CastraSession[]> {
     const qs = new URLSearchParams({ profile });
     if (group) qs.set("group", group);
-    const body = await this.request("GET", `/v1/sessions?${qs.toString()}`, { expectStatus: 200 });
+    const body = await this.request("GET", `/v1/sessions?${qs.toString()}`, { expectStatus: 200, signal });
     const sessions = (body as { sessions?: CastraSession[] }).sessions;
     return Array.isArray(sessions) ? sessions : [];
   }
@@ -228,7 +236,7 @@ export class CastraClient {
     const body = await this.request(
       "DELETE",
       `/v1/sessions/${encodeURIComponent(req.sessionId)}?${qs.toString()}`,
-      { traceKey: req.traceKey, expectStatus: 200 },
+      { traceKey: req.traceKey, expectStatus: 200, signal: req.signal },
     );
     return { removed: Boolean((body as { removed?: boolean }).removed) };
   }
@@ -295,12 +303,13 @@ export class CastraClient {
       // `docker wait`, often minutes) has not yet seen Castra close the idle
       // keep-alive socket, and writing to it fails with EPIPE.
       await new Promise<void>((resolve) => setImmediate(resolve));
+      opts.signal?.throwIfAborted();
       try {
         res = await this.fetchImpl(url, {
           method,
           headers,
           body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
-          signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
+          signal: timeoutSignal(opts),
         });
         break;
       } catch (err) {
@@ -310,6 +319,7 @@ export class CastraClient {
         const code = cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
         // EPIPE: Castra had already closed the socket, so it never read this
         // request — retrying once on a fresh connection cannot double-send.
+        opts.signal?.throwIfAborted();
         if (attempt === 1 && code === "EPIPE") continue;
         const causeText = cause && typeof cause === "object"
           ? [code, (cause as { message?: unknown }).message]

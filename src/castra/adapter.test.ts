@@ -8,10 +8,15 @@ import path from "node:path";
 
 const childProcessMock = vi.hoisted(() => ({
   execFileSync: vi.fn(),
+  execTextInGroup: vi.fn(),
 }));
 
 vi.mock("node:child_process", () => ({
   execFileSync: childProcessMock.execFileSync,
+}));
+
+vi.mock("../shared/exec-group.js", () => ({
+  execTextInGroup: childProcessMock.execTextInGroup,
 }));
 
 import {
@@ -331,6 +336,7 @@ describe("castra adapter — operations", () => {
 
   beforeEach(() => {
     childProcessMock.execFileSync.mockReset();
+    childProcessMock.execTextInGroup.mockReset().mockResolvedValue("");
     process.env.MARCH_STEWARD_SKILLS_DIR = sidecarRoot;
     // Start each test with a clean sessions dir so a prior launch's sidecar
     // can't make a later "should not write" assertion pass spuriously.
@@ -589,7 +595,7 @@ describe("castra adapter — operations", () => {
     expect(gitShowCurrentCalls).toHaveLength(1);
   });
 
-  it("re-derives the branch after the session is removed (cache invalidation #264)", () => {
+  it("re-derives the branch after the session is removed (cache invalidation #264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -602,7 +608,7 @@ describe("castra adapter — operations", () => {
     });
     const adapter = createAgentDeckAdapter();
     adapter.list({ profile: "march" });
-    adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
+    await adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
     adapter.list({ profile: "march" });
     const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
       (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
@@ -611,7 +617,7 @@ describe("castra adapter — operations", () => {
     expect(gitShowCurrentCalls).toHaveLength(2);
   });
 
-  it("forgets a session's metadata after remove", () => {
+  it("forgets a session's metadata after remove", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -631,7 +637,7 @@ describe("castra adapter — operations", () => {
       group: "g",
       metadata: { sliceId: "slice-7" },
     });
-    expect(adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).toEqual({
+    await expect(adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).resolves.toEqual({
       removed: true,
     });
     const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
@@ -663,28 +669,38 @@ describe("castra adapter — operations", () => {
     ).toThrow(CastraConflictError);
   });
 
-  it("reports removed:true on success and removed:false when the session is already gone", () => {
+  it("reports removed:true on success and removed:false when the session is already gone", async () => {
     const adapter = createAgentDeckAdapter();
-    childProcessMock.execFileSync.mockReturnValueOnce("");
-    expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
-      removed: true,
-    });
-    childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw execError("session not found");
-    });
-    expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
-      removed: false,
-    });
+    const input = { profile: "p", sessionId: "s", pruneWorktree: true };
+    await expect(adapter.remove(input)).resolves.toEqual({ removed: true });
+    expect(childProcessMock.execTextInGroup).toHaveBeenCalledWith(
+      "agent-deck",
+      ["-p", "p", "session", "remove", "s", "--prune-worktree", "--force"],
+      expect.objectContaining({ timeout: 10_000 }),
+    );
+    childProcessMock.execTextInGroup.mockRejectedValueOnce(
+      Object.assign(execError("session not found"), { code: 1 }),
+    );
+    await expect(adapter.remove(input)).resolves.toEqual({ removed: false });
   });
 
-  it("maps an unexpected remove failure to a 502-class error", () => {
+  it("maps an unexpected remove failure to a 502-class error", async () => {
     const adapter = createAgentDeckAdapter();
-    childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw execError("tmux server connection refused");
-    });
-    expect(() => adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toThrow(
-      CastraAgentDeckError,
+    childProcessMock.execTextInGroup.mockRejectedValueOnce(
+      Object.assign(execError("tmux server connection refused"), { code: 1 }),
     );
+    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true }))
+      .rejects.toBeInstanceOf(CastraAgentDeckError);
+  });
+
+  it("reports a timeout even when partial stderr contains a not-found message", async () => {
+    const adapter = createAgentDeckAdapter();
+    childProcessMock.execTextInGroup.mockRejectedValueOnce(Object.assign(
+      new Error("timed out after 10000ms"),
+      { killed: true, signal: "SIGKILL", stderr: "session not found" },
+    ));
+    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: false }))
+      .rejects.toThrow("timed out after 10000ms");
   });
 
   it("throws not-found when showing a missing session", () => {

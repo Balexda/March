@@ -81,6 +81,7 @@ import {
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
 import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+import { BroodWorkspaceReclaimingError } from "../brood/service/client.js";
 import { publishStewardAttachedToHerald } from "./service/herald-registration.js";
 
 export {
@@ -1289,6 +1290,8 @@ export async function runHatcherySpawn(
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
+  // Set once the image build starts; before that there is no image to remove.
+  let imageBuildStarted = false;
   // Lifecycle stage tracker: advanced as the handoff progresses so the finally
   // block (and the rollback span) can report WHICH step failed when a step
   // throws — the container can exit 0 yet a later step fail (issue #211), so
@@ -1334,7 +1337,10 @@ export async function runHatcherySpawn(
     // worker killed, crash). The launch-time row makes the steward Brood-trackable
     // so ghost-cleanup can reclaim it instead of deferring on a "registration gap".
     // Best-effort and MARCH_BROOD_URL-gated: a missing/unreachable registry never
-    // fails the dispatch. The onSucceeded hook later enriches this row.
+    // fails the dispatch. The onSucceeded hook later enriches this row. The
+    // exception is Brood refusing the row because it is reclaiming this group's
+    // workspace: that throws, and the rollback below removes the steward session
+    // and worktree instead of leaving it running unregistered (#717 review).
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
 
@@ -1386,6 +1392,7 @@ export async function runHatcherySpawn(
     );
 
     stage = "image_build";
+    imageBuildStarted = true;
     dispatch.span("image.build", (buildSpan) => {
       const handle = createBuildContext(managerWorktree);
       try {
@@ -1700,7 +1707,10 @@ export async function runHatcherySpawn(
     // a manager worktree to preserve. Parking keeps the worker container/image and
     // renames the worktree/branch aside (the canonical names are freed for the
     // self-healing re-dispatch); the destructive rollback runs otherwise.
-    const park = parkFailedSpawnsEnabled() && !!mgr && !handedOff;
+    // Never park a launch Brood refused mid-reclaim: renaming the worktree aside
+    // would race Brood's exact-path Git cleanup of the same checkout.
+    const park = parkFailedSpawnsEnabled() && !!mgr && !handedOff &&
+      !(err instanceof BroodWorkspaceReclaimingError);
     await dispatch.spanAsync(
       "spawn.rollback",
       async () => {
@@ -1708,7 +1718,7 @@ export async function runHatcherySpawn(
         // failed snapshot/base can be inspected (`docker exec`/`cp` by spawn id).
         if (!park) {
           if (containerId) removeSpawnContainer(spawnId);
-          removeSpawnImage(spawnId);
+          if (imageBuildStarted) removeSpawnImage(spawnId);
         }
         if (mgr && !handedOff) {
           if (park) {
