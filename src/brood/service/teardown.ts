@@ -254,8 +254,12 @@ async function runTeardown(
     archiveError = error;
   }
   const completion = archive?.completion;
+  const recoveredStewards = completion ? unchangedStewardIds(completion.stewards ?? []) : [];
+  // A standalone steward is its own primary: recover it only while its
+  // registration still matches the removed session; otherwise tear down anew.
+  const primaryUnchanged = primary.kind !== "steward" || recoveredStewards.includes(primary.id);
   if (completion && completion.attempt === store.pendingTeardownCompletion(primary.id) &&
-      sameResources(completion.resources, teardownResources(primary))) {
+      sameResources(completion.resources, teardownResources(primary)) && primaryUnchanged) {
     // A crash after the terminal journal write can leave one or both rows
     // behind, possibly followed by a status-only PATCH. Finish the registry
     // update for the group the attempt verified, without repeating cleanup.
@@ -264,7 +268,7 @@ async function runTeardown(
     // Complete only steward registrations that still match what the attempt
     // removed (same row, parent, and Castra target); a re-registered steward
     // was never verified gone and is left for a real retry.
-    const verified = unchangedStewardIds(completion.stewards ?? []);
+    const verified = recoveredStewards;
     completeRegistry(completion.at, verified);
     return unremovedStewards(verified) ? finish("partial") : finish("success");
   }
@@ -465,8 +469,12 @@ async function runTeardown(
   }
 
   const failed = steps.some((step) => step.outcome === "failed");
+  // Re-check after the Git steps' awaits: a registration that changed since
+  // the pre-Git check (including a standalone steward primary) must not complete.
+  const changedSteward = unverifiedSteward ||
+    (!stewardRemovalFailed && unremovedStewards(unchangedStewardIds(verifiedStewards)));
   return finalize(
-    stewardRemovalFailed ? "error" : failed || unverifiedSteward ? "partial" : "success",
+    stewardRemovalFailed ? "error" : failed || changedSteward ? "partial" : "success",
   );
 
   async function removeOneSteward(row: SessionRecord): Promise<TeardownStep> {
@@ -519,12 +527,15 @@ async function runTeardown(
   /** Warn about live stewards under the spawn that `verified` does not cover. */
   function unremovedStewards(verified: readonly string[]): boolean {
     // Only stewards currently under the spawn share its worktree; one that moved
-    // to another spawn belongs to that group now.
+    // to another spawn belongs to that group now. A standalone steward is its
+    // own primary and must itself be verified unchanged before completion.
     const candidates = new Set(
-      spawn ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id) : [],
+      spawn
+        ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id)
+        : primary.kind === "steward" ? [primary.id] : [],
     );
     const live = [...candidates].filter((stewardId) =>
-      stewardId !== primary.id && !verified.includes(stewardId) &&
+      !verified.includes(stewardId) &&
       store.get(stewardId)?.status !== "torndown");
     for (const stewardId of live) {
       warnings.push(`steward "${stewardId}" was not removed by this teardown; retry teardown`);

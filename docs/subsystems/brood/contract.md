@@ -109,7 +109,10 @@ any steward removal fails, or a steward registers under the spawn (or a removed
 steward's registration changes) while earlier steps are in progress, Git cleanup
 is deferred and the row stays retryable. Ordinary completion and recovery apply
 the same rule: a steward counts as removed only while its registration still
-matches what was removed. The
+matches what was removed. This includes a standalone steward that is its own
+primary: if its registration changes after removal, the result is
+`tearing-down` and a retry removes the new session (recovery likewise falls
+through to a full teardown). The
 journal's `finished` entry lists only the stewards whose removal that attempt
 verified.
 The journal records each verified steward's registration identity (row, parent,

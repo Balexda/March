@@ -981,6 +981,76 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     }
   });
 
+  describe("standalone steward primary", () => {
+    const soloId = "ad-session-solo";
+    const seedSolo = (store: SessionStore) => store.register({
+      id: soloId, kind: "steward", agentDeckSessionId: soloId, profile: "march", status: "running",
+    });
+
+    it("completes an unchanged standalone steward", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const rec = recordingDeps(homeDir);
+      try {
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+
+    it("keeps a standalone steward retryable when its Castra session changes mid-teardown", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const rec = recordingDeps(homeDir);
+      const remove = rec.deps.removeSteward!;
+      rec.deps.removeSteward = async (input) => {
+        const result = await remove(input);
+        store.update(soloId, { agentDeckSessionId: "ad-session-yyy" });
+        return result;
+      };
+      try {
+        const result = await teardownSession(store, soloId, {}, rec.deps);
+        expect(result.status).toBe("tearing-down");
+        expect(result.warnings.join("\n")).toContain(`"${soloId}"`);
+        expect(store.get(soloId)?.status).toBe("tearing-down");
+
+        rec.deps.removeSteward = remove;
+        rec.calls.length = 0;
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-yyy");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+
+    it("does not recover a standalone steward whose Castra session changed", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const update = store.update.bind(store);
+      const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+        if (id === soloId && changes.status === "torndown") throw new Error("registry unavailable");
+        return update(id, changes);
+      });
+      const rec = recordingDeps(homeDir);
+      try {
+        await expect(teardownSession(store, soloId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+        fail.mockRestore();
+        store.update(soloId, { agentDeckSessionId: "ad-session-yyy" });
+        rec.calls.length = 0;
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-yyy");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+  });
+
   it("leaves a steward that moved to another spawn mid-teardown under its new owner", async () => {
     const homeDir = makeHome();
     const store = new SessionStore({ homeDir });
