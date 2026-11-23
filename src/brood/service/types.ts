@@ -196,7 +196,7 @@ export interface ListSessionsFilter {
 export interface TeardownRequest {
   /** Permit teardown of a created or running spawn and protected retries. */
   force?: boolean;
-  /** Explicit kill mode. Currently rejected as unsupported. */
+  /** Skip graceful stop and force removal after the archive succeeds. */
   kill?: boolean;
   /** Operator-supplied reason, recorded as `teardownReason`. */
   reason?: string;
@@ -204,7 +204,7 @@ export interface TeardownRequest {
 
 /** Outcome of a single teardown step. */
 export interface TeardownStep {
-  step: "archive" | "container" | "steward" | "worktree" | "branch";
+  step: "stop" | "archive" | "container" | "steward" | "worktree" | "branch";
   outcome: "ok" | "skipped" | "failed";
   detail?: string;
 }

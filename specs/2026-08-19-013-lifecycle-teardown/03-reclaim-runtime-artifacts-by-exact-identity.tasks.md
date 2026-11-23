@@ -53,7 +53,7 @@
 
 ### Tasks
 
-- [ ] **Separate graceful stop from verified removal**
+- [x] **Separate graceful stop from verified removal**
 
   Apply the target stop and remove contract using S1's exact compute identity. Requires US2's fail-closed archive handoff; do not enable the modes before US2 merges.
 

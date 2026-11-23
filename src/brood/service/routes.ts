@@ -31,7 +31,6 @@ import {
 import {
   BroodConflictError,
   BroodNotFoundError,
-  BroodUnsupportedModeError,
   isDeferredTeardownStep,
   TEARDOWN_DETAIL_LIMIT,
   teardownSession,
@@ -651,10 +650,6 @@ export async function registerRoutes(
       }
       if (err instanceof BroodConflictError) {
         reply.code(409);
-        return { error: err.message };
-      }
-      if (err instanceof BroodUnsupportedModeError) {
-        reply.code(400);
         return { error: err.message };
       }
       reply.code(500);

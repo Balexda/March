@@ -63,6 +63,7 @@ function recordingDeps(
   // Substrate adapter (#169): spawn + workspace reclamation behind one
   // injectable seam, mirroring how teardown depends on it in production.
   const substrate: TeardownSubstrate = {
+    stopCompute: async ({ sessionId }) => ({ outcome: "already-stopped", containerId: sessionId }),
     removeCompute: async ({ sessionId }) => {
       calls.push(`container:${sessionId}`);
     },
@@ -388,7 +389,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(removeCompute).toHaveBeenCalledOnce();
     expect(removeCompute).toHaveBeenCalledWith({
       sessionId: "ephemeral", kind: "legate", containerName: "march-legate-ephemeral",
-    });
+    }, { outcome: "already-stopped", containerId: "ephemeral" });
     expect(result.status).toBe("torndown");
     // The standalone legate row itself is archived, captured before tearing-down.
     const snapshot = JSON.parse(
@@ -805,7 +806,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
 
       const result = await teardownSession(store, spawnId, { force: true }, rec.deps);
       expect(result.status).toBe("torndown");
-      expect(result.steps.map((step) => step.step)).toEqual(["archive", "container", "steward", "worktree", "branch"]);
+      expect(result.steps.map((step) => step.step)).toEqual(["stop", "archive", "container", "steward", "worktree", "branch"]);
       expect(rec.calls).toContain("logs:container-new");
       expect(rec.worktreeTargets).toContainEqual(expect.objectContaining({ worktreePath: "/wt/new" }));
     } finally {
@@ -1313,10 +1314,10 @@ describe.skipIf(!sqliteAvailable)("teardownSession tracing", () => {
     try {
       await expect(teardownSession(store, "missing", {}, deps)).rejects.toThrow(/No session/);
       await expect(teardownSession(store, stewardId, {}, deps)).rejects.toThrow(/Pass force/);
-      await expect(teardownSession(store, spawnId, { kill: true, force: true }, deps))
-        .rejects.toThrow(/unsupported/);
+      await expect(teardownSession(store, spawnId, { kill: true }, deps))
+        .rejects.toThrow(/Pass force/);
       expect(created.map((span) => span.attributes["march.teardown.outcome"]))
-        .toEqual(["not-found", "conflict", "unsupported-mode"]);
+        .toEqual(["not-found", "conflict", "conflict"]);
       for (const span of created) {
         expect(span.name).toBe("brood.teardown");
         expect(span.ended).toBe(true);

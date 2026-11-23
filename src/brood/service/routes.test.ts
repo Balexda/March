@@ -18,7 +18,8 @@ import {
   type ContainerObserver,
 } from "./container-observer.js";
 import { sqliteAvailable } from "./sqlite.js";
-import { SessionStore } from "./store.js";
+import { broodArchiveDir, SessionStore } from "./store.js";
+import type { StopComputeResult } from "./substrate.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
 import { BroodConflictError, BroodNotFoundError, teardownSession } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
@@ -968,6 +969,107 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect((await app.inject({ method: "POST", url: "/sessions/missing/teardown", payload: {} })).statusCode).toBe(404);
     expect((await app.inject({ method: "POST", url: "/sessions/live/teardown", payload: {} })).statusCode).toBe(409);
   });
+
+  it.each(["graceful", "kill", "unsupported", "unverified"] as const)(
+    "enforces archive and removal ordering for %s teardown",
+    async (mode) => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "brood-stop-"));
+      const archiveDir = broodArchiveDir("live", homeDir);
+      const log = path.join(archiveDir, "container.log");
+      const calls: string[] = [];
+      let state = "running";
+      let failArchive = mode === "graceful";
+      const stop = vi.fn(async (): Promise<StopComputeResult> => {
+        calls.push("stop");
+        if (mode === "unverified") throw new Error("Stop deadline exceeded");
+        if (state === "stopped") return { outcome: "already-stopped", containerId: "runtime-id" };
+        state = "stopped";
+        return { outcome: "stopped", containerId: "runtime-id" };
+      });
+      const { app, store } = await buildApp((id, request) => teardownSession(store, id, request, {
+        homeDir,
+        substrate: {
+          stopCompute: mode === "unsupported" ? undefined : stop,
+          removeCompute: async (_target, stopped) => {
+            calls.push("remove");
+            expect(fs.readFileSync(log, "utf8")).toBe(`logs while ${state}`);
+            expect(stopped).toEqual(mode === "kill" ? undefined : {
+              outcome: "already-stopped", containerId: "runtime-id",
+            });
+            state = "removed";
+          },
+          removeWorkspace: (_repo, target) => {
+            calls.push(target.worktreePath ? "worktree" : "branch");
+            return { worktreeRemoved: true, branchDeleted: true };
+          },
+        },
+        readContainerLogs: (id) => {
+          calls.push(`logs:${id}`);
+          if (failArchive) fs.mkdirSync(log);
+          return `logs while ${state}`;
+        },
+        removeSteward: async () => {
+          calls.push("steward");
+          return { outcome: "removed", removedIds: ["steward"] };
+        },
+        pathExists: () => true,
+      }));
+      const teardown = (payload: TeardownRequest) =>
+        app.inject({ method: "POST", url: "/sessions/live/teardown", payload });
+      try {
+        store.register({
+          id: "live", kind: "spawn", status: "running", containerId: "recorded-log-id",
+          repoPath: "/repo", worktreePath: "/wt/live", branch: "topic/live",
+        });
+        store.register({ id: "steward", kind: "steward", parentId: "live" });
+        const kill = mode === "kill";
+        expect((await teardown({ kill })).statusCode).toBe(409);
+        const first = await teardown({ kill, force: true });
+        expect(first.statusCode).toBe(200);
+        if (kill) {
+          expect(first.json().status).toBe("torndown");
+          expect(first.json().steps.map((step: { step: string }) => step.step))
+            .toEqual(["archive", "container", "steward", "worktree", "branch"]);
+          expect(calls).toEqual(["logs:recorded-log-id", "remove", "steward", "worktree", "branch"]);
+          expect(stop).not.toHaveBeenCalled();
+          return;
+        }
+        expect(first.json().status).toBe("tearing-down");
+        expect(store.get("live")?.status).toBe("tearing-down");
+        if (mode !== "graceful") {
+          expect(first.json().steps[0]).toMatchObject({ step: "stop", outcome: "failed" });
+          expect(calls).toEqual(mode === "unsupported" ? [] : ["stop"]);
+          return;
+        }
+        expect(stop).toHaveBeenCalledWith({
+          sessionId: "live", kind: "spawn", containerName: "march-spawn-live",
+        });
+        expect(first.json().steps).toEqual([
+          { step: "stop", outcome: "ok", detail: "graceful stop verified" },
+          expect.objectContaining({ step: "archive", outcome: "failed" }),
+          ...["container", "steward", "worktree", "branch"].map((step) =>
+            ({ step, outcome: "skipped", detail: "deferred: archive failed" })),
+        ]);
+        expect(calls).toEqual(["stop", "logs:recorded-log-id"]);
+        expect(state).toBe("stopped");
+        expect((await teardown({})).statusCode).toBe(409);
+        fs.rmdirSync(log);
+        failArchive = false;
+        const retry = await teardown({ force: true });
+        expect(retry.json()).toMatchObject({
+          status: "torndown",
+          steps: [
+            { step: "stop", outcome: "skipped", detail: "already stopped" },
+            ...["archive", "container", "steward", "worktree", "branch"].map((step) =>
+              expect.objectContaining({ step, outcome: "ok" })),
+          ],
+        });
+        expect(calls.slice(2)).toEqual(["stop", "logs:recorded-log-id", "remove", "steward", "worktree", "branch"]);
+      } finally {
+        fs.rmSync(homeDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     { outcome: "success", problem: undefined },
