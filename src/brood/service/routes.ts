@@ -373,6 +373,10 @@ export async function registerRoutes(
     // BroodClient sends so the Hatchery's client-side `brood.register` and this
     // handler land in one trace (#233).
     const { input } = validation;
+    if (input.extractionResult !== undefined && isTearingDown(store.get(input.id))) {
+      reply.code(409);
+      return { error: `Session "${input.id}" is being torn down; extractionResult is closed.` };
+    }
     const span = startBroodSpan({
       name: "brood.register",
       key: input.id,
@@ -548,7 +552,15 @@ export async function registerRoutes(
       }
     }
     // Persist the validated/normalized extraction, not the raw request shape.
-    if (parsedExtraction) changes.extractionResult = parsedExtraction;
+    if (parsedExtraction) {
+      // Teardown archives the result it reads after admission; a later write
+      // could land after compute removal without ever reaching the archive.
+      if (isTearingDown(store.get(id))) {
+        reply.code(409);
+        return { error: `Session "${id}" is being torn down; extractionResult is closed.` };
+      }
+      changes.extractionResult = parsedExtraction;
+    }
     const record = store.update(id, changes);
     if (!record) {
       reply.code(404);
@@ -630,4 +642,8 @@ export async function registerRoutes(
       return { error: (err as Error).message };
     }
   });
+}
+
+function isTearingDown(record: SessionRecord | undefined): boolean {
+  return record?.status === "tearing-down" || record?.status === "torndown";
 }

@@ -240,6 +240,28 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     });
   });
 
+  it("rejects extractionResult writes once teardown has begun", async () => {
+    const { app } = await buildApp();
+    const extractionResult = {
+      spawnId: "s-closing", backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    };
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "s-closing", kind: "spawn" } });
+    await app.inject({ method: "PATCH", url: "/sessions/s-closing", payload: { status: "tearing-down" } });
+
+    const patched = await app.inject({
+      method: "PATCH", url: "/sessions/s-closing", payload: { extractionResult },
+    });
+    const registered = await app.inject({
+      method: "POST", url: "/sessions", payload: { id: "s-closing", kind: "spawn", extractionResult },
+    });
+
+    expect(patched.statusCode).toBe(409);
+    expect(registered.statusCode).toBe(409);
+    expect((await app.inject({ method: "GET", url: "/sessions/s-closing" })).json())
+      .not.toHaveProperty("extractionResult");
+  });
+
   it("GET /sessions/:id/extraction-readiness exposes failed and missing states as not PR-ready", async () => {
     const { app } = await buildApp();
     await app.inject({

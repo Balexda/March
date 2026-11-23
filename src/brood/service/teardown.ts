@@ -137,21 +137,32 @@ export async function teardownSession(
   request: TeardownRequest = {},
   deps: TeardownDeps = {},
 ): Promise<TeardownResult> {
+  // Serialize requests for the same archive, including requests by steward ID.
+  // Re-resolve the key after each wait: a queued steward can be re-registered
+  // under another spawn while it waits, and must then queue on that archive.
+  for (;;) {
+    const key = archiveKey(store, id, deps.homeDir);
+    const previous = activeTeardowns.get(key);
+    if (previous) {
+      await previous.catch(() => undefined);
+      continue;
+    }
+    const current = runTeardown(store, id, request, deps);
+    activeTeardowns.set(key, current);
+    try {
+      return await current;
+    } finally {
+      if (activeTeardowns.get(key) === current) activeTeardowns.delete(key);
+    }
+  }
+}
+
+function archiveKey(store: SessionRepository, id: string, homeDir: string | undefined): string {
   const target = store.get(id);
   const parent = target?.kind === "steward" && target.parentId
     ? store.get(target.parentId)
     : undefined;
-  const key = path.resolve(broodArchiveDir(parent?.kind === "spawn" ? parent.id : id, deps.homeDir));
-  // Serialize requests for the same archive, including requests by steward ID.
-  const previous = activeTeardowns.get(key);
-  const current = (previous ? previous.catch(() => undefined) : Promise.resolve())
-    .then(() => runTeardown(store, id, request, deps));
-  activeTeardowns.set(key, current);
-  try {
-    return await current;
-  } finally {
-    if (activeTeardowns.get(key) === current) activeTeardowns.delete(key);
-  }
+  return path.resolve(broodArchiveDir(parent?.kind === "spawn" ? parent.id : id, homeDir));
 }
 
 async function runTeardown(
@@ -228,13 +239,21 @@ async function runTeardown(
     archiveError = error;
   }
   const completion = archive?.completion;
-  if (primary.status === "tearing-down" && completion &&
-      completion.attempt === store.pendingTeardownCompletion(primary.id)) {
+  if (completion && completion.attempt === store.pendingTeardownCompletion(primary.id)) {
     // A crash after the terminal journal write can leave one or both rows
-    // behind. Finish the registry update without repeating cleanup.
-    completeRegistry(completion.at);
-    span.end();
-    return { id: primary.id, status: "torndown", steps, warnings };
+    // behind, possibly followed by a status-only PATCH. Finish the registry
+    // update for the group the attempt verified, without repeating cleanup.
+    const verifiedStewardId = completion.stewardId ?? undefined;
+    completeRegistry(completion.at, verifiedStewardId);
+    if (steward && steward.id !== primary.id && steward.id !== verifiedStewardId &&
+        store.get(steward.id)?.status !== "torndown") {
+      // A steward registered after the verified attempt was never removed.
+      warnings.push(
+        `steward "${steward.id}" was registered after teardown completed and was not removed; retry teardown`,
+      );
+      return finish("partial");
+    }
+    return finish("success");
   }
 
   // A stored force decision holds until teardown completes, even if a
@@ -280,7 +299,15 @@ async function runTeardown(
   try {
     if (!archive) throw archiveError;
     attempt = archive.start(snapshot, request, d.now());
-    await archiveTeardownEvidence(dir, primary, d.readContainerLogs, warnings);
+    await archiveTeardownEvidence(
+      dir,
+      primary,
+      d.readContainerLogs,
+      warnings,
+      // Read the result after the async log read so a result committed before
+      // teardown began is archived; later result writes are rejected.
+      () => store.get(primary.id) ?? primary,
+    );
     steps.push({ step: "archive", outcome: "ok" });
   } catch (err) {
     steps.push({ step: "archive", outcome: "failed", detail: message(err) });
@@ -437,10 +464,10 @@ async function runTeardown(
   const failed = steps.some((step) => step.outcome === "failed");
   return finalize(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
 
-  function completeRegistry(at: string): void {
+  function completeRegistry(at: string, stewardId: string | undefined): void {
     const registrySpan = span.startChild("brood.teardown.registry");
     try {
-      store.completeTeardown(primary.id, steward?.id, at);
+      store.completeTeardown(primary.id, stewardId, at);
       registrySpan.end();
     } catch (error) {
       registrySpan.end({ error: true });
@@ -460,14 +487,14 @@ async function runTeardown(
           status: outcome === "success" ? "torndown" : "tearing-down",
           steps,
           warnings,
-        }, at);
+        }, at, steward?.id);
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at);
+      if (outcome === "success") completeRegistry(at, steward?.id);
     }
     return finish(outcome);
   }

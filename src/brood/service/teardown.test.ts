@@ -715,6 +715,166 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     }
   });
 
+  it("reconciles a pending completion after a status-only PATCH without repeating cleanup", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.update(spawnId, { status: "stopped" });
+      rec.calls.length = 0;
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result).toMatchObject({ status: "torndown", steps: [] });
+      expect(rec.calls).toEqual([]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("recovers only the steward the completed attempt verified", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      // The failed transaction rolled back the verified steward's update.
+      expect(store.get(stewardId)?.status).toBe("tearing-down");
+      store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+      created.length = 0;
+      rec.calls.length = 0;
+
+      const result = await teardownSession(store, "ad-session-bbb", {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings).toEqual([expect.stringContaining('"ad-session-bbb"')]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("torndown");
+      expect(store.get("ad-session-bbb")?.status).toBe("running");
+      const root = created.find((span) => span.name === "brood.teardown");
+      expect(root?.attributes["march.teardown.outcome"]).toBe("partial");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records a successful registry recovery in the teardown span", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      created.length = 0;
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      const root = created.find((span) => span.name === "brood.teardown");
+      expect(root?.attributes["march.teardown.outcome"]).toBe("success");
+      expect(root?.status.code).not.toBe(SpanStatusCode.ERROR);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("archives an extraction result committed while container logs are read", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "late patch\n";
+    const sha256 = createHash("sha256").update(patchText).digest("hex");
+    const extractionResult: ExtractionResult = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, sha256, touchedPaths: [] },
+    };
+    const rec = recordingDeps(home, {
+      readContainerLogs: async () => {
+        store.update(spawnId, { extractionResult });
+        return "logs";
+      },
+    });
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("torndown");
+      expect(result.warnings).not.toContain("registry extraction result unavailable or malformed");
+      expect(fs.readFileSync(path.join(broodArchiveDir(spawnId, home), "artifacts", "spawn.patch"), "utf8"))
+        .toBe(patchText);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("queues a steward on its new spawn's archive when it is re-parented while waiting", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({
+      id: "20260520-bbbbbb", kind: "spawn", status: "stopped", repoPath: "/repo",
+      branch: "march/spawn/20260520-bbbbbb", worktreePath: "/wt/bbbbbb", containerId: "container-bbb",
+    });
+    let releaseP!: () => void;
+    let releaseQ!: () => void;
+    const gateP = new Promise<void>((resolve) => { releaseP = resolve; });
+    const gateQ = new Promise<void>((resolve) => { releaseQ = resolve; });
+    const order: string[] = [];
+    const rec = recordingDeps(home, {
+      readContainerLogs: async (containerId) => {
+        order.push(`start:${containerId}`);
+        if (containerId === "container-aaa") await gateP;
+        if (containerId === "container-bbb" && !order.includes("end:container-bbb")) await gateQ;
+        order.push(`end:${containerId}`);
+        return "logs";
+      },
+    });
+    try {
+      const first = teardownSession(store, spawnId, { reason: "P" }, rec.deps);
+      await vi.waitFor(() => expect(order).toContain("start:container-aaa"));
+      const queued = teardownSession(store, stewardId, { reason: "steward" }, rec.deps);
+      // Re-parent the waiting steward, then start Q's teardown.
+      store.register({ id: stewardId, kind: "steward", parentId: "20260520-bbbbbb" });
+      const q = teardownSession(store, "20260520-bbbbbb", { reason: "Q" }, rec.deps);
+      await vi.waitFor(() => expect(order).toContain("start:container-bbb"));
+      releaseP();
+      await first;
+      // The re-parented request must wait for Q rather than run beside it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(order.filter((entry) => entry === "start:container-bbb")).toHaveLength(1);
+      releaseQ();
+      await Promise.all([q, queued]);
+      const journal = fs.readFileSync(
+        path.join(broodArchiveDir("20260520-bbbbbb", home), "teardown.ndjson"), "utf8",
+      ).trim().split("\n").map((line) => JSON.parse(line));
+      expect(journal.map((entry) => `${entry.attempt}:${entry.event}`)).toEqual(
+        journal.map((_, index) => `${Math.floor(index / 2) + 1}:${index % 2 ? "finished" : "started"}`),
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("defers worktree + branch when steward removal fails (does not orphan a live checkout)", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);

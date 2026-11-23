@@ -18,6 +18,8 @@ interface AttemptFinished {
   status: TeardownResult["status"];
   steps: TeardownResult["steps"];
   warnings: string[];
+  /** Steward whose removal this attempt verified; null when the group had none. */
+  stewardId?: string | null;
 }
 
 function isMissing(error: unknown): boolean {
@@ -90,9 +92,11 @@ export class TeardownArchive {
     return attempt;
   }
 
-  finish(attempt: number, result: TeardownResult, at: string): void {
+  finish(attempt: number, result: TeardownResult, at: string, stewardId?: string): void {
     const { status, steps, warnings } = result;
-    this.append({ attempt, event: "finished", at, status, steps, warnings });
+    this.append({
+      attempt, event: "finished", at, status, steps, warnings, stewardId: stewardId ?? null,
+    });
   }
 
   private append(entry: AttemptStarted | AttemptFinished): void {
@@ -114,6 +118,7 @@ export async function archiveTeardownEvidence(
   primary: SessionRecord,
   readContainerLogs: (id: string) => string | Promise<string>,
   warnings: string[],
+  readCurrent: () => SessionRecord = () => primary,
 ): Promise<void> {
   let logs: string | undefined;
   if (primary.containerId) {
@@ -127,9 +132,10 @@ export async function archiveTeardownEvidence(
   }
   if (logs !== undefined) publish(path.join(dir, "container.log"), logs);
 
-  const extraction = parseExtractionResult(primary.extractionResult);
+  const current = readCurrent();
+  const extraction = parseExtractionResult(current.extractionResult);
   if (!extraction) {
-    if (primary.kind === "spawn" || primary.extractionResult !== undefined) {
+    if (primary.kind === "spawn" || current.extractionResult !== undefined) {
       warnings.push("registry extraction result unavailable or malformed");
     }
     return;
