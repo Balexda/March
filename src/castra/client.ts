@@ -276,19 +276,38 @@ export class CastraClient {
     if (opts.traceKey) headers[SLICE_ID_HEADER] = opts.traceKey;
 
     let res: Response;
-    try {
-      res = await this.fetchImpl(url, {
-        method,
-        headers,
-        body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
-        signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
-      });
-    } catch (err) {
-      throw new CastraClientError(
-        `Could not reach Castra at ${this.baseUrl}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+    for (let attempt = 1; ; attempt++) {
+      // Let pending socket events run before taking a pooled connection: a
+      // caller that blocked its event loop (the spawn worker's synchronous
+      // `docker wait`, often minutes) has not yet seen Castra close the idle
+      // keep-alive socket, and writing to it fails with EPIPE.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        res = await this.fetchImpl(url, {
+          method,
+          headers,
+          body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
+          signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
+        });
+        break;
+      } catch (err) {
+        // undici reports every transport failure as "fetch failed"; the cause
+        // (ECONNREFUSED, EPIPE, UND_ERR_SOCKET, ENOTFOUND, …) tells them apart.
+        const cause = err instanceof Error ? (err as Error & { cause?: unknown }).cause : undefined;
+        const code = cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
+        // EPIPE: Castra had already closed the socket, so it never read this
+        // request — retrying once on a fresh connection cannot double-send.
+        if (attempt === 1 && code === "EPIPE") continue;
+        const causeText = cause && typeof cause === "object"
+          ? [code, (cause as { message?: unknown }).message]
+            .filter((v): v is string => typeof v === "string" && v.length > 0).join(": ")
+          : "";
+        throw new CastraClientError(
+          `Could not reach Castra at ${this.baseUrl}: ${
+            err instanceof Error ? err.message : String(err)
+          }${causeText ? ` (${causeText})` : ""}`,
+        );
+      }
     }
 
     const parsed = await parseJsonBody(res);
