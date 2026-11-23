@@ -60,7 +60,7 @@ export interface RoutesOptions {
   readonly orphanGate?: OrphanGate;
   /** Override the liveness observer reconciled reads use (tests). Defaults to docker. */
   readonly containerObserver?: ContainerObserver;
-  /** Override log source read dependencies (tests). Defaults to Docker + archive files. */
+  /** Override log source read dependencies (tests). Defaults to Docker, Castra, and archive files. */
   readonly logReader?: LogReaderDeps;
   /** Environment the admin gate reads its bearer token from (defaults to process.env). */
   readonly env?: NodeJS.ProcessEnv;

@@ -73,13 +73,22 @@ describe("readSessionLogs", () => {
     expect(readContainerLogs).not.toHaveBeenCalled();
   });
 
-  it("reads a steward archive through its parent spawn id", async () => {
+  it("uses the parent archive for a torn-down steward without reading Castra", async () => {
     // teardownSession archives a spawn<->steward group under the spawn id.
     const probed: string[] = [];
+    const sessionOutput = vi.fn(async () => "stale output\n");
 
     const result = await readSessionLogs(
-      session({ id: "steward-1", kind: "steward", parentId: "spawn-1" }),
+      session({
+        id: "steward-1",
+        kind: "steward",
+        status: "torndown",
+        parentId: "spawn-1",
+        agentDeckSessionId: "castra-id",
+        profile: "tracked-profile",
+      }),
       {
+        castra: { sessionOutput },
         archiveExists: (archivePath) => {
           probed.push(archivePath);
           return archivePath.includes("/archive/spawn-1/");
@@ -95,6 +104,7 @@ describe("readSessionLogs", () => {
       available: true,
     });
     expect(result.content).toBe("parent archive\n");
+    expect(sessionOutput).not.toHaveBeenCalled();
     expect(probed).toEqual([
       "/home/test/.march/brood/archive/steward-1/container.log",
       "/home/test/.march/brood/archive/spawn-1/container.log",
