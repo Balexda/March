@@ -59,6 +59,11 @@ The shared client's ambient-token fallback requires
 | No live source was available and the archived `container.log` is unreadable | `409 { "error": "<message>" }` |
 | The live container read fails and no readable archive exists | `502 { "error": "<message>" }` |
 
+The live read runs `docker logs` asynchronously, so it never blocks other
+Brood requests. It returns the container's stdout and stderr in the order they
+arrived. A read that exits non-zero, runs past 15 seconds, or exceeds 16 MiB
+counts as a live-source failure.
+
 The endpoint is read-only. It may call the Docker log read path and read the
 archived `container.log`, but it must not register, update, delete, tear down,
 prune, remove, create, or repair registry rows, Docker resources, archives,

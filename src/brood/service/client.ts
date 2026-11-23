@@ -165,7 +165,18 @@ export class BroodClient {
         }`,
       );
     }
-    const text = await res.text();
+    // The body can still fail after headers arrive (connection reset mid-body);
+    // that is a transport failure too, not an HTTP-status error.
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      throw new BroodUnavailableError(
+        `Lost the brood service response from ${this.baseUrl}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     if (res.status >= 400) {
       try {
         return {

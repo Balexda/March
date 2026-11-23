@@ -19,11 +19,11 @@ function session(
 }
 
 describe("readSessionLogs", () => {
-  it("prefers live container logs for container-backed rows", () => {
+  it("prefers live container logs for container-backed rows", async () => {
     const readContainerLogs = vi.fn(() => "live logs\n");
     const archiveExists = vi.fn(() => true);
 
-    const result = readSessionLogs(session({ containerId: "c1" }), {
+    const result = await readSessionLogs(session({ containerId: "c1" }), {
       readContainerLogs,
       archiveExists,
       readArchive: () => "archive logs\n",
@@ -37,8 +37,8 @@ describe("readSessionLogs", () => {
     expect(archiveExists).not.toHaveBeenCalled();
   });
 
-  it("falls back to archive when live container logs fail", () => {
-    const result = readSessionLogs(session({ containerId: "gone" }), {
+  it("falls back to archive when live container logs fail", async () => {
+    const result = await readSessionLogs(session({ containerId: "gone" }), {
       readContainerLogs: () => {
         throw new Error("no such container");
       },
@@ -55,10 +55,10 @@ describe("readSessionLogs", () => {
     expect(result.content).toBe("archive logs\n");
   });
 
-  it("uses archive when a container-backed row has no live container id", () => {
+  it("uses archive when a container-backed row has no live container id", async () => {
     const readContainerLogs = vi.fn();
 
-    const result = readSessionLogs(session(), {
+    const result = await readSessionLogs(session(), {
       readContainerLogs,
       archiveExists: () => true,
       readArchive: () => "archive only\n",
@@ -70,11 +70,11 @@ describe("readSessionLogs", () => {
     expect(readContainerLogs).not.toHaveBeenCalled();
   });
 
-  it("reads a steward archive through its parent spawn id", () => {
+  it("reads a steward archive through its parent spawn id", async () => {
     // teardownSession archives a spawn<->steward group under the spawn id.
     const probed: string[] = [];
 
-    const result = readSessionLogs(
+    const result = await readSessionLogs(
       session({ id: "steward-1", kind: "steward", parentId: "spawn-1" }),
       {
         archiveExists: (archivePath) => {
@@ -98,25 +98,25 @@ describe("readSessionLogs", () => {
     ]);
   });
 
-  it("never probes an archive path that escapes the archive root", () => {
+  it("never probes an archive path that escapes the archive root", async () => {
     const archiveExists = vi.fn(() => true);
     const readArchive = vi.fn(() => "escaped\n");
 
-    expect(() =>
+    await expect(
       readSessionLogs(session({ id: "../../../../etc" }), {
         archiveExists,
         readArchive,
         homeDir: "/home/test",
       }),
-    ).toThrow(BroodLogUnavailableError);
+    ).rejects.toBeInstanceOf(BroodLogUnavailableError);
     expect(archiveExists).not.toHaveBeenCalled();
     expect(readArchive).not.toHaveBeenCalled();
   });
 
-  it("keeps the live failure when the archive exists but is unreadable", () => {
+  it("keeps the live failure when the archive exists but is unreadable", async () => {
     let thrown: unknown;
     try {
-      readSessionLogs(session({ containerId: "c1" }), {
+      await readSessionLogs(session({ containerId: "c1" }), {
         readContainerLogs: () => {
           throw new Error("docker down");
         },
@@ -140,10 +140,10 @@ describe("readSessionLogs", () => {
     expect((thrown as Error).message).toContain("EACCES");
   });
 
-  it("reports an unreadable archive when no live source was tried", () => {
+  it("reports an unreadable archive when no live source was tried", async () => {
     let thrown: unknown;
     try {
-      readSessionLogs(session(), {
+      await readSessionLogs(session(), {
         archiveExists: () => true,
         readArchive: () => {
           throw new Error("EACCES");
@@ -159,20 +159,20 @@ describe("readSessionLogs", () => {
     );
   });
 
-  it("reports unavailable logs without mutating dependencies", () => {
+  it("reports unavailable logs without mutating dependencies", async () => {
     const readContainerLogs = vi.fn(() => {
       throw new Error("docker down");
     });
     const archiveExists = vi.fn(() => false);
     const readArchive = vi.fn();
 
-    expect(() =>
+    await expect(
       readSessionLogs(session({ containerId: "c1" }), {
         readContainerLogs,
         archiveExists,
         readArchive,
       }),
-    ).toThrow(BroodLogUnavailableError);
+    ).rejects.toBeInstanceOf(BroodLogUnavailableError);
     expect(readContainerLogs).toHaveBeenCalledTimes(1);
     expect(archiveExists).toHaveBeenCalledTimes(1);
     expect(readArchive).not.toHaveBeenCalled();

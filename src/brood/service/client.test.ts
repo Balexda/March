@@ -164,6 +164,24 @@ describe("BroodClient", () => {
     );
   });
 
+  it("logs raises BroodUnavailableError when the response body fails", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () =>
+        ({
+          status: 200,
+          headers: new Headers(),
+          text: async () => {
+            throw new TypeError("terminated");
+          },
+        }) as unknown as Response) as unknown as typeof fetch,
+    });
+
+    await expect(client.logs("s1")).rejects.toBeInstanceOf(
+      BroodUnavailableError,
+    );
+  });
+
   it("teardown returns the result", async () => {
     const result = { id: "s1", status: "torndown", steps: [], warnings: [] };
     const client = new BroodClient({

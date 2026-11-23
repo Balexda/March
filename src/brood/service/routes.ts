@@ -493,7 +493,7 @@ export async function registerRoutes(
       return { error: `No session with id "${id}".` };
     }
     try {
-      const result = readSessionLogs(record, opts.logReader);
+      const result = await readSessionLogs(record, opts.logReader);
       reply
         .type("text/plain; charset=utf-8")
         .header("X-March-Log-Source", result.source.kind);

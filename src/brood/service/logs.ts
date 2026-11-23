@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
+import { readContainerLogsAsync } from "./docker-logs.js";
 import { broodDir } from "./store.js";
 import type { SessionLogResult, SessionRecord } from "./types.js";
 
@@ -20,14 +20,18 @@ export class BroodLogUnavailableError extends Error {
 }
 
 export interface LogReaderDeps {
-  readonly readContainerLogs?: (containerId: string) => string;
+  readonly readContainerLogs?: (
+    containerId: string,
+  ) => string | Promise<string>;
   readonly archiveExists?: (archivePath: string) => boolean;
   readonly readArchive?: (archivePath: string) => string;
   readonly homeDir?: string;
 }
 
 interface ResolvedLogReaderDeps {
-  readonly readContainerLogs: (containerId: string) => string;
+  readonly readContainerLogs: (
+    containerId: string,
+  ) => string | Promise<string>;
   readonly archiveExists: (archivePath: string) => boolean;
   readonly readArchive: (archivePath: string) => string;
   readonly homeDir?: string;
@@ -35,7 +39,7 @@ interface ResolvedLogReaderDeps {
 
 function resolveDeps(deps: LogReaderDeps): ResolvedLogReaderDeps {
   return {
-    readContainerLogs: deps.readContainerLogs ?? readSpawnContainerLogs,
+    readContainerLogs: deps.readContainerLogs ?? readContainerLogsAsync,
     archiveExists: deps.archiveExists ?? fs.existsSync,
     readArchive:
       deps.readArchive ??
@@ -109,10 +113,10 @@ function readArchiveIfAvailable(
   return failure ? { kind: "failed", detail: failure } : { kind: "absent" };
 }
 
-export function readSessionLogs(
+export async function readSessionLogs(
   record: SessionRecord,
   deps: LogReaderDeps = {},
-): SessionLogResult {
+): Promise<SessionLogResult> {
   const d = resolveDeps(deps);
   let liveFailure: string | undefined;
 
@@ -124,7 +128,7 @@ export function readSessionLogs(
           containerId: record.containerId,
           available: true,
         },
-        content: d.readContainerLogs(record.containerId),
+        content: await d.readContainerLogs(record.containerId),
       };
     } catch (err) {
       liveFailure = errorMessage(err);
