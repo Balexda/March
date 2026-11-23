@@ -271,9 +271,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     for (const id of ["s-done", "s-admitted", "s-open"]) {
       await app.inject({ method: "POST", url: "/sessions", payload: { id, kind: "spawn", status: "stopped" } });
     }
-    store.beginTeardown("s-done", undefined, "{}\n", {});
-    store.completeTeardown("s-done", undefined, "2026-06-13T00:00:00.000Z");
-    store.beginTeardown("s-admitted", undefined, "{}\n", {});
+    store.beginTeardown("s-done", [], "{}\n", {});
+    store.completeTeardown("s-done", [], "2026-06-13T00:00:00.000Z");
+    store.beginTeardown("s-admitted", [], "{}\n", {});
     for (const id of ["s-done", "s-admitted"]) {
       await app.inject({ method: "PATCH", url: `/sessions/${id}`, payload: { status: "stopped" } });
       expect((await app.inject({
@@ -286,6 +286,30 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect((await app.inject({
       method: "PATCH", url: "/sessions/s-open", payload: { extractionResult: { ...extractionResult, spawnId: "s-open" } },
     })).statusCode).toBe(200);
+  });
+
+  it("rejects a PATCH that clears torndownAt and keeps the first timestamp", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "s-done", kind: "spawn", status: "stopped" } });
+    store.beginTeardown("s-done", [], "{}\n", {});
+    store.completeTeardown("s-done", [], "2026-06-13T00:00:00.000Z");
+    for (const torndownAt of [null, ""]) {
+      expect((await app.inject({
+        method: "PATCH", url: "/sessions/s-done", payload: { status: "stopped", torndownAt },
+      })).statusCode).toBe(400);
+    }
+    await app.inject({
+      method: "PATCH", url: "/sessions/s-done", payload: { torndownAt: "2027-01-01T00:00:00.000Z" },
+    });
+    expect(store.get("s-done")?.torndownAt).toBe("2026-06-13T00:00:00.000Z");
+    expect(store.get("s-done")?.status).toBe("torndown");
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/s-done",
+      payload: { status: "stopped", extractionResult: {
+        spawnId: "s-done", backend: "claude-code", status: "failed",
+        failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+      } },
+    })).statusCode).toBe(409);
   });
 
   it("GET /sessions/:id/extraction-readiness exposes failed and missing states as not PR-ready", async () => {
@@ -965,7 +989,11 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       expect(result.steps.map(({ step }) => step))
         .toEqual(["archive", "container", "steward", "worktree", "branch"]);
 
-      const [parent, ...children] = spans;
+      const [parent, ...allChildren] = spans;
+      // Archive finalization and the registry transition add their own
+      // non-step child spans; the cleanup steps must still appear in order.
+      const stepSpanNames = new Set(result.steps.map(({ step }) => `brood.teardown.${step}`));
+      const children = allChildren.filter((child) => stepSpanNames.has(child.name));
       expect(parent.name).toBe("brood.teardown");
       expect(parent.spanContext().traceId).toBe(traceId);
       expect(parent.parentSpanContext?.spanId).toBe(spanId);

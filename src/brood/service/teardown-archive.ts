@@ -18,8 +18,8 @@ interface AttemptFinished {
   status: TeardownResult["status"];
   steps: TeardownResult["steps"];
   warnings: string[];
-  /** Steward whose removal this attempt verified; null when the group had none. */
-  stewardId?: string | null;
+  /** Stewards whose removal this attempt verified. */
+  stewardIds?: string[];
   /** Primary resource identity this attempt reclaimed. */
   resources?: TeardownResources;
 }
@@ -114,12 +114,12 @@ export class TeardownArchive {
     attempt: number,
     result: TeardownResult,
     at: string,
-    verified: { stewardId?: string; resources: TeardownResources },
+    verified: { stewardIds: string[]; resources: TeardownResources },
   ): void {
     const { status, steps, warnings } = result;
     this.append({
       attempt, event: "finished", at, status, steps, warnings,
-      stewardId: verified.stewardId ?? null, resources: verified.resources,
+      stewardIds: verified.stewardIds, resources: verified.resources,
     });
   }
 

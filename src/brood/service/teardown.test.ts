@@ -838,6 +838,50 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     }
   });
 
+  it("removes every live steward under the spawn before reclaiming the shared worktree", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+    store.register({ id: "ad-session-ccc", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("torndown");
+      const stewardCalls = rec.calls.filter((call) => call.startsWith("steward:"));
+      expect(stewardCalls).toHaveLength(3);
+      for (const id of [stewardId, "ad-session-bbb", "ad-session-ccc"]) {
+        expect(store.get(id)?.status, id).toBe("torndown");
+      }
+      const lastSteward = Math.max(...stewardCalls.map((call) => rec.calls.indexOf(call)));
+      const firstGit = rec.calls.findIndex((call) => call.startsWith("worktree:") || call.startsWith("branch:"));
+      if (firstGit >= 0) expect(firstGit).toBeGreaterThan(lastSteward);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("defers worktree cleanup when a second steward under the spawn cannot be removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-ccc", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => input.sessionId === "ad-session-ccc"
+      ? (rec.calls.push(`steward:${input.sessionId}`), { outcome: "failed", detail: "still live", removedIds: [] })
+      : remove(input);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).not.toBe("torndown");
+      expect(result.warnings.join("\n")).toContain("ad-session-ccc");
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(store.get("ad-session-ccc")?.status).not.toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
   it("records a successful registry recovery in the teardown span", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const created = captureSpans();

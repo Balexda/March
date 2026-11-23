@@ -203,6 +203,12 @@ async function runTeardown(
     target.kind === "steward"
       ? target
       : stewards.find((candidate) => candidate.status !== "torndown") ?? stewards[0];
+  // Every steward sharing the spawn's worktree must be verified gone before Git
+  // cleanup or a terminal result; the selected steward leads the list.
+  const groupStewards = steward
+    ? [steward, ...stewards.filter((row) => row.id !== steward.id && row.status !== "torndown")]
+    : [];
+  const groupStewardIds = groupStewards.map((row) => row.id);
 
   // `primary` owns the worktree/branch/container; fall back to the target row.
   const primary: SessionRecord = spawn ?? target;
@@ -252,22 +258,9 @@ async function runTeardown(
     // update for the group the attempt verified, without repeating cleanup.
     // A re-registration that changed resource identity falls through to a
     // real teardown of the new resources instead.
-    const verifiedStewardId = completion.stewardId ?? undefined;
-    completeRegistry(completion.at, verifiedStewardId);
-    const candidates = new Map([...stewards, ...(steward ? [steward] : [])].map((row) => [row.id, row]));
-    const live = [...candidates.keys()].filter((stewardId) =>
-      stewardId !== primary.id && stewardId !== verifiedStewardId &&
-      store.get(stewardId)?.status !== "torndown");
-    if (live.length > 0) {
-      // Stewards registered after the verified attempt were never removed.
-      for (const stewardId of live) {
-        warnings.push(
-          `steward "${stewardId}" was registered after teardown completed and was not removed; retry teardown`,
-        );
-      }
-      return finish("partial");
-    }
-    return finish("success");
+    const verified = completion.stewardIds ?? [];
+    completeRegistry(completion.at, verified);
+    return unremovedStewards(verified) ? finish("partial") : finish("success");
   }
 
   // A stored force decision holds until teardown completes, even if a
@@ -295,7 +288,7 @@ async function runTeardown(
   try {
     snapshot = store.beginTeardown(
       primary.id,
-      steward?.id,
+      groupStewardIds,
       JSON.stringify({
         session: snapshotRow(primary),
         spawn: spawn && snapshotRow(spawn),
@@ -365,41 +358,27 @@ async function runTeardown(
     const child = span.startChild("brood.teardown.steward", {
       ...(steward ? { "march.steward.id": steward.id } : {}),
     });
-    if (steward) {
-      try {
-        const res = await d.removeSteward({
-          sessionId: steward.agentDeckSessionId ?? steward.id,
-          profile: steward.profile,
-          // The spawn (`primary`) carries the canonical worktree/branch the
-          // steward shares; fall back to the steward row. Worktree is the
-          // #155-safe match key Castra removal resolves the real id from (#304).
-          worktreePath: primary.worktreePath ?? steward.worktreePath,
-          branch: primary.branch ?? steward.branch,
-        });
-        if (res.outcome === "failed") {
-          // Castra unreachable or the real session is still live — DEFER the
-          // worktree/branch removal and leave the row retryable. Do NOT mark
-          // torndown over an unconfirmed Castra removal (#304).
-          stewardRemovalFailed = true;
-          const detail = (res.detail || "removal unconfirmed").slice(0, TEARDOWN_DETAIL_LIMIT);
-          steps.push({ step: "steward", outcome: "failed", detail });
-          warnings.push(`steward removal failed: ${detail}`);
-        } else {
-          // `removed` — a real session was reaped; `absent` — Castra verified no
-          // session for this worktree. Either way the steward is gone, so it is
-          // safe to reclaim the worktree and mark torndown.
-          steps.push({
-            step: "steward",
-            outcome: res.outcome === "removed" ? "ok" : "skipped",
-            detail: res.outcome === "removed"
-              ? res.detail?.slice(0, TEARDOWN_DETAIL_LIMIT)
-              : "already gone",
-          });
-        }
-      } catch (err) {
+    if (groupStewards.length > 0) {
+      const outcomes: TeardownStep[] = [];
+      for (const row of groupStewards) outcomes.push(await removeOneSteward(row));
+      const failedOutcomes = outcomes.filter((outcome) => outcome.outcome === "failed");
+      if (failedOutcomes.length > 0) {
         stewardRemovalFailed = true;
-        steps.push({ step: "steward", outcome: "failed", detail: message(err) });
-        warnings.push(`steward removal failed: ${message(err)}`);
+        steps.push({
+          step: "steward",
+          outcome: "failed",
+          detail: failedOutcomes.map((outcome) => outcome.detail).join("; ")
+            .slice(0, TEARDOWN_DETAIL_LIMIT),
+        });
+      } else if (outcomes.length === 1) {
+        steps.push(outcomes[0]!);
+      } else {
+        const removed = outcomes.filter((outcome) => outcome.outcome === "ok").length;
+        steps.push({
+          step: "steward",
+          outcome: removed > 0 ? "ok" : "skipped",
+          detail: `${outcomes.length} stewards verified gone (${removed} removed)`,
+        });
       }
     } else {
       steps.push({ step: "steward", outcome: "skipped" });
@@ -476,12 +455,65 @@ async function runTeardown(
   }
 
   const failed = steps.some((step) => step.outcome === "failed");
+  if (!stewardRemovalFailed && !failed && unremovedStewards(groupStewardIds)) {
+    return finalize("partial");
+  }
   return finalize(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
 
-  function completeRegistry(at: string, stewardId: string | undefined): void {
+  async function removeOneSteward(row: SessionRecord): Promise<TeardownStep> {
+    const label = groupStewards.length > 1 ? ` (${row.id})` : "";
+    try {
+      const res = await d.removeSteward({
+        sessionId: row.agentDeckSessionId ?? row.id,
+        profile: row.profile,
+        // The spawn (`primary`) carries the canonical worktree/branch the
+        // steward shares; fall back to the steward row. Worktree is the
+        // #155-safe match key Castra removal resolves the real id from (#304).
+        worktreePath: primary.worktreePath ?? row.worktreePath,
+        branch: primary.branch ?? row.branch,
+      });
+      if (res.outcome === "failed") {
+        // Castra unreachable or the real session is still live — DEFER the
+        // worktree/branch removal and leave the row retryable. Do NOT mark
+        // torndown over an unconfirmed Castra removal (#304).
+        const detail = (res.detail || "removal unconfirmed").slice(0, TEARDOWN_DETAIL_LIMIT);
+        warnings.push(`steward removal failed${label}: ${detail}`);
+        return { step: "steward", outcome: "failed", detail };
+      }
+      // `removed` — a real session was reaped; `absent` — Castra verified no
+      // session for this worktree. Either way the steward is gone.
+      return {
+        step: "steward",
+        outcome: res.outcome === "removed" ? "ok" : "skipped",
+        detail: res.outcome === "removed"
+          ? res.detail?.slice(0, TEARDOWN_DETAIL_LIMIT)
+          : "already gone",
+      };
+    } catch (err) {
+      warnings.push(`steward removal failed${label}: ${message(err)}`);
+      return { step: "steward", outcome: "failed", detail: message(err) };
+    }
+  }
+
+  /** Warn about live stewards under the spawn that `verified` does not cover. */
+  function unremovedStewards(verified: readonly string[]): boolean {
+    const candidates = new Set([
+      ...(spawn ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id) : []),
+      ...(steward ? [steward.id] : []),
+    ]);
+    const live = [...candidates].filter((stewardId) =>
+      stewardId !== primary.id && !verified.includes(stewardId) &&
+      store.get(stewardId)?.status !== "torndown");
+    for (const stewardId of live) {
+      warnings.push(`steward "${stewardId}" was not removed by this teardown; retry teardown`);
+    }
+    return live.length > 0;
+  }
+
+  function completeRegistry(at: string, stewardIds: readonly string[]): void {
     const registrySpan = span.startChild("brood.teardown.registry");
     try {
-      store.completeTeardown(primary.id, stewardId, at);
+      store.completeTeardown(primary.id, stewardIds, at);
       registrySpan.end();
     } catch (error) {
       registrySpan.end({ error: true });
@@ -501,14 +533,14 @@ async function runTeardown(
           status: outcome === "success" ? "torndown" : "tearing-down",
           steps,
           warnings,
-        }, at, { stewardId: steward?.id, resources: teardownResources(primary) });
+        }, at, { stewardIds: groupStewardIds, resources: teardownResources(primary) });
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at, steward?.id);
+      if (outcome === "success") completeRegistry(at, groupStewardIds);
     }
     return finish(outcome);
   }

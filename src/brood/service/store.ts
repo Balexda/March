@@ -305,7 +305,7 @@ export class SessionStore implements SessionRepository {
 
   beginTeardown(
     id: string,
-    stewardId: string | undefined,
+    stewardIds: readonly string[],
     snapshot: string,
     changes: UpdateSessionInput,
   ): string {
@@ -317,7 +317,9 @@ export class SessionStore implements SessionRepository {
       const original = this.db.prepare("SELECT snapshot FROM teardown_snapshots WHERE id = ?")
         .get(id) as { snapshot: string };
       this.update(id, { ...changes, status: "tearing-down" });
-      if (stewardId && stewardId !== id) this.update(stewardId, { status: "tearing-down" });
+      for (const stewardId of stewardIds) {
+        if (stewardId !== id) this.update(stewardId, { status: "tearing-down" });
+      }
       return original.snapshot;
     });
   }
@@ -337,10 +339,12 @@ export class SessionStore implements SessionRepository {
     return row?.completing_attempt ?? undefined;
   }
 
-  completeTeardown(id: string, stewardId: string | undefined, at: string): void {
+  completeTeardown(id: string, stewardIds: readonly string[], at: string): void {
     this.teardownTransaction(() => {
       const changes = { status: "torndown", torndownAt: at } as const;
-      if (stewardId && stewardId !== id) this.update(stewardId, changes);
+      for (const stewardId of stewardIds) {
+        if (stewardId !== id) this.update(stewardId, changes);
+      }
       this.update(id, changes);
       this.db.prepare("DELETE FROM teardown_snapshots WHERE id = ?").run(id);
     });

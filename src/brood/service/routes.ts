@@ -536,6 +536,16 @@ export async function registerRoutes(
       reply.code(400);
       return { error: `invalid branch "${String(body.branch)}".` };
     }
+    // `torndownAt` is the durable completed-teardown marker: a PATCH may set it
+    // (status-only retire, #308) but never clear it — `null` would erase the
+    // evidence `extractionClosed` relies on after the snapshot row is gone.
+    if (
+      body.torndownAt !== undefined &&
+      (typeof body.torndownAt !== "string" || body.torndownAt.length === 0)
+    ) {
+      reply.code(400);
+      return { error: "torndownAt must be a non-empty timestamp string and cannot be cleared." };
+    }
     let parsedExtraction: UpdateSessionInput["extractionResult"];
     if (body.extractionResult !== undefined) {
       parsedExtraction = parseExtractionResult(body.extractionResult);
@@ -550,6 +560,10 @@ export async function registerRoutes(
       if (body[field] !== undefined) {
         (changes as Record<string, unknown>)[field] = body[field];
       }
+    }
+    // Write-once: keep the first completed-teardown timestamp (idempotent retire).
+    if (changes.torndownAt !== undefined && store.get(id)?.torndownAt !== undefined) {
+      delete changes.torndownAt;
     }
     // Persist the validated/normalized extraction, not the raw request shape.
     if (parsedExtraction) {

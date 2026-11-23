@@ -28,7 +28,7 @@ export interface SessionRepository {
   /** Save the original snapshot and mark the group tearing down atomically. */
   beginTeardown(
     id: string,
-    stewardId: string | undefined,
+    stewardIds: readonly string[],
     snapshot: string,
     changes: UpdateSessionInput,
   ): string;
@@ -39,7 +39,7 @@ export interface SessionRepository {
   /** Read the attempt authorized to complete an interrupted registry transition. */
   pendingTeardownCompletion(id: string): number | undefined;
   /** Commit the terminal status for the group and clear pending teardown state. */
-  completeTeardown(id: string, stewardId: string | undefined, at: string): void;
+  completeTeardown(id: string, stewardIds: readonly string[], at: string): void;
   /** Fetch a single session by id. */
   get(id: string): SessionRecord | undefined;
   /** List sessions, optionally filtered by kind/status/parentId. */

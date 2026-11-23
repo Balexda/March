@@ -101,12 +101,17 @@ journaling `torndown` and before updating the registry, the next teardown reques
 completes the registry transition without repeating removal, even after a
 status-only PATCH. Recovery applies only while the row keeps the container,
 repository, worktree, and branch the attempt reclaimed; a re-registered identity
-gets a full teardown instead. Recovery marks only the steward that attempt
-verified; any steward registered afterwards stays live and the result is
-`tearing-down` with a warning until a retry removes it. Once a teardown is
-admitted, or the row carries `torndownAt`, `PATCH /sessions/:id` and
-re-registration reject an `extractionResult` with 409, even if a later
-lifecycle PATCH changes `status`, so the archived result is final. Archive failures
+gets a full teardown instead. A spawn teardown removes and verifies every live
+steward under the spawn before it reclaims the shared worktree and branch; if
+any steward removal fails, Git cleanup is deferred and the row stays retryable.
+Recovery marks only the stewards that attempt verified; any steward registered
+afterwards stays live and the result is `tearing-down` with a warning naming it
+until a retry removes it. Once a teardown is admitted, or the row carries
+`torndownAt`, `PATCH /sessions/:id` and re-registration reject an
+`extractionResult` with 409, even if a later lifecycle PATCH changes `status`,
+so the archived result is final. `torndownAt` is write-once: a PATCH may set it
+but a `null` or empty value is rejected with 400 and an existing timestamp is
+kept. Archive failures
 end errored spans, following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 
