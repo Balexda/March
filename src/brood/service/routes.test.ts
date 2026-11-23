@@ -1,8 +1,13 @@
 /**
  * @l1 @deterministic @ci
  */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
+import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SpanStatusCode } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { CastraClient } from "../../castra/client.js";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
@@ -15,7 +20,7 @@ import {
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
-import { BroodConflictError, BroodNotFoundError } from "./teardown.js";
+import { BroodConflictError, BroodNotFoundError, teardownSession } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
 import type { LogReaderDeps } from "./logs.js";
 
@@ -23,20 +28,21 @@ const apps: FastifyInstance[] = [];
 const stores: SessionStore[] = [];
 
 async function buildApp(
-  teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
+  teardown?: (id: string, request: TeardownRequest, traceparent?: string) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
   extra: {
     orphanGate?: OrphanGate;
     env?: NodeJS.ProcessEnv;
     containerObserver?: ContainerObserver;
     logReader?: LogReaderDeps;
+    logger?: FastifyInstance["log"];
   } = {},
 ): Promise<{
   app: FastifyInstance;
   store: SessionStore;
 }> {
   const store = new SessionStore({ dbPath: ":memory:" });
-  const app = Fastify();
+  const app = Fastify({ loggerInstance: extra.logger });
   await registerRoutes(app, {
     store,
     teardown,
@@ -840,6 +846,135 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(ok.json()).toEqual(okResult);
     expect((await app.inject({ method: "POST", url: "/sessions/missing/teardown", payload: {} })).statusCode).toBe(404);
     expect((await app.inject({ method: "POST", url: "/sessions/live/teardown", payload: {} })).statusCode).toBe(409);
+  });
+
+  it.each([
+    { outcome: "success", problem: undefined },
+    { outcome: "partial", problem: "branch" },
+    { outcome: "error", problem: "steward" },
+  ] as const)("correlates $outcome teardown across the response, spans, metrics and logs", async ({
+    outcome,
+    problem,
+  }) => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "brood-route-teardown-"));
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    try {
+      const otel = getActiveOtel();
+      const tracer = otel.getTracer();
+      const startSpan = tracer.startSpan.bind(tracer);
+      const spans: Span[] = [];
+      vi.spyOn(tracer, "startSpan").mockImplementation((...args) => {
+        const span = startSpan(...args) as Span;
+        spans.push(span);
+        return span;
+      });
+      const meter = otel.getMeter();
+      const createCounter = meter.createCounter.bind(meter);
+      const createHistogram = meter.createHistogram.bind(meter);
+      const add = vi.fn();
+      const record = vi.fn();
+      vi.spyOn(meter, "createCounter").mockImplementation((name, options) =>
+        name === "march.brood.teardowns" ? { add } : createCounter(name, options));
+      vi.spyOn(meter, "createHistogram").mockImplementation((name, options) =>
+        name === "march.brood.teardown.duration" ? { record } : createHistogram(name, options));
+
+      const logs: Record<string, unknown>[] = [];
+      const logger = pino({ level: "warn" }, { write: (line) => logs.push(JSON.parse(line)) });
+      const diagnostic = "Castra unavailable ".padEnd(800, "x");
+      const { app, store } = await buildApp((id, body, traceparent) =>
+        teardownSession(store, id, body, {
+          homeDir,
+          traceparent,
+          pathExists: () => true,
+          substrate: {
+            removeCompute: async () => {},
+            removeWorkspace: () => ({ worktreeRemoved: true, branchDeleted: problem !== "branch" }),
+          },
+          removeSteward: async () => problem === "steward"
+            ? { outcome: "failed", detail: diagnostic, removedIds: [] }
+            : { outcome: "absent", removedIds: [] },
+        }), undefined, { logger });
+      store.register({
+        id: "spawn-123", kind: "spawn", status: "stopped",
+        repoPath: "/repo", worktreePath: "/wt/spawn-123", branch: "march/spawn-123",
+      });
+      store.register({
+        id: "steward-123", kind: "steward", status: "stopped",
+        parentId: "spawn-123", profile: "march",
+      });
+
+      const traceId = "0af7651916cd43dd8448eb211c80319c";
+      const spanId = "b7ad6b7169203331";
+      const response = await app.inject({
+        method: "POST",
+        url: "/sessions/steward-123/teardown",
+        headers: { traceparent: `00-${traceId}-${spanId}-01` },
+      });
+      const status = problem ? "tearing-down" : "torndown";
+      expect(response.statusCode).toBe(200);
+      const result = response.json<TeardownResult>();
+      expect(result).toMatchObject({ id: "spawn-123", status });
+      expect(result.steps.map(({ step }) => step))
+        .toEqual(["archive", "container", "steward", "worktree", "branch"]);
+
+      const [parent, ...children] = spans;
+      expect(parent.name).toBe("brood.teardown");
+      expect(parent.spanContext().traceId).toBe(traceId);
+      expect(parent.parentSpanContext?.spanId).toBe(spanId);
+      expect(parent.status.code).toBe(problem ? SpanStatusCode.ERROR : SpanStatusCode.OK);
+      expect(parent.attributes["march.teardown.outcome"]).toBe(outcome);
+      expect(children.map((child) => child.name))
+        .toEqual(result.steps.map(({ step }) => `brood.teardown.${step}`));
+      for (const [index, child] of children.entries()) {
+        const { step, outcome: stepOutcome, detail } = result.steps[index];
+        expect(child.parentSpanContext?.spanId).toBe(parent.spanContext().spanId);
+        expect(child.spanContext().traceId).toBe(traceId);
+        expect(child.attributes["march.teardown.step"]).toBe(step);
+        expect(child.attributes["march.teardown.outcome"]).toBeDefined();
+        expect(child.attributes["march.teardown.detail"]).toBe(detail);
+        expect(parent.events[index]).toMatchObject({
+          name: `teardown.${step}`,
+          attributes: { outcome: stepOutcome, ...(detail ? { detail } : {}) },
+        });
+      }
+      const labels = { kind: "spawn", outcome, profile: "march" };
+      expect(add.mock.calls).toEqual([[1, labels]]);
+      expect(record.mock.calls).toEqual([[expect.any(Number), labels]]);
+      expect(record.mock.calls[0][0]).toBeGreaterThanOrEqual(0);
+
+      const affected = problem === "steward"
+        ? [
+            { step: "steward", outcome: "failed", detail: diagnostic.slice(0, 500) },
+            { step: "worktree", outcome: "skipped", detail: "deferred: steward removal failed" },
+            { step: "branch", outcome: "skipped", detail: "deferred: steward removal failed" },
+          ]
+        : problem === "branch"
+          ? [{ step: "branch", outcome: "failed", detail: 'branch "march/spawn-123" may still exist' }]
+          : [];
+      if (problem) {
+        expect(result.steps.slice(-affected.length)).toEqual(affected);
+        expect(children.slice(-affected.length).map((child) => child.attributes["march.teardown.outcome"]))
+          .toEqual(affected.map(({ outcome }) => outcome === "failed" ? "failed" : "deferred"));
+        expect(logs).toHaveLength(1);
+        expect(logs[0]).toMatchObject({
+          route: "/sessions/:id/teardown", status_code: 200,
+          session_id: "spawn-123", teardown_status: status, teardown_steps: affected,
+        });
+      } else {
+        expect(logs).toEqual([]);
+      }
+
+      logs.length = 0;
+      const missing = await app.inject({ method: "POST", url: "/sessions/missing/teardown" });
+      expect(missing.statusCode).toBe(404);
+      expect(logs).toEqual([expect.objectContaining({
+        route: "/sessions/:id/teardown", status_code: 404, detail: expect.stringContaining("missing"),
+      })]);
+    } finally {
+      vi.restoreAllMocks();
+      initOtel({});
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
   });
 
   it("POST /admin/sweep 404s when MARCH_BROOD_ADMIN_TOKEN is unset (#304)", async () => {

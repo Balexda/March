@@ -59,6 +59,21 @@ prints the status, steps, and warnings in text mode or emits the service
 result with `--json`. Only `torndown` exits zero. A `tearing-down` result
 is rendered and exits non-zero even on HTTP 200.
 
+The `brood.teardown` span follows the inbound W3C trace parent when supplied.
+Cleanup steps appear as ordered events and child spans with their outcome and
+diagnostic detail when available. Step details are capped at 500 characters.
+A failed or deferred step marks the teardown span errored. Brood writes a
+structured request warning for incomplete cleanup, including on HTTP 200.
+The warning includes the primary session ID as `session_id`, the
+`teardown_status`, and the failed and deferred `teardown_steps`.
+
+The Brood dashboard counts teardown results with `march.brood.teardowns`
+and tracks seconds with `march.brood.teardown.duration`. Both instruments
+use only the `kind`, `outcome`, and `profile` dimensions. Outcomes are
+`success` for a torn-down session, `partial` for a retryable container or
+Git cleanup failure, and `error` when archiving or verifying steward
+removal failed. HTTP rejections are tracked by the HTTP request instruments.
+
 The orphan PR lookup used by `POST /admin/sweep` and periodic reconciliation
 requests a Tessera app/read token scoped to the repository at the profile's
 GitHub origin. Brood retries a GitHub 401 once using a refreshed entitlement.

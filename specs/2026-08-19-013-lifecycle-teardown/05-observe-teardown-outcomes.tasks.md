@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Align teardown traces and returned step outcomes**
+- [x] **Align teardown traces and returned step outcomes**
 
   Reuse the span and ordered step results in `src/brood/service/teardown.ts` and the context handling in `src/observability/brood-trace.ts`. Cover AS 5.2–5.4 at the Brood service boundary.
 
@@ -26,7 +26,7 @@
   - Unverified steward removal is reported as a steward failure with deferred worktree and branch steps in both the trace and the ordered non-terminal response.
   - An inbound trace parent reaches the teardown span through the HTTP route and cleanup telemetry stays under that span.
 
-- [ ] **Record teardown outcomes in metrics and request logs**
+- [x] **Record teardown outcomes in metrics and request logs**
 
   Reuse Brood's teardown instruments and structured request logger to cover AS 5.1 and 5.5. Exercise success, partial, and failed outcomes across the telemetry and service boundaries.
 
