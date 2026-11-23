@@ -31,6 +31,13 @@ Other optional fields are the strings `parentId`, `containerId`,
 `failureReason`, a numeric `exitCode`, and the `extractionResult` object
 described below. Unknown keys are ignored.
 
+Registration does not check the ID's characters, but teardown does. Any
+session with a container to tear down (every spawn, and other kinds with a
+tracked `containerId`) needs an ID matching
+`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`. For any other ID, teardown fails its `stop`
+or `container` step on every attempt, and the session stays `tearing-down`.
+Retrying does not fix this, so register such sessions with a matching ID.
+
 Registration upserts by ID and returns 201 with a `SessionRecord`. New records
 default to `created`. Re-registration preserves the original kind and creation
 time. The record contains `id`, `kind`, `status`, and server-managed timestamp
@@ -78,8 +85,14 @@ An `ExtractionResult` has string `spawnId` and `extractedAt`, `backend` of
 `claude-code` or `codex`, a completed `status`, and optional string
 `diagnostic`. Failure carries a string `failureReason`. Success carries a
 `patch` object with `spawnId`, `backend`, string `patchText` (at most 1 MiB
-in UTF-8), string array `touchedPaths`, and a string `sha256` carrying the
-patch digest.
+in UTF-8), string array `touchedPaths`, and a string `sha256`.
+
+The `sha256` value is supplied by the caller. Registration and update check
+only that it is a string and do not compare it with `patchText`, so a stored
+result does not prove the digest is correct. The check happens during the
+teardown archive. A mismatch with the registry adds the warning
+`registry extraction patch digest mismatch` and keeps any patch already
+archived. A mismatch after the archive is written fails the archive step.
 
 ### List consumers
 
