@@ -76,8 +76,8 @@ interpretTriageLabels(issueSnapshot, observedChanges, verdictProvenance?) -> Tri
 |---|---|
 | `state` | `untriaged`, `triaged`, `errored`, or `unresolved`. An issue with no state label is untriaged. |
 | `protectedGroups` | Managed label groups holding a same-content operator override, which a later verdict write must preserve. |
-| `reentry` | Whether this observation qualifies for re-entry and which [trigger](#re-entry-triggers) qualified it. Co-occurring triggers qualify once. |
-| `intakeAuthorized` | `true` only for an observed addition of `triage:accepted` for the current, unambiguous triaged build recommendation on an open issue, with the signal still present. |
+| `reentry` | `qualified` with the [trigger](#re-entry-triggers) that qualified it, `notQualified`, or `unresolved` when history is too incomplete to decide. Co-occurring triggers qualify once. A consumer defers on `unresolved` and re-evaluates once history is complete. It never treats `unresolved` as `notQualified`. |
+| `intakeAuthorized` | `true` only for an observed addition of `triage:accepted` for the current, unambiguous triaged build recommendation on an open issue, with the signal still present. A point-in-time answer with the build outcome and content hash it was evaluated against. It is not durable authority on its own. |
 
 Preserve operator edits on the same content by comparing verdict provenance with observed label changes. Operator and writer may share a GitHub identity, so attribute known writer changes using the recorded verdict and change history, never author identity alone. If attribution is uncertain, preserve observed same-content differences.
 
@@ -86,7 +86,7 @@ Preserve operator edits on the same content by comparing verdict provenance with
 | Conflicting managed labels (for example two outcomes) | Leave them visible as an operator edit. `state` is `unresolved` and `intakeAuthorized` is `false`. |
 | Acceptance association unverified, stale, or removed | `intakeAuthorized` is `false`. |
 | Non-build outcome accepted, or confidence alone | `intakeAuthorized` is `false`. |
-| Incomplete history | Leave the affected decision unresolved. Incomplete history cannot invent a re-entry edge. |
+| Incomplete history | `reentry` is `unresolved` and the affected decision stays unresolved. Incomplete history cannot invent a re-entry edge. |
 
 ## Re-entry Triggers
 
@@ -100,4 +100,4 @@ Apply these triggers to open issues, including those labeled `automated`. A pers
 
 ## Integration Boundaries
 
-Provisioning changes repository label definitions only. A later deterministic writer uses the catalog and ownership rules for issue assignments. Later Herald observation and continuous triage supply and consume the change history. Intake consumes the acceptance decision under its own stable issue identity and deduplication rules.
+Provisioning changes repository label definitions only. A later deterministic writer uses the catalog and ownership rules for issue assignments. Later Herald observation and continuous triage supply and consume the change history. Intake consumes the acceptance decision under its own stable issue identity and deduplication rules. When it acts, intake re-reads the issue live from GitHub and proceeds only if the issue is still open, `triage:accepted` is still present, and the build outcome and title/body hash still match the authorized interpretation. Otherwise it does not act.
