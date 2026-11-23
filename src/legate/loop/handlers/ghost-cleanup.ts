@@ -1,3 +1,4 @@
+import { pendingTeardowns, recordTeardownOutcome, setTeardownPending } from "../state/pending-teardown.js";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
@@ -36,8 +37,6 @@ export interface GhostDecision {
 
 /** Pure: which worker sessions are orphaned ghosts safe to tear down. */
 export function assess(state: LoopState): GhostDecision[] {
-  const out: GhostDecision[] = [];
-  if (!Array.isArray(state.sessions)) return out;
   const activeDirs = new Set<string>();
   const activeSessionIds = new Set<string>();
   for (const slice of Object.values(state.slices) as any[]) {
@@ -50,6 +49,23 @@ export function assess(state: LoopState): GhostDecision[] {
     const stripped = br.replace(/^feature\//, "");
     activeDirs.add("feature-" + stripped.replace(/\//g, "-"));
   }
+  // Retry pending teardowns only while still unowned: a worktree that a
+  // non-terminal slice has since claimed (e.g. adopt-from-fold) must not be
+  // force-torn down by a stale ghost entry. The dir check uses the observed
+  // session's worktree when available; an unobserved entry has only its id.
+  const out: GhostDecision[] = [];
+  const pending = new Set<string>();
+  const observed = Array.isArray(state.sessions) ? state.sessions : [];
+  for (const { sessionId } of pendingTeardowns(state, "ghost-cleanup")) {
+    pending.add(sessionId);
+    if (activeSessionIds.has(sessionId)) continue;
+    const session = state.sessionsById?.get(sessionId) ?? observed.find((s) => s && s.id === sessionId);
+    const wt = session && (session.worktree_path || session.worktreePath || session.path);
+    const dirName = typeof wt === "string" && wt.length > 0 ? path.basename(wt) : sessionId;
+    if (activeDirs.has(dirName)) continue;
+    out.push({ sessionId, title: session?.title || "", dirName });
+  }
+  if (!Array.isArray(state.sessions)) return out;
   const counts =
     state.raw?.transient_retry_counts && typeof state.raw.transient_retry_counts === "object"
       ? (state.raw.transient_retry_counts as Record<string, number>)
@@ -57,7 +73,7 @@ export function assess(state: LoopState): GhostDecision[] {
   const nowMs = Date.parse(state.ts);
   for (const session of state.sessions) {
     if (!session || typeof session !== "object") continue;
-    if (!isWorkerSession(session, state.workerGroup)) continue;
+    if (pending.has(String(session.id)) || !isWorkerSession(session, state.workerGroup)) continue;
     if (typeof session.id === "string" && activeSessionIds.has(session.id)) continue;
     // Already deferred to Brood (a prior tick got a not-tracked 404) — don't
     // re-attempt the deterministic 404 every tick.
@@ -82,6 +98,7 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
     // orphaning a separate root (#234).
     const teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward", traceKey: d.sessionId });
     if (teardown.ok) {
+      recordTeardownOutcome(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, teardown);
       dropSession(state, d.sessionId);
       res.mutated = true;
       res.actions.push({
@@ -91,6 +108,9 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
         detail: `removed ghost steward (worktree ${d.dirName} not tracked by any non-terminal slice)`,
       });
     } else if (teardown.notTracked) {
+      // Authoritative 404 (also after an earlier confirmed deferral): retire any
+      // pending entry and hand off to Brood reconciliation via the tombstone.
+      setTeardownPending(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, false);
       // Brood has no record of this session (404) — it's a reconciliation gap
       // Brood owns (adopt the open-PR steward, or reap the dead orphan), NOT a
       // teardown the legate should re-issue. Tombstone it so we surface ONCE and
@@ -106,8 +126,10 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
         detail: `brood does not track ghost steward (worktree ${d.dirName}); deferred to Brood reconciliation, not retrying: ${teardown.detail}`,
       });
     } else {
-      // Transient failure (Brood unreachable / 5xx) — defer and retry next tick;
-      // do NOT tombstone, the next tick may reach Brood.
+      // Confirmed deferral → pending; a transport failure retries off the
+      // Castra observation without suppressing the not-tracked tombstone path.
+      recordTeardownOutcome(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, teardown);
+      res.mutated = true;
       res.actions.push({
         action: "ghost-cleanup-failed",
         sessionId: d.sessionId,

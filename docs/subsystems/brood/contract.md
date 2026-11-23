@@ -47,7 +47,14 @@ original `failureReason`. Omitting a reason on retry preserves the stored value.
 `march brood teardown <id> [--force] [--kill] [--reason <text>] [--json]`
 sends the request to Brood. The response contains the primary session ID,
 status, ordered archive, container, steward, worktree, and branch steps, and
-warnings. The current container step attempts immediate removal. The CLI
+warnings. After the archive succeeds, the host substrate immediately removes
+only the ephemeral container resolved from the session kind and ID, then
+verifies absence. The recorded container ID supplies logs. Compose service
+containers are excluded. Docker errors, deadline breaches, and unverified
+removal produce a failed container step and leave teardown retryable. Castra
+removes the steward with worktree pruning disabled. Brood then removes the
+tracked worktree and branch separately, in that order. Failed steward removal
+defers both Git steps. Failed Git steps leave teardown retryable. The CLI
 prints the status, steps, and warnings in text mode or emits the service
 result with `--json`. Only `torndown` exits zero. A `tearing-down` result
 is rendered and exits non-zero even on HTTP 200.

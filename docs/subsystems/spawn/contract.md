@@ -160,7 +160,7 @@ Steward-specific public interface details.
 | Output parser failure | Unsupported backend names, malformed backend JSON, absent patch fields, or ambiguous candidate patch fields are reported with bounded diagnostics and do not produce a validated patch or handoff. |
 | Validation failure | Missing sentinel output, malformed base64, decoded content without a git-diff header, unsafe paths, failed extraction, unsafe output, or no-op output all produce diagnostics and a no-handoff outcome. |
 | Handoff failure | A validated patch that cannot be applied or sent to the manager boundary records the failure stage, preserves artifacts for diagnosis, attempts rollback cleanup, and does not claim successful handoff. |
-| Cleanup failure | Cleanup diagnostics remain observable through lifecycle evidence, logs, records, or rollback warnings and do not mask the original terminal success or failure. |
+| Cleanup failure | Dispatch rollback uses best-effort container removal so it preserves the original dispatch failure. Cleanup diagnostics remain observable through lifecycle evidence, logs, records, or rollback warnings and do not mask the original terminal success or failure. |
 
 All Spawn failures exit cleanly or surface events, records, logs, or bounded
 diagnostics. Spawn does not ask an autonomous component for interactive recovery

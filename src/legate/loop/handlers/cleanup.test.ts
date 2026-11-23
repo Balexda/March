@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { apply, assess, MAX_CLEANUP_ATTEMPTS } from "./cleanup.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
+import { dropRecoveredSlice } from "../state/mutations.js";
 import type { BroodRegisterResult, BroodTeardownResult } from "../clients/brood.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
@@ -88,6 +89,52 @@ describe("cleanup handler", () => {
     expect(state.sessionsById.has("sess")).toBe(false);
     // #175: a Herald slice.archived transition event is emitted on archive.
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.archived", sliceId: "s" });
+  });
+
+  it("a transport failure does not disable not-tracked reconciliation on a later tick", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx([failed(), notTracked(), ok()], { register: registered });
+
+    await apply(assess(state), c, state);
+    expect(state.raw.transient_retry_counts ?? {}).toEqual({});
+
+    await apply(assess(state), c, state);
+    expect(c.broodRegister).toHaveBeenCalledTimes(1);
+    expect(c.broodTeardown).toHaveBeenLastCalledWith("sess", expect.objectContaining({ force: true, traceKey: "s" }));
+    expect(state.raw.archived_slices.s).toBeDefined();
+  });
+
+  it("a slice requeue retires the prior incarnation's pending teardown identity", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx({ ok: false, notTracked: false, deferred: true, detail: "tearing-down" });
+    await apply(assess(state), c, state);
+    expect(Object.keys(state.raw.transient_retry_counts)).toEqual(["pending-teardown:cleanup:sess:s"]);
+
+    dropRecoveredSlice(state.raw, "s");
+    expect(state.raw.transient_retry_counts).toEqual({});
+
+    // Replacement incarnation: cleanup targets its own steward, not the stale one.
+    state.raw.slices.s = { worker_session_id: "fresh" };
+    state.slices = state.raw.slices;
+    const fresh = { id: "fresh", group: "legate-workers", branch: "feature/x", worktree_path: "/repo/.wt/y" };
+    state.sessions = [fresh];
+    state.sessionsById = new Map([["fresh", fresh]]);
+    expect(assess(state).map((d) => d.sessionId)).toEqual(["fresh"]);
+  });
+
+  it("retries deferred cleanup after the steward disappears from Castra", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx([{ ok: false, notTracked: false, deferred: true, detail: "tearing-down" }, ok()]);
+
+    await apply(assess(state), c, state);
+    expect(state.raw.slices.s).toBeDefined();
+    expect(state.raw.archived_slices.s).toBeUndefined();
+
+    state.sessions = [];
+    state.sessionsById.clear();
+    await apply(assess(state), c, state);
+    expect(c.broodTeardown).toHaveBeenCalledTimes(2);
+    expect(state.raw.archived_slices.s).toBeDefined();
   });
 
   it("reconciles a live-but-untracked steward into Brood, then reaps + archives (#225)", async () => {

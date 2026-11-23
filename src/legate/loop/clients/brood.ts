@@ -75,13 +75,15 @@ function teardownClient(opts: BroodTeardownOptions): BroodSeam {
 }
 
 export interface BroodTeardownResult {
-  /** Teardown confirmed (HTTP 200). */
+  /** Brood confirmed terminal cleanup. */
   readonly ok: boolean;
   /**
    * Brood has no record of the session (HTTP 404). NOT success: the caller should
    * defer + retry rather than archive over an orphaned steward/worktree (#155).
    */
   readonly notTracked: boolean;
+  /** Brood accepted teardown and retained a non-terminal lifecycle state. */
+  readonly deferred?: true;
   readonly detail: string;
 }
 
@@ -106,7 +108,9 @@ export async function broodTeardown(
   const c = client ?? teardownClient(opts);
   try {
     const res = await c.teardown(sessionId, { force: opts.force, kill: opts.kill, reason: opts.reason });
-    return { ok: true, notTracked: false, detail: summarizeTeardown(res) };
+    const detail = summarizeTeardown(res);
+    if (res.status === "torndown") return { ok: true, notTracked: false, detail };
+    return { ok: false, notTracked: false, deferred: true, detail };
   } catch (err) {
     if (err instanceof BroodNotFoundError) {
       return { ok: false, notTracked: true, detail: err.message };

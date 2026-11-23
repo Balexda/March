@@ -1,3 +1,4 @@
+import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
@@ -295,7 +296,12 @@ export function assess(state: LoopState): RelaunchDecision[] {
   // Operator relaunch requests (#593) come first and own their slices this tick:
   // they bypass the liveness skip, the backoff and the AIMD rate, and replace a
   // still-live steward. Requests already settled this incarnation are skipped.
-  const operator = operatorDecisions(state, worktreesParent);
+  // A slice whose cleanup teardown is still pending must not be relaunched: the
+  // retry targets the old session's tracked worktree and would reclaim the new
+  // steward's checkout. Excluded from every path (operator, ladder, auto) until
+  // cleanup confirms; an operator request stays unsettled and runs afterwards.
+  const pendingCleanup = new Set(pendingTeardowns(state, "cleanup").map(({ traceKey }) => traceKey));
+  const operator = operatorDecisions(state, worktreesParent).filter((d) => !pendingCleanup.has(d.sliceId));
   const operatorOwned = new Set(operator.map((d) => d.sliceId));
 
   const ladder: RelaunchDecision[] = [];
@@ -313,6 +319,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
     if (!slice || typeof slice !== "object") continue;
     if (requested.has(sliceId)) continue; // the recovery ladder owns it this tick
     if (operatorOwned.has(sliceId)) continue; // an operator relaunch owns it this tick
+    if (pendingCleanup.has(sliceId)) continue; // cleanup teardown still pending
     const pr = slice.pr || {};
     if (!pr.number) continue; // relaunch re-attaches to an EXISTING PR
     const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
@@ -501,13 +508,17 @@ async function reconcileBrood(
         reason: "steward-relaunch",
         traceKey: d.sliceId,
       });
-      if (teardown.ok) notes.push("reaped prior steward " + ids.priorSessionId);
-      else if (teardown.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
+      if (teardown.ok) {
+        dropSession(state, ids.priorSessionId);
+        notes.push("reaped prior steward " + ids.priorSessionId);
+      } else if (teardown.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
       else {
+        setTeardownPending(state, ctx, "relaunch", ids.priorSessionId, d.sliceId, true);
         notes.push("prior reap failed: " + teardown.detail);
         ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} failed: ${teardown.detail}`);
       }
     } catch (err) {
+      setTeardownPending(state, ctx, "relaunch", ids.priorSessionId, d.sliceId, true);
       notes.push("prior reap errored: " + errMsg(err));
       ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} errored: ${errMsg(err)}`);
     }
@@ -547,6 +558,23 @@ export async function apply(
   deps: RelaunchDeps = defaultRelaunchDeps,
 ): Promise<HandlerResult> {
   const res = emptyHandlerResult();
+  for (const { sessionId, traceKey } of pendingTeardowns(state, "relaunch")) {
+    try {
+      const teardown = await ctx.broodTeardown(sessionId, { force: true, reason: "steward-relaunch", traceKey });
+      if (teardown.ok) {
+        setTeardownPending(state, ctx, "relaunch", sessionId, traceKey, false);
+        dropSession(state, sessionId);
+        res.mutated = true;
+      } else if (teardown.notTracked) {
+        // Brood has no record — same terminal outcome as the first attempt's
+        // not-tracked branch; stop re-requesting a deterministic 404.
+        setTeardownPending(state, ctx, "relaunch", sessionId, traceKey, false);
+        res.mutated = true;
+      }
+    } catch (err) {
+      ctx.log(`relaunch ${traceKey}: retrying prior teardown of ${sessionId} failed: ${errMsg(err)}`);
+    }
+  }
   if (decisions.length === 0) return res;
   const nowMs = parseMs(ctx.ts);
 

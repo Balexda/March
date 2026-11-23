@@ -54,8 +54,8 @@ function recordingDeps(
   // Substrate adapter (#169): spawn + workspace reclamation behind one
   // injectable seam, mirroring how teardown depends on it in production.
   const substrate: TeardownSubstrate = {
-    removeSpawn: (spawnId) => {
-      calls.push(`container:${spawnId}`);
+    removeCompute: async ({ sessionId }) => {
+      calls.push(`container:${sessionId}`);
     },
     removeWorkspace: (_repo, target) => {
       // The worktree step passes only `worktreePath`; the branch step passes
@@ -215,7 +215,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     rec.deps.pathExists = (p) => p === group.worktreePath;
     rec.deps.substrate = {
       ...rec.deps.substrate!,
-      removeSpawn: () => {
+      removeCompute: async () => {
         throw new Error("docker daemon down");
       },
     };
@@ -228,7 +228,8 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     // Later steps still ran.
     expect(result.steps.find((s) => s.step === "worktree")?.outcome).toBe("ok");
     expect(result.steps.find((s) => s.step === "branch")?.outcome).toBe("ok");
-    expect(result.status).toBe("torndown");
+    expect(result.status).toBe("tearing-down");
+    expect(store.get(group.spawnId)?.status).toBe("tearing-down");
     store.close();
   });
 
@@ -327,6 +328,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
         force: true, reason: "operator cleanup",
       }, unavailable.deps);
       expect(first.status).toBe("tearing-down");
+      expect(unavailable.calls).toEqual([]);
       expect(first.steps[0]).toMatchObject({ step: "archive", outcome: "failed" });
       expect(fs.existsSync(path.join(archive, "record.json"))).toBe(false);
     } finally {
@@ -359,6 +361,46 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     } finally {
       reopened.close();
     }
+  });
+
+  it("uses the Legate session identity for cleanup and the recorded ID for logs", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const home = makeHome();
+    const rec = recordingDeps(home);
+    const removeCompute = vi.fn(async () => {});
+    rec.deps.substrate = { ...rec.deps.substrate!, removeCompute };
+    store.register({ id: "ephemeral", kind: "legate", containerId: "march-legate" });
+
+    const result = await teardownSession(store, "ephemeral", {}, rec.deps);
+
+    expect(rec.calls).toEqual(["logs:march-legate"]);
+    expect(removeCompute).toHaveBeenCalledOnce();
+    expect(removeCompute).toHaveBeenCalledWith({
+      sessionId: "ephemeral", kind: "legate", containerName: "march-legate-ephemeral",
+    });
+    expect(result.status).toBe("torndown");
+    // The standalone legate row itself is archived, captured before tearing-down.
+    const snapshot = JSON.parse(
+      fs.readFileSync(path.join(broodArchiveDir("ephemeral", home), "record.json"), "utf-8"),
+    );
+    expect(snapshot.session).toMatchObject({ id: "ephemeral", kind: "legate", containerId: "march-legate" });
+    expect(snapshot.session.status).not.toBe("tearing-down");
+    store.close();
+  });
+
+  it("defers all removal when readable logs cannot be written", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const rec = recordingDeps(home);
+    fs.mkdirSync(path.join(broodArchiveDir(spawnId, home), "container.log"), { recursive: true });
+
+    const result = await teardownSession(store, spawnId, {}, rec.deps);
+
+    expect(result.status).toBe("tearing-down");
+    expect(result.steps.map(({ outcome }) => outcome)).toEqual(["failed", "skipped", "skipped", "skipped", "skipped"]);
+    expect(rec.calls).toEqual(["logs:container-aaa"]);
+    store.close();
   });
 
   it("writes a record snapshot + container log to the archive dir", async () => {

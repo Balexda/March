@@ -5,7 +5,7 @@ import {
   startBroodSpan,
   type BroodChildSpan,
 } from "../../observability/brood-trace.js";
-import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
+import { readSpawnContainerLogs, spawnContainerName } from "../../spawn/container-launch.js";
 import type { SessionRepository } from "./repository.js";
 import {
   defaultStewardGateway,
@@ -13,7 +13,7 @@ import {
   type StewardRemovalResult,
 } from "./steward-removal.js";
 import { broodArchiveDir } from "./store.js";
-import { hostTeardownSubstrate, type TeardownSubstrate } from "./substrate.js";
+import { hostTeardownSubstrate, type ComputeTarget, type TeardownSubstrate } from "./substrate.js";
 import type {
   SessionRecord,
   TeardownRequest,
@@ -121,21 +121,9 @@ function resolveDeps(deps: TeardownDeps): ResolvedDeps {
 }
 
 /**
- * Tear down a managed session and reclaim its artifacts, in a fixed,
- * idempotent, best-effort order:
- *
- *   1. archive   — capture `docker logs` + a record snapshot before deletion.
- *   2. container — `docker rm -f` the spawn container.
- *   3. steward   — ask castra (or agent-deck) to remove the steward session,
- *                  awaiting completion. castra may reclaim the shared worktree.
- *   4. worktree  — re-check, then remove by EXACT path if still present.
- *   5. branch    — delete the spawn branch by exact name.
- *
- * The order matters for #155: the worktree is removed by exact tracked path
- * (never a blanket `git worktree prune`) and only after the steward — which
- * shares that worktree — has been torn down. A failing step records a warning
- * and the next step still runs. Tearing down an already-`torndown` session is a
- * no-op.
+ * Archive before reclaiming compute, steward, worktree and branch in that order.
+ * A failed step keeps the session retryable. The workspace is shared with the
+ * steward, so Git cleanup requires verified steward removal.
  */
 export async function teardownSession(
   store: SessionRepository,
@@ -161,12 +149,8 @@ export async function teardownSession(
 
   // Resolve the spawn<->steward group. The spawn row carries the canonical
   // container/worktree/branch; the steward row carries the agent-deck session.
-  const spawn =
-    target.kind === "spawn"
-      ? target
-      : target.parentId
-        ? store.get(target.parentId)
-        : undefined;
+  const parent = target.kind === "steward" && target.parentId ? store.get(target.parentId) : undefined;
+  const spawn = target.kind === "spawn" ? target : parent?.kind === "spawn" ? parent : undefined;
   const steward =
     target.kind === "steward"
       ? target
@@ -223,6 +207,10 @@ export async function teardownSession(
     );
   }
 
+  // Pre-teardown snapshot of the primary row (a standalone legate has no spawn
+  // or steward row, so without this its record would be missing from the archive).
+  const sessionSnapshot: SessionRecord = { ...primary };
+
   // Mark the group as tearing-down so a concurrent reader sees the transition.
   store.update(primary.id, {
     status: "tearing-down",
@@ -233,21 +221,23 @@ export async function teardownSession(
     store.update(steward.id, { status: "tearing-down" });
   }
 
+  const archiveSpan = span.startChild("brood.teardown.archive");
   // 1. Archive (before any deletion).
   try {
     const dir = broodArchiveDir(primary.id, d.homeDir);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "record.json"),
-      JSON.stringify({ spawn, steward, torndownAt: d.now() }, null, 2) + "\n",
+      JSON.stringify({ session: sessionSnapshot, spawn, steward, torndownAt: d.now() }, null, 2) + "\n",
     );
     if (primary.containerId) {
+      let logs: string | undefined;
       try {
-        const logs = d.readContainerLogs(primary.containerId);
-        fs.writeFileSync(path.join(dir, "container.log"), logs);
+        logs = d.readContainerLogs(primary.containerId);
       } catch (err) {
         warnings.push(`container logs unavailable: ${message(err)}`);
       }
+      if (logs !== undefined) fs.writeFileSync(path.join(dir, "container.log"), logs);
     }
     steps.push({ step: "archive", outcome: "ok" });
   } catch (err) {
@@ -255,38 +245,39 @@ export async function teardownSession(
     warnings.push(`archive failed: ${message(err)}`);
   }
 
+  endStepSpan(archiveSpan, steps[0]!);
+
+  if (steps[0]!.outcome === "failed") {
+    for (const step of ["container", "steward", "worktree", "branch"] as const) {
+      const deferred: TeardownStep = { step, outcome: "skipped", detail: "deferred: archive failed" };
+      steps.push(deferred);
+      endStepSpan(span.startChild(`brood.teardown.${step}`), deferred);
+    }
+    return finish("error");
+  }
+
   // 2. Container.
   {
     const child = span.startChild("brood.teardown.container", {
       ...(spawn ? { "march.spawn.id": spawn.id } : {}),
     });
-    if (spawn) {
-      try {
-        d.substrate.removeSpawn(spawn.id);
-        steps.push({
-          step: "container",
-          outcome: "ok",
-          detail: "immediate removal attempted",
-        });
-      } catch (err) {
-        steps.push({
-          step: "container",
-          outcome: "failed",
-          detail: message(err),
-        });
-        warnings.push(`container removal failed: ${message(err)}`);
+    try {
+      const compute = resolveComputeTarget(primary);
+      if (compute) {
+        await d.substrate.removeCompute(compute);
+        steps.push({ step: "container", outcome: "ok", detail: "absence verified" });
+      } else {
+        steps.push({ step: "container", outcome: "skipped" });
       }
-    } else {
-      steps.push({ step: "container", outcome: "skipped" });
+    } catch (err) {
+      steps.push({ step: "container", outcome: "failed", detail: message(err) });
+      warnings.push(`container removal failed: ${message(err)}`);
     }
     endStepSpan(child, steps[steps.length - 1]!);
   }
 
-  // 3. Steward (await — Castra owns the agent-deck session and may reclaim the
-  //    shared worktree). If removal FAILS (e.g. Castra unreachable) we must NOT
-  //    proceed to remove the worktree — that would pull the checkout out from
-  //    under a still-live session. Defer the worktree/branch and retry next tick.
   let stewardRemovalFailed = false;
+  // 3. Verify Castra removal before reclaiming the shared worktree and branch.
   {
     const child = span.startChild("brood.teardown.steward", {
       ...(steward ? { "march.steward.id": steward.id } : {}),
@@ -394,42 +385,47 @@ export async function teardownSession(
     endStepSpan(child, steps[steps.length - 1]!);
   }
 
-  // 6. Mark torndown — but only when the steward was actually removed. If it
-  //    wasn't, leave the row "tearing-down" so the next teardown request retries
-  //    (idempotent re-entry). The JSON SpawnRecord is left on disk; "disposed"
-  //    is derived from "registry torndown + artifacts gone".
-  if (!stewardRemovalFailed) {
+  const failed = steps.some((step) => step.outcome === "failed");
+  if (!failed) {
     store.markTorndown(primary.id);
     if (steward && steward.id !== primary.id) {
       store.markTorndown(steward.id);
     }
   }
 
-  // Telemetry: one span per teardown (ordered step events), errored when any
-  // step failed, plus the low-cardinality teardown metric.
-  const failed = steps.some((step) => step.outcome === "failed");
-  const outcome: "success" | "partial" | "error" = stewardRemovalFailed
-    ? "error"
-    : failed
-      ? "partial"
-      : "success";
-  const finalStatus = stewardRemovalFailed ? "tearing-down" : "torndown";
-  for (const step of steps) {
-    span.event(`teardown.${step.step}`, {
-      outcome: step.outcome,
-      ...(step.detail ? { detail: step.detail } : {}),
-    });
-  }
-  span.setAttributes({ "march.teardown.outcome": outcome });
-  span.end({ error: outcome !== "success" });
-  recordBroodTeardown({
-    kind: primary.kind,
-    outcome,
-    profile: steward?.profile ?? primary.profile ?? "unknown",
-    durationSeconds: (Date.now() - startMs) / 1000,
-  });
+  return finish(stewardRemovalFailed ? "error" : failed ? "partial" : "success");
 
-  return { id: primary.id, status: finalStatus, steps, warnings };
+  function finish(outcome: "error" | "partial" | "success"): TeardownResult {
+    const finalStatus = outcome === "success" ? "torndown" : "tearing-down";
+    for (const step of steps) {
+      span.event(`teardown.${step.step}`, {
+        outcome: step.outcome,
+        ...(step.detail ? { detail: step.detail } : {}),
+      });
+    }
+    span.setAttributes({ "march.teardown.outcome": outcome });
+    span.end({ error: outcome !== "success" });
+    recordBroodTeardown({
+      kind: primary.kind,
+      outcome,
+      profile: steward?.profile ?? primary.profile ?? "unknown",
+      durationSeconds: (Date.now() - startMs) / 1000,
+    });
+
+    return { id: primary.id, status: finalStatus, steps, warnings };
+  }
+}
+
+function resolveComputeTarget(record: SessionRecord): ComputeTarget | undefined {
+  // Spawn records can lack a log ID (for example, an interrupted launch).
+  if (record.kind !== "spawn" && !record.containerId) return undefined;
+  const containerName = record.kind === "spawn"
+    ? spawnContainerName(record.id)
+    : `march-${record.kind}-${record.id}`;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(record.id)) {
+    throw new Error(`Invalid session identity for container removal: "${record.id}"`);
+  }
+  return { sessionId: record.id, kind: record.kind, containerName };
 }
 
 function rejectTeardown(
@@ -453,7 +449,7 @@ function message(err: unknown): string {
  * nothing-to-reclaim / already-gone.
  */
 function stepSpanOutcome(step: TeardownStep): string {
-  if (step.outcome === "ok") return "removed";
+  if (step.outcome === "ok") return step.step === "archive" ? "ok" : "removed";
   if (step.outcome === "failed") return "failed";
   return step.detail?.startsWith("deferred") ? "deferred" : "not-found";
 }

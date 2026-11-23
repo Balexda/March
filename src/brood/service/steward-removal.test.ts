@@ -77,8 +77,10 @@ describe("removeStewardViaCastra", () => {
     // Brood still tracks the OLD one. Worktree match finds the live session.
     const gw = fakeGateway([
       session({ sessionId: "new-id", worktreePath: "/wt/aaa", branch: "feature/x" }),
+      session({ sessionId: "adjacent", worktreePath: "/wt/aaa-extra", branch: "feature/x-extra" }),
     ]);
 
+    const remove = vi.spyOn(gw, "removeSession");
     const res = await removeStewardViaCastra(gw, {
       sessionId: "stale-old-id",
       profile: "smithy",
@@ -89,6 +91,8 @@ describe("removeStewardViaCastra", () => {
     expect(res.outcome).toBe("removed");
     expect(res.removedIds).toEqual(["new-id"]);
     expect(gw.removed).toEqual(["new-id"]);
+    expect(remove).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "new-id", pruneWorktree: false }));
+    expect(gw.sessions.map(({ sessionId }) => sessionId)).toEqual(["adjacent"]);
   });
 
   it("reports absent only when Castra is reachable and has no matching session", async () => {

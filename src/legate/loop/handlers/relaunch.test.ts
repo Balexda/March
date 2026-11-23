@@ -172,6 +172,40 @@ describe("relaunch handler", () => {
     expect(slice.worker_session_id).toBe("new");
   });
 
+  it("does not relaunch a slice whose cleanup teardown is still pending", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({
+      slices: { gone: slice },
+      raw: { slices: { gone: slice }, transient_retry_counts: { "pending-teardown:cleanup:old:gone": 1 } },
+    });
+    expect(assess(state)).toEqual([]);
+    state.raw.transient_retry_counts["pending-teardown:cleanup:old:gone"] = 0;
+    expect(assess(state).map((d) => d.sliceId)).toEqual(["gone"]);
+  });
+
+  it("retries deferred prior-steward teardown without relaunching again", async () => {
+    const slice = eligibleSlice({ worker_session_id: "old", worktree_path: "/wt/feature-feat-a-oldhash" });
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    let ok = false;
+    const c = ctx(() => ({ sessionId: "new", worktreePath: "/wt/feature-feat-a-newhash" }), {
+      teardown: () => ok
+        ? { ok: true, notTracked: false, detail: "" }
+        : { ok: false, notTracked: false, deferred: true, detail: "tearing-down" },
+    });
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+
+    await apply(assess(state), c, state, deps);
+    expect(slice.worker_session_id).toBe("new");
+    ok = true;
+    await apply([], c, state, deps);
+    await apply([], c, state, deps);
+    expect(c.broodTeardown).toHaveBeenCalledTimes(2);
+    expect(c.broodTeardown).toHaveBeenLastCalledWith("old", {
+      force: true, reason: "steward-relaunch", traceKey: "gone",
+    });
+    expect(c.castra.launchSession).toHaveBeenCalledTimes(1);
+  });
+
   it("#308: registers parentId from the slice's Hatchery spawn id (preserves the spawn group)", async () => {
     const slice = eligibleSlice({ hatchery: { spawn_id: "spawn-42", backend: "codex" } });
     const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });

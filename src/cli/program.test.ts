@@ -379,7 +379,7 @@ describe("march CLI", () => {
           homeDir, traceparent,
           pathExists: () => true,
           substrate: {
-            removeSpawn: (spawnId) => { calls.push(spawnId); },
+            removeCompute: async ({ sessionId }) => { calls.push(sessionId); },
             removeWorkspace: () => ({ worktreeRemoved: true, branchDeleted: true }),
           },
           removeSteward: async () => defer
@@ -424,7 +424,7 @@ describe("march CLI", () => {
 
       const completed = await runTeardown(url, "stopped");
       expect(completed.stdout.trim().split("\n")).toEqual([
-        "stopped: torndown", "archive: ok", "container: ok (immediate removal attempted)",
+        "stopped: torndown", "archive: ok", "container: ok (absence verified)",
         "steward: ok", "worktree: ok", "branch: ok",
       ]);
       expect(completed.stderr).toBe("");
