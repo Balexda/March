@@ -73,7 +73,8 @@ describe("statio container artifacts", () => {
     expect(compose).toContain(
       "MARCH_STATIO_URL=${MARCH_STATIO_URL:-http://statio:${MARCH_STATIO_PORT:-9689}}",
     );
-    expect(compose).toContain("MARCH_TESSERA_CLIENT_KEY=${MARCH_STATIO_TESSERA_CLIENT_KEY:-}");
+    expect(compose).toContain("MARCH_TESSERA_CLIENT_KEY_FILE=${MARCH_STATIO_TESSERA_CLIENT_KEY_FILE:-${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera/keys/statio.key}");
+    expect(compose).not.toMatch(/GH_TOKEN=|GITHUB_TOKEN=|GH_TOKEN_FALLBACK/);
     expect(compose).toContain("MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}");
     expect(compose).toContain("MARCH_OTEL=${MARCH_OTEL:-1}");
     expect(compose).toContain("external: true");

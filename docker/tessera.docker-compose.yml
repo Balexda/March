@@ -1,7 +1,10 @@
-# Tessera starts unconfigured: health/status work without GitHub credentials.
-# Issuance remains denied until US2 supplies production client authorization.
-# US3 owns secret storage/import, HOME-path validation, key distribution and
-# stack startup ordering; this asset intentionally provisions no secrets.
+# Tessera is the stack's ONLY GitHub credential source. Provision it first:
+#   march tessera provision --from-gh      # writes ~/.march/tessera
+# That directory (client key digests, policy, the operator token) is mounted
+# read-only. With a GitHub App configured (TESSERA_GITHUB_APP_ID + the PEM at
+# ~/.march/tessera/github-app.pem) the app slot mints installation tokens;
+# otherwise it vends the operator token from github-token (interim). Startup
+# fails if clients.json / policy.json are missing.
 # No HOME, Docker socket, ambient GH_TOKEN or GITHUB_TOKEN enters this service.
 # Residual risk: a peer with the host Docker socket can still inspect containers
 # and their secrets; host steward processes retain operator-level host access.
@@ -29,8 +32,20 @@ services:
       - MARCH_OTEL=${MARCH_OTEL:-1}
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-tessera
+      - TESSERA_CLIENT_KEYS_FILE=/march/tessera/clients.json
+      - TESSERA_POLICY_FILE=/march/tessera/policy.json
+      # Interim operator token (`gh auth token`), used only while no App is set.
+      - TESSERA_GITHUB_TOKEN_FILE=/march/tessera/github-token
+      # The goal: a GitHub App. Empty id leaves the App unconfigured.
+      - TESSERA_GITHUB_APP_ID=${TESSERA_GITHUB_APP_ID:-}
+      - TESSERA_GITHUB_APP_KEY_FILE=/march/tessera/github-app.pem
+      - TESSERA_GITHUB_INSTALLATION_ID=${TESSERA_GITHUB_INSTALLATION_ID:-}
     volumes:
       - march-tessera-logs:/march/logs
+      # Provisioned config + keys (`march tessera provision`), read-only. The
+      # files are 0600 and owned by the host user; the image's `node` user is
+      # uid 1000, so MARCH_HOST_UID must be 1000 (or run as that uid).
+      - ${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera:/march/tessera:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz"]
       interval: 10s

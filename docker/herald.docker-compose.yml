@@ -21,20 +21,15 @@
 #                     when the registry is empty. Optional now that profiles are
 #                     registered via `march legate init` (Herald is the source of
 #                     truth). Defaults to MARCH_LEGATE_LOOP_META.
-#   MARCH_HERALD_TESSERA_CLIENT_KEY
-#                     Herald's own Tessera client key (forwarded as
-#                     MARCH_TESSERA_CLIENT_KEY). All GitHub reads and the sync
-#                     fetch/pull (always on for every active profile, #601) use a repository-scoped app/read entitlement
-#                     over HTTPS — no ssh client / key / agent is used.
+#   MARCH_HERALD_TESSERA_CLIENT_KEY_FILE
+#                     Herald's own Tessera client key file (forwarded as
+#                     MARCH_TESSERA_CLIENT_KEY_FILE; default
+#                     ~/.march/tessera/keys/herald.key, written by `march
+#                     tessera provision`). All GitHub reads and the sync
+#                     fetch/pull (always on for every active profile, #601) use a
+#                     repository-scoped app/read entitlement over HTTPS — no ssh
+#                     client / key / agent and no ambient GH_TOKEN is used.
 #   MARCH_TESSERA_URL Tessera base URL (default http://tessera:9477 on `march`).
-#   MARCH_TESSERA_GH_TOKEN_FALLBACK
-#                     migration fallback, defaults to 1 here: when issuance
-#                     fails (e.g. no client key yet), GH_TOKEN / GITHUB_TOKEN is
-#                     used for the same scoped call, with a warning + the
-#                     march.tessera.client.fallbacks metric. Set 0 to require
-#                     Tessera.
-#   GH_TOKEN / GITHUB_TOKEN
-#                     ambient GitHub token, used ONLY via the fallback above.
 #   MARCH_HERALD_ADMIN_TOKEN
 #                     break-glass operator token for POST /admin/events (#265).
 #                     LEAVE UNSET in prod — while unset the admin route 404s and is
@@ -81,19 +76,11 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       # Herald observes the same deployment as the legate; reuse its meta.
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
-      # GitHub token: Herald always syncs every active profile's default branch
-      # (#300/#601) and rewrites SSH remotes to token-auth HTTPS at fetch time
-      # (#301), so no ssh client/key is needed in-container.
-      - GH_TOKEN=${GH_TOKEN:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      # Tessera (scoped GitHub reads + sync). Herald requests app/read per
-      # profile repository with its OWN client key. Until that key is
-      # provisioned (US3), the explicit migration fallback lets the client use
-      # GH_TOKEN/GITHUB_TOKEN above when issuance fails (warned + counted).
-      # Set MARCH_TESSERA_GH_TOKEN_FALLBACK=0 to require Tessera; US9 removes it.
+      # Tessera (scoped GitHub reads + the default-branch sync, #300/#601):
+      # Herald requests app/read per profile repository with its OWN client key.
+      # No ambient GH_TOKEN/GITHUB_TOKEN is forwarded and there is no fallback.
       - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
-      - MARCH_TESSERA_CLIENT_KEY=${MARCH_HERALD_TESSERA_CLIENT_KEY:-}
-      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-1}
+      - MARCH_TESSERA_CLIENT_KEY_FILE=${MARCH_HERALD_TESSERA_CLIENT_KEY_FILE:-${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera/keys/herald.key}
       # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
       # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
       # corrective event, then comment it out again and recreate the container.

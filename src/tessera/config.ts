@@ -1,3 +1,4 @@
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
 /** Tessera's service identity and contracted default port. */
 export const TESSERA_SERVICE_NAME = "march-tessera";
 export const TESSERA_PORT_ENV = "MARCH_TESSERA_PORT";
@@ -55,6 +56,39 @@ function plaintextHostAllowed(host: string): boolean {
   }
   return !host.includes(".") && !host.includes(":");
 }
+/** Env var naming a file that holds the client key (takes precedence over MARCH_TESSERA_CLIENT_KEY). */
+export const TESSERA_CLIENT_KEY_FILE_ENV = "MARCH_TESSERA_CLIENT_KEY_FILE";
+
+/**
+ * Read a client-key file synchronously with the same rules as the token CLI:
+ * a regular file owned by this process's user, mode 0600, at most 4 KiB.
+ * Returns undefined (unconfigured — fail closed) on any violation.
+ */
+export function readClientKeyFileSync(file: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    const uid = process.getuid?.();
+    if (!stat.isFile() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o777) !== 0o600 || stat.size > 4096) return undefined;
+    const buffer = Buffer.alloc(4097);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytes > 4096) return undefined;
+    return buffer.toString("utf8", 0, bytes).trim() || undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** The configured client key: the key file when named, else the env key. */
+function configuredClientKey(env: NodeJS.ProcessEnv): string | undefined {
+  const file = env[TESSERA_CLIENT_KEY_FILE_ENV]?.trim();
+  if (file) return readClientKeyFileSync(file);
+  return env.MARCH_TESSERA_CLIENT_KEY;
+}
+
 /** No default endpoint or key: incomplete consumer wiring must fail closed. */
 export function resolveTesseraConfig(options: {
   baseUrl?: string; clientKey?: string; env?: NodeJS.ProcessEnv;
@@ -62,7 +96,7 @@ export function resolveTesseraConfig(options: {
   const env = options.env ?? process.env;
   // Trim before validating so the key sent in the auth header is exactly what was checked.
   const baseUrl = (options.baseUrl ?? env.MARCH_TESSERA_URL)?.trim();
-  const clientKey = (options.clientKey ?? env.MARCH_TESSERA_CLIENT_KEY)?.trim();
+  const clientKey = (options.clientKey ?? configuredClientKey(env))?.trim();
   if (!baseUrl || !clientKey || /[\r\n]/.test(clientKey)) return;
   try {
     const url = new URL(baseUrl);

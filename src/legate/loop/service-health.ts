@@ -105,11 +105,11 @@ export function startRemedy(name: StackServiceName): string {
 
 /** Tessera is the ONLY GitHub credential source: without it the stack is down. */
 export const TESSERA_REMEDY =
-  "Start Tessera and give it the GitHub App credentials: docker compose -f docker/tessera.docker-compose.yml up -d (see docs/subsystems/tessera/contract.md)";
+  "Start Tessera and give it GitHub credentials: march tessera provision --from-gh, then docker compose -f docker/tessera.docker-compose.yml up -d (see docs/subsystems/tessera/contract.md)";
 
 export const HATCHERY_CREDENTIAL_REMEDY =
   "Hatchery has no GitHub credential from Tessera: " + TESSERA_REMEDY
-  + ", and set MARCH_TESSERA_HATCHERY_CLIENT_KEY, then recreate Hatchery (march up).";
+  + "; then recreate Hatchery so it reads ~/.march/tessera/keys/hatchery.key (march up).";
 
 function notAnswering(name: StackServiceName, error: string, checkedAt: string): ServiceHealth {
   return { state: "down", checked_at: checkedAt, reasons: [`not answering: ${error}`], remedy: startRemedy(name), detail: null };

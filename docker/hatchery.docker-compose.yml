@@ -76,16 +76,12 @@ services:
       - CODEX_HOME=${MARCH_HOST_HOME:-/home/jmbattista}/.codex
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       # Hatchery REQUIRES Tessera for GitHub app/read issuance (#628: base
-      # pinning needs it, so no spawn can start without it). Start Tessera with
-      # its GitHub App credentials (docker/tessera.docker-compose.yml) and set
-      # MARCH_TESSERA_HATCHERY_CLIENT_KEY; /readyz reports `down` until Tessera
-      # is reachable and its github-app provider is ok.
+      # pinning needs it, so no spawn can start without it). `march tessera
+      # provision` writes the key file below; /readyz reports `down` until
+      # Tessera is reachable and its github-app provider is ok. No ambient
+      # GH_TOKEN/GITHUB_TOKEN is forwarded and there is no token fallback.
       - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
-      - MARCH_TESSERA_CLIENT_KEY=${MARCH_TESSERA_HATCHERY_CLIENT_KEY:-}
-      # Off: the ambient-token fallback is not a supported credential path.
-      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-}
-      - GH_TOKEN=${GH_TOKEN:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - MARCH_TESSERA_CLIENT_KEY_FILE=${MARCH_TESSERA_HATCHERY_CLIENT_KEY_FILE:-${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera/keys/hatchery.key}
       # Castra — the interactive-sessions host the Hatchery drives over HTTP.
       - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
       # Required — must match the token Castra was started with.

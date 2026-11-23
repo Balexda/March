@@ -182,11 +182,12 @@ export class TesseraClient {
 }
 // One convenience client per effective configuration. Replacing it on configuration
 // changes avoids retaining old credentials or sharing state across callers.
-let defaultClient: { baseUrl?: string; clientKey?: string; fallback?: string; client: TesseraClient } | undefined;
+let defaultClient: { baseUrl?: string; clientKey?: string; keyFile?: string; fallback?: string; client: TesseraClient } | undefined;
 export function getGitHubToken(req: GitHubTokenRequest): Promise<GitHubEntitlement> {
-  const { MARCH_TESSERA_URL: baseUrl, MARCH_TESSERA_CLIENT_KEY: clientKey, MARCH_TESSERA_GH_TOKEN_FALLBACK: fallback } = process.env;
-  if (!defaultClient || defaultClient.baseUrl !== baseUrl || defaultClient.clientKey !== clientKey || defaultClient.fallback !== fallback) {
-    defaultClient = { baseUrl, clientKey, fallback, client: new TesseraClient() };
+  const { MARCH_TESSERA_URL: baseUrl, MARCH_TESSERA_CLIENT_KEY: clientKey, MARCH_TESSERA_CLIENT_KEY_FILE: keyFile, MARCH_TESSERA_GH_TOKEN_FALLBACK: fallback } = process.env;
+  if (!defaultClient || defaultClient.baseUrl !== baseUrl || defaultClient.clientKey !== clientKey ||
+    defaultClient.keyFile !== keyFile || defaultClient.fallback !== fallback) {
+    defaultClient = { baseUrl, clientKey, keyFile, fallback, client: new TesseraClient() };
   }
   return defaultClient.client.issueGitHubToken(req);
 }

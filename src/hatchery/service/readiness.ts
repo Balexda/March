@@ -191,7 +191,7 @@ export class SpawnWindow {
 function githubReasonSentence(github: GitHubCredentialCheck): string {
   switch (github.reason) {
     case "tessera:unconfigured":
-      return "no GitHub credential: Tessera is not configured for Hatchery (MARCH_TESSERA_URL + MARCH_TESSERA_CLIENT_KEY) (tessera:unconfigured)";
+      return "no GitHub credential: Tessera is not configured for Hatchery (MARCH_TESSERA_URL + a client key from MARCH_TESSERA_CLIENT_KEY_FILE, see `march tessera provision`) (tessera:unconfigured)";
     case "tessera:unreachable":
       return "no GitHub credential: Tessera is not reachable (tessera:unreachable)";
     case FALLBACK_UNSUPPORTED_REASON:

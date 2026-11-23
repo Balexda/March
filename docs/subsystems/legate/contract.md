@@ -33,9 +33,9 @@ The runtime exported by `src/legate/loop/runtime.ts` is the orchestration entryp
 Both `ok: true` shapes of `/status` (all profiles and `?profile=<p>`) also carry a top-level `services` map: the stack readiness the loop probed on its latest tick. Each tick probes Hatchery `/readyz`, Brood `/readyz`, Castra `/healthz`, Herald `/healthz` and Tessera `/status` concurrently, with a 2-second timeout each, using `MARCH_HATCHERY_URL`, `MARCH_BROOD_URL`, `CASTRA_URL`, `MARCH_HERALD_URL` and `MARCH_TESSERA_URL`, or the compose defaults (`http://hatchery:8080`, `http://brood:9748`, `http://castra:9264`, `http://herald:8818`, `http://tessera:9477`). The loop caches the result, and `/status` serves the cache without probing. The map is `{}` before the first tick. A probe that fails becomes a `down` entry and never fails the tick. Each entry is `{ "state": "ok" | "degraded" | "down", "checked_at": ISO, "reasons": string[], "remedy": string | null, "detail": object | null }`:
 
 - `reasons` comes from the service's readyz `reasons`. When a body has none, the reasons name its false boolean checks (Brood), or read `"not answering: <ECONNREFUSED|ENOTFOUND|timeout|error>"` when the service did not answer.
-- `remedy` is a one-line operator action, or `null` when `state` is `ok`. Hatchery with no GitHub credential gets an instruction to start Tessera, set `MARCH_TESSERA_HATCHERY_CLIENT_KEY`, and recreate Hatchery. Hatchery with consecutive spawn failures gets `Every recent spawn failed (<last_error>); see \`march logs hatchery\`.` A service that is not answering gets `Start it: march up (or docker compose -f docker/<name>.docker-compose.yml up -d).`
+- `remedy` is a one-line operator action, or `null` when `state` is `ok`. Hatchery with no GitHub credential gets an instruction to provision and start Tessera, then recreate Hatchery. Hatchery with consecutive spawn failures gets `Every recent spawn failed (<last_error>); see \`march logs hatchery\`.` A service that is not answering gets `Start it: march up (or docker compose -f docker/<name>.docker-compose.yml up -d).`
 - `detail` is the raw JSON body (Hatchery's includes `github` and `spawns`), or `null`.
-- Tessera is the only GitHub credential source, so there is no "not deployed" state. Tessera is `ok` when its `github-app` provider is `ok`. It is `down` when it does not answer: the reason is `not running` on a refused connection or a host that does not resolve, and `not answering: <code>` otherwise. It is also `down` when it answers but the `github-app` provider is `unconfigured`, `degraded` or `invalid` ("Tessera is running but cannot vend GitHub credentials: github-app provider <state>"). Both cases carry the remedy `Start Tessera and give it the GitHub App credentials: docker compose -f docker/tessera.docker-compose.yml up -d (see docs/subsystems/tessera/contract.md)`.
+- Tessera is the only GitHub credential source, so there is no "not deployed" state. Tessera is `ok` when its `github-app` provider is `ok`. It is `down` when it does not answer: the reason is `not running` on a refused connection or a host that does not resolve, and `not answering: <code>` otherwise. It is also `down` when it answers but the `github-app` provider is `unconfigured`, `degraded` or `invalid` ("Tessera is running but cannot vend GitHub credentials: github-app provider <state>"). Both cases carry the remedy `Start Tessera and give it GitHub credentials: march tessera provision --from-gh, then docker compose -f docker/tessera.docker-compose.yml up -d (see docs/subsystems/tessera/contract.md)`.
 - A service that answers more slowly than the 2-second timeout reads `down` with `not answering: timeout`.
 
 The same map drives the `march.stack.service.state{service,state}` gauge.
@@ -76,12 +76,11 @@ CI reruns use `app/write`. If that entitlement lacks Actions permission,
 the conductor reports a failed rerun for the operator to perform.
 
 The `march-legate` container receives `MARCH_TESSERA_URL` (default
-`http://tessera:9477`) and `MARCH_TESSERA_CLIENT_KEY`. Until the Legate client
-key is distributed, the compose file enables `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`
-by default, so a failed issuance falls back to the forwarded
-`GH_TOKEN`/`GITHUB_TOKEN` and records a Tessera client fallback. The mounted
-`gh` login is never read. Operators set the fallback to `0` once Tessera issues
-Legate entitlements.
+`http://tessera:9477`) and `MARCH_TESSERA_CLIENT_KEY_FILE` (default
+`~/.march/tessera/keys/legate.key`, written by `march tessera provision`;
+override the path with `MARCH_TESSERA_LEGATE_CLIENT_KEY_FILE`). Compose forwards
+no `GH_TOKEN`/`GITHUB_TOKEN` and sets no token fallback: every forge action
+uses a Tessera entitlement, and the mounted `gh` login is never read.
 
 Legate's public outputs are:
 

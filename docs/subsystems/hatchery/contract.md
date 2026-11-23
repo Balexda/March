@@ -52,7 +52,7 @@ stayed green.
 | `state` | `ok` \| `degraded` \| `down`, derived from the checks below. |
 | `docker` | Docker is available to run sibling spawn containers. |
 | `castra` | Castra is reachable for steward session handoff. |
-| `github.ok` / `github.source` | Whether a spawn can get a GitHub app/read credential. Tessera is the only supported source. `ok` is true only when Tessera is configured (`MARCH_TESSERA_URL` and `MARCH_TESSERA_CLIENT_KEY`), reachable, and its `github-app` provider reports `ok`. Hatchery checks with an unauthenticated `GET /status` that times out after 1.5 s and is cached for 5 s, so `/readyz` never hangs and mints nothing. `source` is `tessera` when Tessera is configured, `fallback` when only the ambient-token fallback (`MARCH_TESSERA_GH_TOKEN_FALLBACK=1` with `GH_TOKEN`/`GITHUB_TOKEN`) is set, and otherwise `none`. A `fallback` source is never `ok`. |
+| `github.ok` / `github.source` | Whether a spawn can get a GitHub app/read credential. Tessera is the only supported source. `ok` is true only when Tessera is configured (`MARCH_TESSERA_URL` and a client key from `MARCH_TESSERA_CLIENT_KEY_FILE` or `MARCH_TESSERA_CLIENT_KEY`), reachable, and its `github-app` provider reports `ok`. Hatchery checks with an unauthenticated `GET /status` that times out after 1.5 s and is cached for 5 s, so `/readyz` never hangs and mints nothing. `source` is `tessera` when Tessera is configured, `fallback` when only the ambient-token fallback (`MARCH_TESSERA_GH_TOKEN_FALLBACK=1` with `GH_TOKEN`/`GITHUB_TOKEN`) is set, and otherwise `none`. A `fallback` source is never `ok`. |
 | `github.reason` | `null` when `ok` is true. Otherwise one of: `tessera:unconfigured`, `tessera:unreachable` (no answer, or an answer other than 200), `tessera:provider_<state>` (the `github-app` provider is `unconfigured`, `degraded` or `invalid`), or `using ambient GH_TOKEN instead of Tessera (fallback is not a supported credential path)`. |
 | `spawns` | In-memory rolling window over the last 20 finished jobs: `recent` and `failed` counts, `consecutive_failures` since the last success, and `last_error`, which is a low-cardinality reason code (a Hatchery GitHub code such as `tessera:unconfigured`, or one of `worker_exit`, `patch_apply_failed`, `branch_collision`, `castra_error`, `docker_error`, `timeout`, `other`). Also `last_error_at` and `last_success_at` (ISO, or `null`). A restart resets the window. |
 | `reasons` | One human sentence per failing check. Empty when `state` is `ok`. |
@@ -149,6 +149,10 @@ scoped access for GitHub ref and PR lookups. Issuance or lookup failure leaves
 the colliding branch in place and fails the job on its slice trace. Local
 origins and repositories without an origin require no entitlement.
 
-Set `MARCH_TESSERA_URL` and Hatchery's `MARCH_TESSERA_CLIENT_KEY`. The Hatchery
-compose file maps `MARCH_TESSERA_HATCHERY_CLIENT_KEY` to the latter. The shared
-client supports the explicit `MARCH_TESSERA_GH_TOKEN_FALLBACK=1` migration flag.
+Set `MARCH_TESSERA_URL` and Hatchery's client key, either as
+`MARCH_TESSERA_CLIENT_KEY_FILE` (which takes precedence) or as
+`MARCH_TESSERA_CLIENT_KEY`. The Hatchery compose file points
+`MARCH_TESSERA_CLIENT_KEY_FILE` at `~/.march/tessera/keys/hatchery.key`, which
+`march tessera provision` writes; `MARCH_TESSERA_HATCHERY_CLIENT_KEY_FILE`
+overrides the path. Compose forwards no `GH_TOKEN`/`GITHUB_TOKEN` and leaves
+the token fallback off: Tessera is the only credential source.
