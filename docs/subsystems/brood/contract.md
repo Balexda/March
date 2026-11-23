@@ -51,7 +51,7 @@ ephemeral compute checks for a graceful stop before capturing final evidence.
 The host substrate gives the stop check up to 10 seconds, sends SIGTERM to the
 verified container if it is running, and verifies it exited and remains
 present. The spawn entrypoint's `sh` (the container's main process) forwards
-SIGTERM to the agent's process group, so the signal reaches the agent. With telemetry on, the wrapping `sh` becomes the main process and forwards SIGTERM to the entrypoint before emitting its span. The `stop` step reports `ok` for a verified graceful stop and
+SIGTERM to the agent's process group, so the signal reaches the agent, including a stop that arrives before the agent has started. A stopped agent keeps its own exit status, except the Codex backend, whose command chains a credential copy, which exits 143 after a stop. With telemetry on, the wrapping `sh` becomes the main process and forwards SIGTERM to the entrypoint before emitting its span. The `stop` step reports `ok` for a verified graceful stop and
 `skipped` for already stopped or absent compute. An unsupported, unverified,
 or timed-out stop reports `failed`, defers the remaining steps, and leaves the
 session retryable. Removal after a verified stop targets the same container ID
