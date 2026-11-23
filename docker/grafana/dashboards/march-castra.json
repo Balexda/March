@@ -58,7 +58,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Castra event-loop lag p99 over the last minute (march_castra_event_loop_lag_ms). Over 2000ms, /readyz reports down: requests (including /healthz and Hatchery's spawn-time calls) are stalling. Heartbeat and uptime stay green through this, so read this tile, not those.",
+      "description": "Castra event-loop lag: the worst 5-second p99 in the last minute (march_castra_event_loop_lag_ms). Over 2000ms, /readyz reports down: requests (including /healthz and Hatchery's spawn-time calls) are stalling. Heartbeat and uptime stay green through this, so read this tile, not those.",
       "fieldConfig": {
         "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 500 }, { "color": "red", "value": 2000 }] }, "unit": "ms" },
         "overrides": []
@@ -66,7 +66,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
       "id": 14,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
-      "title": "Event-loop lag p99 (1m)",
+      "title": "Event-loop lag p99 (worst 5s, 1m)",
       "type": "stat",
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "max(march_castra_event_loop_lag_ms)", "refId": "A" }
@@ -74,7 +74,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Sessions Castra is fast-failing sends to after a composer refusal (march_castra_refused_sessions), and refused sends in the last 15 minutes (march_castra_sends_total{outcome=~\"refused|refused_cached\"}). Non-zero means a steward's composer is blocked (for example by a directory-trust dialog) and /readyz reports degraded.",
+      "description": "Sessions Castra is fast-failing sends to after a composer refusal (march_castra_refused_sessions), and refused sends in the last 15 minutes (march_castra_sends_total{outcome=~\"refused|refused_cached\"}). Refused sessions is the current state: non-zero means a steward's composer is blocked now (for example by a directory-trust dialog) and /readyz reports degraded. The 15-minute refused-send count is history: it stays positive for up to 15 minutes after the composer recovers, so it does not say the composer is blocked now or what /readyz reports.",
       "fieldConfig": {
         "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }, "unit": "none" },
         "overrides": []

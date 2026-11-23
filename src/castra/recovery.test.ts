@@ -360,6 +360,30 @@ describe("directory-trust dialogs during recovery", () => {
     expect(state.get("t1")!.open).toBe(false);
   });
 
+  it("uses the strict pane read: an unreadable pane after Enter is failed, not resolved", async () => {
+    const { deps, runtime } = dialogHarness(
+      [view({ sessionId: "st1", status: "waiting", tmuxSession: "t1" })],
+      { t1: OWN },
+    );
+    let typed = 0;
+    const strict: RecoveryRuntime = {
+      ...runtime,
+      // Readable until a key is sent, then tmux can no longer read the pane.
+      readPane: async (t) => (typed > 0 ? null : runtime.capturePane(t)),
+      pressKey: async (t, key) => {
+        typed++;
+        await runtime.sendKey(t, key);
+      },
+    };
+    const report = await recoverErrorSessions(
+      { ...deps, runtime: strict, trustDialog: { ownedDirs: [OWN] } },
+      { profile: "march" },
+    );
+    expect(report.trustDialogs).toEqual([
+      expect.objectContaining({ sessionId: "st1", outcome: "failed", detail: "the pane could not be read after moving the selection" }),
+    ]);
+  });
+
   it("reports another directory's trust dialog without typing anything", async () => {
     const { deps, sendKey } = dialogHarness(
       [view({ sessionId: "st1", status: "waiting", tmuxSession: "t1" })],

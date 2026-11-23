@@ -113,11 +113,21 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
     }, opts.timeoutMs);
     timer.unref?.();
 
+    // Over the cap: kill the tree and reject now, through the same path as the
+    // deadline (a descendant outside the group may keep a pipe open, and the
+    // caller must see the output-limit failure, not a later timeout).
+    const overflowed = () => {
+      if (overflow || settled) return;
+      overflow = true;
+      killTree();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      fail(new ExecError(`${cmd} output exceeded ${maxBuffer} bytes`, { stderr: stderrText() }));
+    };
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maxBuffer) {
-        overflow = true;
-        killTree();
+        overflowed();
         return;
       }
       stdout.push(chunk);
@@ -125,8 +135,7 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
     child.stderr?.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
       if (stderrBytes > maxBuffer) {
-        overflow = true;
-        killTree();
+        overflowed();
         return;
       }
       stderr.push(chunk);
@@ -145,10 +154,6 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
             timedOut: true,
           }),
         );
-        return;
-      }
-      if (overflow) {
-        fail(new ExecError(`${cmd} output exceeded ${maxBuffer} bytes`, { stderr: stderrText() }));
         return;
       }
       if (code !== 0) {

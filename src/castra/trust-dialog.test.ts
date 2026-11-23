@@ -113,9 +113,73 @@ describe("resolveTrustDialog", () => {
   it("moves to 'Yes, add it' and confirms it for Castra's own steward dir", async () => {
     const pane = fakePane(ROOT);
     const result = await resolveTrustDialog(pane.io, { ownedDirs: [ROOT] });
-    expect(result).toEqual({ outcome: "resolved", dir: ROOT });
+    expect(result).toMatchObject({ outcome: "resolved", dir: ROOT });
+    // The pane it last read, so a caller's later comparisons start from there.
+    expect(result.finalPane).toBe("❯ \n  ? for shortcuts");
     expect(pane.keys).toEqual(["Down", "Enter"]);
     expect(pane.isExited()).toBe(false);
+  });
+
+  it("never reports resolved from a pane it could not read after Enter", async () => {
+    const keys: string[] = [];
+    let entered = false;
+    const result = await resolveTrustDialog(
+      {
+        capture: async () => (entered ? null : dialogPane(ROOT, true)),
+        sendKey: async (k) => {
+          keys.push(k);
+          entered = true;
+        },
+        sleep: async () => {},
+      },
+      { ownedDirs: [ROOT] },
+    );
+    expect(result).toMatchObject({ outcome: "failed", dir: ROOT, detail: "the pane could not be read after confirming" });
+    expect(keys).toEqual(["Enter"]);
+  });
+
+  it("an unreadable pane after moving the selection stops before Enter", async () => {
+    const keys: string[] = [];
+    let moved = false;
+    const result = await resolveTrustDialog(
+      {
+        capture: async () => (moved ? null : dialogPane(ROOT)),
+        sendKey: async (k) => {
+          keys.push(k);
+          moved = true;
+        },
+        sleep: async () => {},
+      },
+      { ownedDirs: [ROOT] },
+    );
+    expect(result).toMatchObject({ outcome: "failed", detail: "the pane could not be read after moving the selection" });
+    expect(keys).toEqual(["Down"]);
+  });
+
+  it("reports a failed tmux key instead of swallowing it", async () => {
+    const result = await resolveTrustDialog(
+      {
+        capture: async () => dialogPane(ROOT, true),
+        sendKey: async () => {
+          throw new Error("no server running");
+        },
+        sleep: async () => {},
+      },
+      { ownedDirs: [ROOT] },
+    );
+    expect(result).toMatchObject({ outcome: "failed", detail: "tmux send-keys Enter failed: no server running" });
+    // The failed attempt still carries the last pane it read.
+    expect(result.finalPane).toBe(dialogPane(ROOT, true));
+  });
+
+  it("an unreadable pane before anything was typed is no dialog seen", async () => {
+    const keys: string[] = [];
+    const result = await resolveTrustDialog(
+      { capture: async () => null, sendKey: async (k) => { keys.push(k); }, sleep: async () => {} },
+      { ownedDirs: [ROOT] },
+    );
+    expect(result).toEqual({ outcome: "not_shown" });
+    expect(keys).toEqual([]);
   });
 
   it("confirms directly when the cursor is already on 'Yes, add it'", async () => {

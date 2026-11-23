@@ -32,6 +32,20 @@ describe("SendTracker", () => {
     expect(tracker.refusedSessionIds()).toEqual([]);
   });
 
+  it("clearRefusalIfBefore keeps a refusal recorded after the cutoff", () => {
+    let now = 100;
+    const tracker = new SendTracker({ now: () => now });
+    tracker.recordRefusal({ profile: "march", sessionId: "s1", message: "old" });
+    const cutoff = tracker.nowMs();
+    now = 150;
+    tracker.clearRefusalIfBefore("march", "s1", cutoff);
+    expect(tracker.refusedSessionIds()).toEqual([]);
+    // A refusal recorded during the recovery attempt is newer than its start: kept.
+    tracker.recordRefusal({ profile: "march", sessionId: "s1", message: "new" });
+    tracker.clearRefusalIfBefore("march", "s1", cutoff);
+    expect(tracker.activeRefusal("march", "s1")?.message).toBe("new");
+  });
+
   it("counts failed sends in the window; not_found is not a failure", () => {
     let now = 0;
     const tracker = new SendTracker({ now: () => now });

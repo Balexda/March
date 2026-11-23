@@ -97,7 +97,7 @@ function castraInstruments(meter: Meter): CastraInstruments {
     });
     meter
       .createObservableGauge("march.castra.event_loop_lag_ms", {
-        description: "Castra event-loop lag p99 over the last minute, in milliseconds",
+        description: "Castra event-loop lag: the worst 5-second p99 in the last minute, in milliseconds",
       })
       .addCallback((result) => {
         if (readinessSource) result.observe(readinessSource.eventLoopLagMs());

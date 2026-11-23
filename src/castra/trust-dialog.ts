@@ -116,13 +116,23 @@ export interface TrustDialogResolution {
   readonly dir?: string;
   /** Why a `failed` attempt stopped. */
   readonly detail?: string;
+  /**
+   * The last pane the resolver read successfully. After keys were sent it
+   * differs from the pane the caller saw first, so a caller comparing later
+   * panes against a baseline uses this one.
+   */
+  readonly finalPane?: string;
 }
 
 /** The pane access {@link resolveTrustDialog} needs. */
 export interface TrustDialogIo {
-  /** Visible pane text, or `""` when it can't be read. */
-  capture(): Promise<string>;
-  /** Send one tmux key name (`Down`, `Up`, `Enter`). */
+  /**
+   * Visible pane text. `null` when the pane could not be read, which is not
+   * the same as a pane without the dialog: after a key, an unreadable pane is
+   * never taken as proof that the dialog closed.
+   */
+  capture(): Promise<string | null>;
+  /** Send one tmux key name (`Down`, `Up`, `Enter`). Rejects when tmux fails. */
   sendKey(key: string): Promise<void>;
   sleep(ms: number): Promise<void>;
 }
@@ -149,35 +159,50 @@ export async function resolveTrustDialog(
   const settleMs = options.settleMs ?? 300;
   const maxMoves = options.maxMoves ?? 3;
 
-  let dialog = parseTrustDialog(await io.capture());
-  if (!dialog) return { outcome: "not_shown" };
+  // Nothing has been typed yet, so an unreadable pane is simply no dialog seen.
+  let pane = await io.capture();
+  let dialog = pane === null ? null : parseTrustDialog(pane);
+  if (!dialog || pane === null) return { outcome: "not_shown" };
   const dir = dialog.dir;
   if (!isCastraOwnedDir(dir, owned)) return { outcome: "not_owned", dir };
 
+  const fail = (detail: string): TrustDialogResolution => ({ outcome: "failed", dir, detail, finalPane: pane! });
+  const press = async (key: string): Promise<string | undefined> => {
+    try {
+      await io.sendKey(key);
+    } catch (err) {
+      return `tmux send-keys ${key} failed: ${(err as Error).message || "unknown error"}`;
+    }
+    return undefined;
+  };
+
   for (let moves = 0; ; moves++) {
     if (dialog.cursorOnYes) {
-      await io.sendKey("Enter");
+      const keyError = await press("Enter");
+      if (keyError) return fail(keyError);
       await io.sleep(settleMs);
-      const after = parseTrustDialog(await io.capture());
+      const read = await io.capture();
+      // Only a pane we could read proves the dialog closed.
+      if (read === null) return fail("the pane could not be read after confirming");
+      pane = read;
+      const after = parseTrustDialog(read);
       // Gone, or a different directory's dialog took its place: ours is answered.
       if (!after || normalizeDir(after.dir) !== normalizeDir(dir)) {
-        return { outcome: "resolved", dir };
+        return { outcome: "resolved", dir, finalPane: read };
       }
-      return { outcome: "failed", dir, detail: "the dialog was still shown after confirming" };
+      return fail("the dialog was still shown after confirming");
     }
-    if (!dialog.cursorOnNo) {
-      return { outcome: "failed", dir, detail: "the selection cursor could not be located" };
-    }
-    if (moves >= maxMoves) {
-      return { outcome: "failed", dir, detail: `the selection did not reach "Yes, add it" after ${maxMoves} moves` };
-    }
-    await io.sendKey(dialog.yesBelowNo ? "Down" : "Up");
+    if (!dialog.cursorOnNo) return fail("the selection cursor could not be located");
+    if (moves >= maxMoves) return fail(`the selection did not reach "Yes, add it" after ${maxMoves} moves`);
+    const keyError = await press(dialog.yesBelowNo ? "Down" : "Up");
+    if (keyError) return fail(keyError);
     await io.sleep(settleMs);
-    const next = parseTrustDialog(await io.capture());
-    if (!next) return { outcome: "failed", dir, detail: "the dialog closed before it was confirmed" };
-    if (normalizeDir(next.dir) !== normalizeDir(dir)) {
-      return { outcome: "failed", dir, detail: "the dialog changed directory while answering" };
-    }
+    const read = await io.capture();
+    if (read === null) return fail("the pane could not be read after moving the selection");
+    pane = read;
+    const next = parseTrustDialog(read);
+    if (!next) return fail("the dialog closed before it was confirmed");
+    if (normalizeDir(next.dir) !== normalizeDir(dir)) return fail("the dialog changed directory while answering");
     dialog = next;
   }
 }

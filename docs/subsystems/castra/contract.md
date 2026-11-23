@@ -31,7 +31,7 @@ Readiness states:
 
 | State | When |
 |-------|------|
-| `down` (`ready: false`) | Event-loop lag p99 over the last minute is over 2000 ms. Requests are stalling. |
+| `down` (`ready: false`) | Event-loop lag is over 2000 ms: the worst p99 of any 5-second window in the last minute (`event_loop_lag_ms`). A peak, not a whole-minute p99, because a frozen loop takes no samples while frozen, so a whole-minute p99 would hide repeated multi-second stalls. Requests are stalling. |
 | `degraded` | At least one session is in its composer-refusal cooldown (listed in `refused_sessions`), or 3 or more sends failed in the last 5 minutes (`recent_send_failures`; a `not_found` send is not a failure). |
 | `ok` | Neither of the above. |
 
@@ -93,6 +93,13 @@ Launch request body:
 | `createBranch` | boolean | No | When false, attach to an existing worktree/branch; absent or true creates a branch. |
 | `metadata` | string-to-string map | No | Queryable Castra-owned metadata returned on later session records. At most 16 entries, with keys up to 64 characters and values up to 256 characters. |
 
+Castra runs `agent-deck launch --json` and takes the session from the
+reported `session_id`. With an agent-deck that reports no id, Castra
+serializes launches per profile and group, takes the new session from a
+before/after list, and checks that its worktree belongs to the requested
+repository (same `git rev-parse --git-common-dir`). A worktree from another
+repository, or one that cannot be confirmed, is `409` `conflict`.
+
 Castra provisions the host steward's credential shims at serve startup.
 Each launch, including attachment to an existing worktree, passes an
 agent-deck wrapper that selects those shims for that session. It uses the
@@ -125,9 +132,9 @@ failure appears in the startup diagnostic and the errored
 Send behavior:
 
 - Sends to one session run one at a time, in arrival order. Sends to different sessions run concurrently.
-- When agent-deck refuses a send because the session's Claude composer is occupied or unreadable, the `composer_refused` message carries the last lines of the session's pane.
-- If that pane shows Claude Code's "Adding a new directory … Yes, add it" trust dialog for Castra's own steward directory (the steward root, `~/.march/steward` by default, or its `plugin` directory), Castra selects "Yes, add it", confirms it, and sends the prompt once more. A success then returns `202`. Castra never answers a trust dialog for any other directory; the message says the dialog was left for the operator.
-- After a refusal, further sends to that session fail at once with `composer_refused`, without running agent-deck, for 5 minutes or until the session's pane changes. The message names the cooldown and repeats the last refusal.
+- When agent-deck refuses a send because the session's Claude composer is occupied or unreadable, the send fails with `composer_refused`. The message carries the last lines of the session's pane only when Castra captured nonempty pane text; if `session show` or `capture-pane` fails, the refusal is still returned, without the pane tail.
+- If that pane shows Claude Code's "Adding a new directory … Yes, add it" trust dialog for Castra's own steward directory (the steward root, `~/.march/steward` by default, or its `plugin` directory), Castra selects "Yes, add it", confirms it, and sends the prompt once more. A success then returns `202`. Castra never answers a trust dialog for any other directory; the message says the dialog was left for the operator. If the pane cannot be read after a key, or a tmux key fails, the outcome is `failed` with that detail, never `resolved`.
+- After a refusal, further sends to that session fail at once with `composer_refused`, without running agent-deck, for 5 minutes or until the session's pane changes. The message names the cooldown and repeats the last refusal. A refusal recorded during a recovery sweep keeps its cooldown even when the sweep answers the dialog.
 
 ### `GET /v1/sessions/:id/output`
 
@@ -157,7 +164,7 @@ Send behavior:
 | Request envelope | Header `Authorization: Bearer <token>`. Path param `id` is the session id. Query requires `profile`; optional `pruneWorktree` is a boolean and defaults to false. |
 | Response envelope | `200` with `{ "ok": true, "removed": boolean }`. |
 | Authentication behavior | Bearer-token protected. Missing or invalid bearer tokens return `401` with `unauthorized`. |
-| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false`; agent-deck remove failures return `502`; unexpected failures return `500`. |
+| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false` only when agent-deck finished and reported the session missing; a remove killed at its timeout is `502` `agent_deck_error`, whatever it printed first; agent-deck remove failures return `502`; unexpected failures return `500`. |
 
 `CastraSession` response shape:
 
@@ -184,9 +191,22 @@ Send behavior:
 - Session removal is idempotent for missing sessions: absence is reported as `removed: false` rather than a not-found error.
 - The Castra HTTP contract covers only the server-side session API listed here; adjacent recovery behavior and Steward role behavior are outside this contract scope.
 
+## Operation Budgets
+
+Mutating operations have end-to-end budgets that include queueing,
+inspections and the one trust-dialog retry: launch 240s, send 100s, remove
+120s (`src/castra/budgets.ts`). `CastraClient` waits each budget plus 15s. A
+mutating step (agent-deck launch, send, remove) starts only when its full
+timeout (180s / 45s / 120s) still fits in what is left; otherwise Castra
+answers `502` `agent_deck_error` ("… budget ran out before …, so it was not
+started") without starting it. A caller that stops waiting cancels nothing: a
+step already started runs to completion or its own timeout. A client timeout
+means the outcome is unknown, and the caller re-reads `GET /v1/sessions`
+before retrying.
+
 ## Error Modes
 
-All non-2xx responses use this JSON envelope:
+All non-2xx responses use this JSON envelope, except `GET /readyz`: its `503` (state `down`) carries the readiness body documented under `GET /readyz`, not an error envelope.
 
 ```json
 {
@@ -204,7 +224,7 @@ All non-2xx responses use this JSON envelope:
 | Missing route | Any unknown route | `404` with `{ "error": { "code": "not_found", "message": string } }` | No Fastify route matches the requested method and path. |
 | Missing session | Show, send, output, and set routes | `404` with `{ "error": { "code": "not_found", "message": string } }` | agent-deck reports that the requested session id is absent. Remove treats this condition as success with `removed: false`. |
 | Conflict | Launch route | `409` with `{ "error": { "code": "conflict", "message": string } }` | Castra detects a concurrent launch/worktree mismatch and refuses to attach the caller to the wrong session. |
-| Composer refused | Send route | `502` with `{ "error": { "code": "composer_refused", "message": string } }` | agent-deck refused the send because the session's composer was occupied or unreadable, or the session is still in its refusal cooldown. The message carries the pane tail. |
+| Composer refused | Send route | `502` with `{ "error": { "code": "composer_refused", "message": string } }` | agent-deck refused the send because the session's composer was occupied or unreadable, or the session is still in its refusal cooldown. The message carries the pane tail when Castra could capture nonempty pane text; a failed pane capture still returns `composer_refused`, without it. |
 | Agent-deck failure | Protected routes that invoke agent-deck | `502` with `{ "error": { "code": "agent_deck_error", "message": string } }` | agent-deck exits non-zero, returns unparseable output, cannot identify a launched session, or otherwise fails outside the typed validation/not-found/conflict cases. |
 | tmux inventory failure | `GET /v1/interactive-sessions` | `502` with `{ "error": { "code": "tmux_error", "message": string } }` | The live tmux read failed. |
 | Internal failure | Any route | `500` with `{ "error": { "code": "internal", "message": "Internal server error." } }` | Unexpected server errors are logged server-side; the public body stays generic and does not expose dependency internals. |

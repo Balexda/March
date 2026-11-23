@@ -1,6 +1,9 @@
 /**
  * @l1 @deterministic @ci
  */
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect } from "vitest";
 import { ExecError, execCommand, KeyedSerializer } from "./exec.js";
 
@@ -44,14 +47,48 @@ describe("execCommand (real child processes)", () => {
   });
 
   it("rejects at the timeout even while a descendant holds stderr open, and kills it", async () => {
-    // The child spawns a grandchild that inherits stderr and outlives it.
-    const script = "const { spawn } = require('node:child_process');"
+    // The child spawns a grandchild that inherits stderr and outlives it; the
+    // grandchild's pid goes to a file (stdout is discarded on timeout).
+    const dir = mkdtempSync(path.join(os.tmpdir(), "castra-exec-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const script = "const { spawn } = require('node:child_process'); const fs = require('node:fs');"
       + "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'ignore', 'inherit'] });"
-      + "process.stdout.write(String(g.pid)); setTimeout(() => {}, 30000);";
+      + `fs.writeFileSync(${JSON.stringify(pidFile)}, String(g.pid)); setTimeout(() => {}, 30000);`;
+    try {
+      const started = Date.now();
+      const err = await execCommand(node, ["-e", script], { capture: true, timeoutMs: 1_000 }).catch((e: unknown) => e);
+      expect((err as ExecError).timedOut).toBe(true);
+      expect(Date.now() - started).toBeLessThan(2_500);
+      // The grandchild was recorded before the timeout fired.
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+      // Killing the group took the grandchild too: poll until it is gone (ESRCH only; EPERM is alive).
+      const alive = () => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (e) {
+          return (e as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      };
+      const deadline = Date.now() + 3_000;
+      while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      expect(alive()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects at once on output over maxBuffer, even while a descendant holds stdout open", async () => {
+    const script = "const { spawn } = require('node:child_process');"
+      + "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 8000)'], { stdio: ['ignore', 'inherit', 'ignore'], detached: true }).unref();"
+      + "process.stdout.write('x'.repeat(4096)); setTimeout(() => {}, 30000);";
     const started = Date.now();
-    const err = await execCommand(node, ["-e", script], { capture: true, timeoutMs: 300 }).catch((e: unknown) => e);
-    expect((err as ExecError).timedOut).toBe(true);
-    expect(Date.now() - started).toBeLessThan(1_500);
+    const err = await execCommand(node, ["-e", script], { capture: true, timeoutMs: 10_000, maxBuffer: 1024 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecError);
+    expect((err as ExecError).timedOut).toBe(false);
+    expect((err as Error).message).toMatch(/output exceeded 1024 bytes/);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it("carries the spawn error code for a missing command", async () => {

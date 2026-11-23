@@ -295,7 +295,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   app.get("/v1/interactive-sessions", async (request) =>
-    withCastraSpan({ op: "interactive_inventory", traceKey: traceKeyFor(request) }, async () => ({
+    // Async span: it stays open until tmux answers, so a tmux timeout is recorded on it.
+    withCastraSpanAsync({ op: "interactive_inventory", traceKey: traceKeyFor(request) }, async () => ({
       names: await (options.interactiveInventory ?? listInteractiveSessions)(),
     })),
   );
@@ -629,6 +630,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       // Run the sweep first (it awaits restarts + picker/status polls), then
       // record a correlated summary span/log. HTTP latency is captured by the
       // onResponse metrics hook, so the marker span stays zero-duration.
+      // Refusals recorded before the sweep began are the ones an answered dialog
+      // explains; a send refused again during the sweep keeps its cooldown.
+      const recoveryStartedAt = sendTracker.nowMs();
       const report = await recoverErrorSessions(recoverDeps, {
         profile,
         ...(group ? { group } : {}),
@@ -643,7 +647,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       // One span + log per trust dialog found. An answered dialog unblocks the
       // session, so its send cooldown ends now rather than in 5 minutes.
       for (const dialog of trustDialogs) {
-        if (dialog.outcome === "resolved") sendTracker.clearRefusal(profile, dialog.sessionId);
+        if (dialog.outcome === "resolved") sendTracker.clearRefusalIfBefore(profile, dialog.sessionId, recoveryStartedAt);
         const span = recordTrustDialog({
           traceKey,
           profile,

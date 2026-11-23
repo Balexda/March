@@ -159,12 +159,23 @@ describe("castra server", () => {
     it("answers /healthz while a send is still waiting on agent-deck", async () => {
       let release!: () => void;
       const blocked = new Promise<void>((r) => (release = r));
-      app = buildServer({ adapter: fakeAdapter({ send: vi.fn(() => blocked) }) });
+      let entered!: () => void;
+      const sendStarted = new Promise<void>((r) => (entered = r));
+      app = buildServer({
+        adapter: fakeAdapter({
+          send: vi.fn(() => {
+            entered();
+            return blocked;
+          }),
+        }),
+      });
       const send = app.inject({
         method: "POST",
         url: "/v1/sessions/sess-1/send",
         payload: { profile: "march", prompt: "go" },
       });
+      // The send is in flight inside the adapter before /healthz is asked.
+      await sendStarted;
       const health = await app.inject({ method: "GET", url: "/healthz" });
       expect(health.statusCode).toBe(200);
       release();

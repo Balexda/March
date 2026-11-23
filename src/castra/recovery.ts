@@ -209,9 +209,12 @@ export function selectTrustScan(
 }
 
 function trustIo(deps: RecoverDeps, tmuxSession: string): TrustDialogIo {
+  const { runtime } = deps;
+  // The strict reads/keys keep "pane unreadable" and "key failed" distinct from
+  // "no dialog", so an unanswered dialog is never reported resolved.
   return {
-    capture: () => deps.runtime.capturePane(tmuxSession),
-    sendKey: (key) => deps.runtime.sendKey(tmuxSession, key),
+    capture: () => (runtime.readPane ? runtime.readPane(tmuxSession) : runtime.capturePane(tmuxSession)),
+    sendKey: (key) => (runtime.pressKey ? runtime.pressKey(tmuxSession, key) : runtime.sendKey(tmuxSession, key)),
     sleep: deps.sleep,
   };
 }

@@ -16,7 +16,7 @@ export const REFUSAL_COOLDOWN_MS = 5 * 60_000;
 export const SEND_WINDOW_MS = 5 * 60_000;
 /** Failed sends in {@link SEND_WINDOW_MS} that make Castra `degraded`. */
 export const SEND_FAILURES_DEGRADED = 3;
-/** Event-loop lag p99 over the last minute that makes Castra `down`. */
+/** The worst 5-second event-loop lag p99 in the last minute that makes Castra `down`. */
 export const EVENT_LOOP_LAG_DOWN_MS = 2_000;
 
 /** Outcome label of one `POST /v1/sessions/:id/send` (the `outcome` metric label). */
@@ -87,6 +87,22 @@ export class SendTracker {
     this.refusals.delete(refusalKey(profile, sessionId));
   }
 
+  /** The tracker's clock (ms epoch), for callers that compare against refusal times. */
+  nowMs(): number {
+    return this.now();
+  }
+
+  /**
+   * Clear the session's refusal only if it was recorded at or before `at`: a
+   * refusal recorded after that (a send that ran during a recovery attempt and
+   * was refused again) is kept.
+   */
+  clearRefusalIfBefore(profile: string, sessionId: string, at: number): void {
+    const key = refusalKey(profile, sessionId);
+    const entry = this.refusals.get(key);
+    if (entry && entry.at <= at) this.refusals.delete(key);
+  }
+
   /** Ms left in a refusal's cooldown. */
   remainingMs(entry: RefusalEntry): number {
     return Math.max(0, this.cooldownMs - (this.now() - entry.at));
@@ -123,7 +139,7 @@ export class SendTracker {
   }
 }
 
-/** Reads the event-loop lag p99 over the last minute, in ms. */
+/** Reads the worst 5-second event-loop lag p99 in the last minute, in ms. */
 export interface EventLoopLagSource {
   lagP99Ms(): number;
 }
@@ -132,6 +148,11 @@ export interface EventLoopLagSource {
  * Event-loop lag from `perf_hooks.monitorEventLoopDelay`. Every `sampleMs` the
  * histogram's p99 is saved and the histogram reset; {@link lagP99Ms} returns the
  * largest p99 of the last minute, including the samples collected so far.
+ *
+ * This is deliberately the PEAK short-window p99, not the p99 of the whole
+ * minute: a frozen loop takes no samples while it is frozen, so two 15s stalls a
+ * minute are well under 1% of a minute's samples and a whole-minute p99 would
+ * read healthy through exactly the outage this exists to catch.
  */
 export class EventLoopLagMonitor implements EventLoopLagSource {
   private readonly histogram: ReturnType<typeof monitorEventLoopDelay>;
@@ -198,7 +219,7 @@ export function deriveCastraReadiness(input: {
   if (input.eventLoopLagMs > EVENT_LOOP_LAG_DOWN_MS) {
     down = true;
     reasons.push(
-      `event loop lag p99 over the last minute is ${input.eventLoopLagMs}ms (over ${EVENT_LOOP_LAG_DOWN_MS}ms), so requests are stalling`,
+      `event loop lag p99 reached ${input.eventLoopLagMs}ms in a 5s window in the last minute (over ${EVENT_LOOP_LAG_DOWN_MS}ms), so requests are stalling`,
     );
   }
   if (input.refusedSessions.length) {
