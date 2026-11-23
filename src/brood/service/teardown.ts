@@ -13,7 +13,12 @@ import {
   removeStewardViaCastra,
   type StewardRemovalResult,
 } from "./steward-removal.js";
-import { archiveTeardownEvidence, TeardownArchive } from "./teardown-archive.js";
+import {
+  archiveTeardownEvidence,
+  TeardownArchive,
+  teardownResources,
+  type TeardownResources,
+} from "./teardown-archive.js";
 import { broodArchiveDir } from "./store.js";
 import { hostTeardownSubstrate, type ComputeTarget, type TeardownSubstrate } from "./substrate.js";
 import type {
@@ -191,12 +196,13 @@ async function runTeardown(
   // container/worktree/branch; the steward row carries the agent-deck session.
   const parent = target.kind === "steward" && target.parentId ? store.get(target.parentId) : undefined;
   const spawn = target.kind === "spawn" ? target : parent?.kind === "spawn" ? parent : undefined;
+  const stewards = spawn ? store.list({ parentId: spawn.id, kind: "steward" }) : [];
+  // Prefer a live steward so a spawn-addressed retry never treats the group as
+  // complete while a later steward still runs.
   const steward =
     target.kind === "steward"
       ? target
-      : spawn
-        ? store.list({ parentId: spawn.id, kind: "steward" })[0]
-        : undefined;
+      : stewards.find((candidate) => candidate.status !== "torndown") ?? stewards[0];
 
   // `primary` owns the worktree/branch/container; fall back to the target row.
   const primary: SessionRecord = spawn ?? target;
@@ -239,18 +245,26 @@ async function runTeardown(
     archiveError = error;
   }
   const completion = archive?.completion;
-  if (completion && completion.attempt === store.pendingTeardownCompletion(primary.id)) {
+  if (completion && completion.attempt === store.pendingTeardownCompletion(primary.id) &&
+      sameResources(completion.resources, teardownResources(primary))) {
     // A crash after the terminal journal write can leave one or both rows
     // behind, possibly followed by a status-only PATCH. Finish the registry
     // update for the group the attempt verified, without repeating cleanup.
+    // A re-registration that changed resource identity falls through to a
+    // real teardown of the new resources instead.
     const verifiedStewardId = completion.stewardId ?? undefined;
     completeRegistry(completion.at, verifiedStewardId);
-    if (steward && steward.id !== primary.id && steward.id !== verifiedStewardId &&
-        store.get(steward.id)?.status !== "torndown") {
-      // A steward registered after the verified attempt was never removed.
-      warnings.push(
-        `steward "${steward.id}" was registered after teardown completed and was not removed; retry teardown`,
-      );
+    const candidates = new Map([...stewards, ...(steward ? [steward] : [])].map((row) => [row.id, row]));
+    const live = [...candidates.keys()].filter((stewardId) =>
+      stewardId !== primary.id && stewardId !== verifiedStewardId &&
+      store.get(stewardId)?.status !== "torndown");
+    if (live.length > 0) {
+      // Stewards registered after the verified attempt were never removed.
+      for (const stewardId of live) {
+        warnings.push(
+          `steward "${stewardId}" was registered after teardown completed and was not removed; retry teardown`,
+        );
+      }
       return finish("partial");
     }
     return finish("success");
@@ -487,7 +501,7 @@ async function runTeardown(
           status: outcome === "success" ? "torndown" : "tearing-down",
           steps,
           warnings,
-        }, at, steward?.id);
+        }, at, { stewardId: steward?.id, resources: teardownResources(primary) });
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
@@ -518,6 +532,14 @@ async function runTeardown(
 
     return { id: primary.id, status: finalStatus, steps, warnings };
   }
+}
+
+function sameResources(recorded: TeardownResources | undefined, current: TeardownResources): boolean {
+  return recorded !== undefined &&
+    recorded.containerId === current.containerId &&
+    recorded.repoPath === current.repoPath &&
+    recorded.worktreePath === current.worktreePath &&
+    recorded.branch === current.branch;
 }
 
 function snapshotRow(record: SessionRecord): SessionRecord {

@@ -34,6 +34,8 @@ export interface SessionRepository {
   ): string;
   /** Persist which journal attempt can complete this registry transition. */
   prepareTeardownCompletion(id: string, attempt: number): void;
+  /** Whether a teardown was admitted and has not yet completed its registry transition. */
+  teardownAdmitted(id: string): boolean;
   /** Read the attempt authorized to complete an interrupted registry transition. */
   pendingTeardownCompletion(id: string): number | undefined;
   /** Commit the terminal status for the group and clear pending teardown state. */

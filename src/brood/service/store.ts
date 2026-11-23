@@ -327,6 +327,10 @@ export class SessionStore implements SessionRepository {
       .run(attempt, id);
   }
 
+  teardownAdmitted(id: string): boolean {
+    return this.db.prepare("SELECT 1 FROM teardown_snapshots WHERE id = ?").get(id) !== undefined;
+  }
+
   pendingTeardownCompletion(id: string): number | undefined {
     const row = this.db.prepare("SELECT completing_attempt FROM teardown_snapshots WHERE id = ?")
       .get(id) as { completing_attempt: number | null } | undefined;

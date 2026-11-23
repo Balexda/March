@@ -775,6 +775,69 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     }
   });
 
+  it("tears down a re-registered resource identity instead of recovering over it", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({
+        id: spawnId, kind: "spawn", status: "running", containerId: "container-new", worktreePath: "/wt/new",
+      });
+      rec.calls.length = 0;
+      rec.deps.pathExists = (candidate) => candidate === "/wt/new";
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toBeInstanceOf(BroodConflictError);
+      expect(store.get(spawnId)?.status).toBe("running");
+
+      const result = await teardownSession(store, spawnId, { force: true }, rec.deps);
+      expect(result.status).toBe("torndown");
+      expect(result.steps.map((step) => step.step)).toEqual(["archive", "container", "steward", "worktree", "branch"]);
+      expect(rec.calls).toContain("logs:container-new");
+      expect(rec.worktreeTargets).toContainEqual(expect.objectContaining({ worktreePath: "/wt/new" }));
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a spawn-addressed recovery open until every later steward is removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+      rec.calls.length = 0;
+
+      const recovered = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(recovered.status).toBe("tearing-down");
+      expect(recovered.warnings).toEqual([expect.stringContaining('"ad-session-bbb"')]);
+      expect(store.get(stewardId)?.status).toBe("torndown");
+      expect(store.get("ad-session-bbb")?.status).toBe("running");
+
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-bbb");
+      expect(store.get("ad-session-bbb")?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
   it("records a successful registry recovery in the teardown span", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const created = captureSpans();

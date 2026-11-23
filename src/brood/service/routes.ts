@@ -373,7 +373,7 @@ export async function registerRoutes(
     // BroodClient sends so the Hatchery's client-side `brood.register` and this
     // handler land in one trace (#233).
     const { input } = validation;
-    if (input.extractionResult !== undefined && isTearingDown(store.get(input.id))) {
+    if (input.extractionResult !== undefined && extractionClosed(store, input.id)) {
       reply.code(409);
       return { error: `Session "${input.id}" is being torn down; extractionResult is closed.` };
     }
@@ -555,7 +555,7 @@ export async function registerRoutes(
     if (parsedExtraction) {
       // Teardown archives the result it reads after admission; a later write
       // could land after compute removal without ever reaching the archive.
-      if (isTearingDown(store.get(id))) {
+      if (extractionClosed(store, id)) {
         reply.code(409);
         return { error: `Session "${id}" is being torn down; extractionResult is closed.` };
       }
@@ -644,6 +644,12 @@ export async function registerRoutes(
   });
 }
 
-function isTearingDown(record: SessionRecord | undefined): boolean {
-  return record?.status === "tearing-down" || record?.status === "torndown";
+// Durable teardown evidence closes extraction writes: a later lifecycle PATCH
+// can move `status`, but not `torndownAt` or an admitted teardown's snapshot.
+function extractionClosed(store: SessionRepository, id: string): boolean {
+  const record = store.get(id);
+  return record?.status === "tearing-down" ||
+    record?.status === "torndown" ||
+    record?.torndownAt !== undefined ||
+    store.teardownAdmitted(id);
 }

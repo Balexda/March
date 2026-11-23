@@ -20,6 +20,24 @@ interface AttemptFinished {
   warnings: string[];
   /** Steward whose removal this attempt verified; null when the group had none. */
   stewardId?: string | null;
+  /** Primary resource identity this attempt reclaimed. */
+  resources?: TeardownResources;
+}
+
+export interface TeardownResources {
+  containerId: string | null;
+  repoPath: string | null;
+  worktreePath: string | null;
+  branch: string | null;
+}
+
+export function teardownResources(record: SessionRecord): TeardownResources {
+  return {
+    containerId: record.containerId ?? null,
+    repoPath: record.repoPath ?? null,
+    worktreePath: record.worktreePath ?? null,
+    branch: record.branch ?? null,
+  };
 }
 
 function isMissing(error: unknown): boolean {
@@ -92,10 +110,16 @@ export class TeardownArchive {
     return attempt;
   }
 
-  finish(attempt: number, result: TeardownResult, at: string, stewardId?: string): void {
+  finish(
+    attempt: number,
+    result: TeardownResult,
+    at: string,
+    verified: { stewardId?: string; resources: TeardownResources },
+  ): void {
     const { status, steps, warnings } = result;
     this.append({
-      attempt, event: "finished", at, status, steps, warnings, stewardId: stewardId ?? null,
+      attempt, event: "finished", at, status, steps, warnings,
+      stewardId: verified.stewardId ?? null, resources: verified.resources,
     });
   }
 

@@ -262,6 +262,32 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       .not.toHaveProperty("extractionResult");
   });
 
+  it("keeps extractionResult closed after teardown even when status later changes", async () => {
+    const { app, store } = await buildApp();
+    const extractionResult = {
+      spawnId: "s-done", backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    };
+    for (const id of ["s-done", "s-admitted", "s-open"]) {
+      await app.inject({ method: "POST", url: "/sessions", payload: { id, kind: "spawn", status: "stopped" } });
+    }
+    store.beginTeardown("s-done", undefined, "{}\n", {});
+    store.completeTeardown("s-done", undefined, "2026-06-13T00:00:00.000Z");
+    store.beginTeardown("s-admitted", undefined, "{}\n", {});
+    for (const id of ["s-done", "s-admitted"]) {
+      await app.inject({ method: "PATCH", url: `/sessions/${id}`, payload: { status: "stopped" } });
+      expect((await app.inject({
+        method: "PATCH", url: `/sessions/${id}`, payload: { extractionResult: { ...extractionResult, spawnId: id } },
+      })).statusCode, id).toBe(409);
+      expect((await app.inject({
+        method: "POST", url: "/sessions", payload: { id, kind: "spawn", extractionResult: { ...extractionResult, spawnId: id } },
+      })).statusCode, id).toBe(409);
+    }
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/s-open", payload: { extractionResult: { ...extractionResult, spawnId: "s-open" } },
+    })).statusCode).toBe(200);
+  });
+
   it("GET /sessions/:id/extraction-readiness exposes failed and missing states as not PR-ready", async () => {
     const { app } = await buildApp();
     await app.inject({

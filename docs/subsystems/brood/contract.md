@@ -99,11 +99,14 @@ all removal. A journal finalization failure leaves the row `tearing-down` and
 returns the completed step outcomes with a warning. If Brood stops after
 journaling `torndown` and before updating the registry, the next teardown request
 completes the registry transition without repeating removal, even after a
-status-only PATCH. Recovery marks only the steward that attempt verified; a
-steward registered afterwards stays live and the result is `tearing-down` with a
-warning. Once a session is `tearing-down` or `torndown`, `PATCH /sessions/:id`
-and re-registration reject an `extractionResult` with 409, so the archived
-result is final. Archive failures
+status-only PATCH. Recovery applies only while the row keeps the container,
+repository, worktree, and branch the attempt reclaimed; a re-registered identity
+gets a full teardown instead. Recovery marks only the steward that attempt
+verified; any steward registered afterwards stays live and the result is
+`tearing-down` with a warning until a retry removes it. Once a teardown is
+admitted, or the row carries `torndownAt`, `PATCH /sessions/:id` and
+re-registration reject an `extractionResult` with 409, even if a later
+lifecycle PATCH changes `status`, so the archived result is final. Archive failures
 end errored spans, following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 
