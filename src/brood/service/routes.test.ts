@@ -1060,8 +1060,12 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     { stalled: "archive evidence write", budget: 3_000, step: "archive" },
     { stalled: "container removal", budget: 6_000, step: "container" },
     { stalled: "steward removal", budget: 8_000, step: "steward" },
-    { stalled: "steward removal", budget: 1_000, step: "steward", priorElapsed: 21_000 },
+    // The pre-Git prefix ends 7s before the request deadline (3s finalization
+    // plus a 2s reserve per Git step), so a late steward call gets only 1s here…
+    { stalled: "steward removal", budget: 1_000, step: "steward", priorElapsed: 17_000 },
     { stalled: "worktree removal", budget: 4_000, step: "worktree" },
+    // …while worktree removal keeps 3s and still leaves branch deletion its reserve.
+    { stalled: "worktree removal", budget: 3_000, step: "worktree", priorElapsed: 17_000 },
     { stalled: "branch deletion", budget: 4_000, step: "branch" },
     { stalled: "archive finalization", budget: 3_000, step: undefined },
   ])("bounds $stalled to $budget ms at the HTTP boundary and permits a safe retry", async ({
@@ -1071,6 +1075,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let invocations = 0;
+    const logsReturned = Promise.withResolvers<void>();
     async function stall(label: string) {
       if (label === stalled && ++invocations === 1) {
         entered.resolve();
@@ -1123,6 +1128,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       },
       readContainerLogs: async () => {
         await stall("container logs");
+        logsReturned.resolve();
         return "container output";
       },
       pathExists: () => true,
@@ -1158,6 +1164,10 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       if (stalled === "container logs") {
         expect(expired.status).toBe("torndown");
         release.resolve();
+        // Let the late log read return and any continuation run before checking
+        // that it could not publish evidence after the deadline.
+        await logsReturned.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
         expect(fs.existsSync(path.join(broodArchiveDir("spawn-1", homeDir), "container.log"))).toBe(false);
         return;
       }
@@ -1191,6 +1201,55 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       writeSpy.mockRestore();
       renameSpy.mockRestore();
       clock?.mockRestore();
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects steward registration into a group while its workspace is being reclaimed", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "brood-reclaim-"));
+    const attempts: Record<string, number[]> = {};
+    const { app, store } = await buildApp((id, request) => teardownSession(store, id, request, {
+      homeDir,
+      substrate: {
+        removeCompute: async () => undefined,
+        removeWorkspace: async (_repo, target) => {
+          const step = target.worktreePath ? "worktree" : "branch";
+          // Each Git mutation runs under the lease: joining the group, or
+          // changing a row in it, is refused until the mutation settles.
+          const joined = await app.inject({
+            method: "POST", url: "/sessions",
+            payload: { id: `late-${step}`, kind: "steward", parentId: "spawn-1" },
+          });
+          const patched = await app.inject({
+            method: "PATCH", url: "/sessions/steward-1", payload: { branch: "topic/moved" },
+          });
+          attempts[step] = [joined.statusCode, patched.statusCode];
+          return { worktreeRemoved: true, branchDeleted: true };
+        },
+      },
+      removeSteward: async () => ({ outcome: "absent", removedIds: [] }),
+      readContainerLogs: async () => "",
+      pathExists: () => true,
+    }));
+    try {
+      store.register({
+        id: "spawn-1", status: "stopped", kind: "spawn",
+        repoPath: "/repo", worktreePath: "/wt/spawn-1", branch: "topic/spawn-1",
+      });
+      store.register({ id: "steward-1", kind: "steward", parentId: "spawn-1" });
+
+      const response = await app.inject({ method: "POST", url: "/sessions/spawn-1/teardown", payload: {} });
+      expect(response.json<TeardownResult>().status).toBe("torndown");
+      expect(attempts).toEqual({ worktree: [409, 409], branch: [409, 409] });
+      expect(store.get("late-worktree")).toBeUndefined();
+      expect(store.get("steward-1")?.branch).toBeUndefined();
+
+      // The lease is released once Git cleanup settles.
+      const after = await app.inject({
+        method: "POST", url: "/sessions", payload: { id: "late-after", kind: "steward", parentId: "spawn-1" },
+      });
+      expect(after.statusCode).toBe(201);
+    } finally {
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
   });

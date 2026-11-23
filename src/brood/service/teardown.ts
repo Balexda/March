@@ -25,9 +25,11 @@ import {
 import { broodArchiveDir } from "./store.js";
 import {
   TEARDOWN_FINALIZATION_MS,
+  TEARDOWN_GIT_STEP_RESERVE_MS,
   TEARDOWN_REQUEST_MS,
   TeardownDeadlineError,
   teardownCall,
+  withWorkspaceReclaim,
 } from "./teardown-deadline.js";
 import {
   hostTeardownSubstrate,
@@ -264,13 +266,20 @@ async function runTeardown(
     return finish("success");
   }
 
+  // Divide the pre-finalization window: the steps before Git end early enough
+  // to leave each Git step its reserve, even when a retry prefix stalls.
+  const cleanupEnd = deadline - TEARDOWN_FINALIZATION_MS;
+  const prefixEnd = cleanupEnd - 2 * TEARDOWN_GIT_STEP_RESERVE_MS;
+  const worktreeEnd = cleanupEnd - TEARDOWN_GIT_STEP_RESERVE_MS;
+
   function call<T>(
     name: string,
     budget: number,
     operation: (signal: AbortSignal) => T | Promise<T>,
     fence = true,
+    end = prefixEnd,
   ): Promise<T> {
-    return teardownCall(name, Math.min(deadline - TEARDOWN_FINALIZATION_MS, performance.now() + budget),
+    return teardownCall(name, Math.min(end, performance.now() + budget),
       operation, fence ? key : undefined);
   }
 
@@ -454,7 +463,7 @@ async function runTeardown(
     });
     if (groupStewards.length > 0) {
       const outcomes: TeardownStep[] = [];
-      const stewardDeadline = Math.min(deadline - TEARDOWN_FINALIZATION_MS, performance.now() + 8_000);
+      const stewardDeadline = Math.min(prefixEnd, performance.now() + 8_000);
       for (const row of groupStewards) {
         const outcome = await removeOneSteward(row, stewardDeadline);
         outcomes.push(outcome);
@@ -515,17 +524,14 @@ async function runTeardown(
       try {
         const worktreePath = primary.worktreePath;
         const repoPath = primary.repoPath;
-        const result = await call("worktree removal", 4_000, async (signal) => {
+        const result = await call("worktree removal", 4_000, (signal) => withWorkspaceReclaim(primary.id, async () => {
           const existed = await d.pathExists(worktreePath);
           if (!existed && deps.pathExists) return undefined;
           signal.throwIfAborted();
-          requireCurrentPrimary();
-          if (unremovedStewards(unchangedStewardIds(verifiedStewards))) {
-            throw new Error("worktree removal deferred: steward registered or changed during teardown");
-          }
+          requireWorkspaceOwnership("worktree removal");
           const removal = await d.substrate.removeWorkspace(repoPath, { worktreePath }, signal);
           return { ...removal, existed };
-        });
+        }), true, worktreeEnd);
         if (!result || (result.worktreeRemoved && !result.existed)) {
           steps.push({ step: "worktree", outcome: "skipped", detail: "already removed" });
         } else {
@@ -561,10 +567,10 @@ async function runTeardown(
       try {
         const repoPath = primary.repoPath;
         const branch = primary.branch;
-        const res = await call("branch deletion", 4_000, (signal) => {
-          requireCurrentPrimary();
+        const res = await call("branch deletion", 4_000, (signal) => withWorkspaceReclaim(primary.id, async () => {
+          requireWorkspaceOwnership("branch deletion");
           return d.substrate.removeWorkspace(repoPath, { branch }, signal);
-        });
+        }), true, cleanupEnd);
         if (!res.branchDeleted) {
           throw new Error(`branch "${primary.branch}" may still exist`);
         }
@@ -677,8 +683,8 @@ async function runTeardown(
       .map((recorded) => recorded.id);
   }
 
-  /** Warn about live stewards under the spawn that `verified` does not cover. */
-  function unremovedStewards(verified: readonly string[]): boolean {
+  /** Live stewards under the spawn that `verified` does not cover. */
+  function liveUnverifiedStewards(verified: readonly string[]): string[] {
     // Only stewards currently under the spawn share its worktree; one that moved
     // to another spawn belongs to that group now. A standalone steward is its
     // own primary and must itself be verified unchanged before completion.
@@ -687,9 +693,25 @@ async function runTeardown(
         ? store.list({ parentId: spawn.id, kind: "steward" }).map((row) => row.id)
         : primary.kind === "steward" ? [primary.id] : [],
     );
-    const live = [...candidates].filter((stewardId) =>
+    return [...candidates].filter((stewardId) =>
       !verified.includes(stewardId) &&
       store.get(stewardId)?.status !== "torndown");
+  }
+
+  /**
+   * Call only while holding the workspace reclaim lease: registration into the
+   * group is rejected from here until the Git mutation settles.
+   */
+  function requireWorkspaceOwnership(operation: string): void {
+    requireCurrentPrimary();
+    if (liveUnverifiedStewards(unchangedStewardIds(verifiedStewards)).length > 0) {
+      throw new Error(`${operation} deferred: steward registered or changed during teardown`);
+    }
+  }
+
+  /** Warn about live stewards under the spawn that `verified` does not cover. */
+  function unremovedStewards(verified: readonly string[]): boolean {
+    const live = liveUnverifiedStewards(verified);
     for (const stewardId of live) {
       warnings.push(`steward "${stewardId}" was not removed by this teardown; retry teardown`);
     }

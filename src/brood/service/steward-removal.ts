@@ -34,12 +34,13 @@ import type { SessionRecord } from "./types.js";
  * structurally.
  */
 export interface CastraStewardGateway {
-  listSessions(profile: string, group?: string): Promise<CastraSession[]>;
+  listSessions(profile: string, group?: string, signal?: AbortSignal): Promise<CastraSession[]>;
   removeSession(req: {
     profile: string;
     sessionId: string;
     pruneWorktree: boolean;
     traceKey?: string;
+    signal?: AbortSignal;
   }): Promise<{ removed: boolean }>;
 }
 
@@ -104,8 +105,9 @@ function sessionMatchesSteward(
  * the verified-gone signal teardown needs before marking `torndown`. Any
  * unreachable-Castra / failed-removal path returns `failed` so teardown defers
  * rather than leaking.
- * A teardown deadline stops subsequent requests. A request already in flight
- * is allowed to settle so the teardown coordinator can fence retries.
+ * The teardown deadline signal aborts in-flight Castra requests and stops
+ * later ones. Castra removal is idempotent and a retry re-lists sessions, so an
+ * abandoned request cannot leave a retry with a stale verdict.
  */
 export async function removeStewardViaCastra(
   gateway: CastraStewardGateway,
@@ -117,7 +119,7 @@ export async function removeStewardViaCastra(
   signal?.throwIfAborted();
   let sessions: CastraSession[];
   try {
-    sessions = await gateway.listSessions(profile);
+    sessions = await gateway.listSessions(profile, undefined, signal);
   } catch (err) {
     signal?.throwIfAborted();
     // Cannot verify the steward's absence — DEFER rather than mark torndown.
@@ -139,6 +141,7 @@ export async function removeStewardViaCastra(
         profile,
         sessionId: target.sessionId,
         pruneWorktree: false,
+        ...(signal ? { signal } : {}),
       });
       // `removed:false` here means the session vanished between list and remove
       // (a benign race) — still verified gone for that id.

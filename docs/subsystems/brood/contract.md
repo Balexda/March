@@ -73,9 +73,14 @@ is rendered and exits non-zero even on HTTP 200.
 Teardown gives call-outs and admission queueing a combined 25-second budget
 under the default 30-second Brood client timeout. A request can spend that
 budget waiting for a concurrent teardown. Once admitted, cleanup call-outs
-reserve the final three seconds for journal finalization. Each call-out uses
-the smaller of its own limit and the remaining budget, including any lookup,
-verification, and retries within it.
+reserve the final three seconds for journal finalization. Each Git step also
+keeps a two-second reserve. Steps before Git cleanup end seven seconds before the
+request deadline. Worktree removal ends five seconds before it, and branch
+deletion ends at the finalization reserve. A stalled retry therefore always
+leaves branch deletion a usable share of the budget. Each call-out uses the
+smaller of its own limit and the remaining time in its window, including any
+lookup, verification, and retries within it. The Castra steward deadline also
+aborts in-flight Castra list and remove requests.
 
 | Call-out | Maximum |
 | --- | ---: |
@@ -91,7 +96,12 @@ read timeout warns and cleanup can continue. An archive sink timeout before
 removal blocks cleanup. A finalization timeout warns and leaves the group
 `tearing-down`. If archive I/O or a cleanup operation is still settling
 after a timeout, Brood defers a retry for the same archive until it settles.
-Cleanup then resumes with fresh verification. This follows March's clean-exit
+Cleanup then resumes with fresh verification.
+
+Brood holds a workspace reclaim lease from each Git step's steward membership
+check until its Git mutation settles. While the lease is held, steward
+registration into that group and `PATCH` of any row in it return 409. Callers
+retry after teardown. This follows March's clean-exit
 rule for autonomous components.
 [March vision](../../vision.md) · [Operating philosophy](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)
 
