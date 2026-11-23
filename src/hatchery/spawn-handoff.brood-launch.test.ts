@@ -55,7 +55,7 @@ vi.mock("../spawn/snapshot-build.js", () => {
 });
 
 import { runHatcherySpawn } from "./spawn-handoff.js";
-import { buildSpawnImage } from "../spawn/snapshot-build.js";
+import { buildSpawnImage, removeSpawnImage } from "../spawn/snapshot-build.js";
 
 const backend: SpawnBackend = {
   name: "codex",
@@ -108,6 +108,8 @@ describe("runHatcherySpawn launch-time brood registration (#172)", () => {
         homeDir: home,
       }),
     ).rejects.toThrow(/image build failed/);
+    // A failure once the build has started still removes the spawn image.
+    expect(removeSpawnImage).toHaveBeenCalledTimes(1);
 
     const spawnRow = broodBodies.find((b) => b.kind === "spawn");
     const stewardRow = broodBodies.find((b) => b.kind === "steward");
@@ -164,6 +166,8 @@ describe("runHatcherySpawn launch-time brood registration (#172)", () => {
       expect.objectContaining({ sessionId: "ad-xyz", profile: "march" }),
     );
     expect(buildSpawnImage).not.toHaveBeenCalled();
+    // No image build started, so the rollback skips the Docker image call.
+    expect(removeSpawnImage).not.toHaveBeenCalled();
   });
 
   it("does not register at launch when brood is unconfigured", async () => {

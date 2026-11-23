@@ -1290,6 +1290,8 @@ export async function runHatcherySpawn(
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
+  // Set once the image build starts; before that there is no image to remove.
+  let imageBuildStarted = false;
   // Lifecycle stage tracker: advanced as the handoff progresses so the finally
   // block (and the rollback span) can report WHICH step failed when a step
   // throws — the container can exit 0 yet a later step fail (issue #211), so
@@ -1390,6 +1392,7 @@ export async function runHatcherySpawn(
     );
 
     stage = "image_build";
+    imageBuildStarted = true;
     dispatch.span("image.build", (buildSpan) => {
       const handle = createBuildContext(managerWorktree);
       try {
@@ -1715,7 +1718,7 @@ export async function runHatcherySpawn(
         // failed snapshot/base can be inspected (`docker exec`/`cp` by spawn id).
         if (!park) {
           if (containerId) removeSpawnContainer(spawnId);
-          removeSpawnImage(spawnId);
+          if (imageBuildStarted) removeSpawnImage(spawnId);
         }
         if (mgr && !handedOff) {
           if (park) {

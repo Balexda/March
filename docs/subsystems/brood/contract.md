@@ -104,7 +104,9 @@ registration into that group and `PATCH` of any row in it return 409 with
 `{ "error": string, "code": "workspace_reclaiming" }`. `BroodClient` raises
 `BroodWorkspaceReclaimingError` for that refusal. Hatchery treats it as a launch
 failure: it removes the steward it just launched and does not continue the
-dispatch. Other callers retry after teardown. This follows March's clean-exit
+dispatch. Other `PATCH` callers do not retry. For example, the legate's
+relaunch retire path (`broodRetire`) records the refusal and continues. The
+in-flight teardown is already retiring that group's rows. This follows March's clean-exit
 rule for autonomous components.
 [March vision](../../vision.md) · [Operating philosophy](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)
 
