@@ -9,6 +9,7 @@ import {
   outcomeFromStatus,
   recordHatcheryDispatch,
   recordHatcheryRequest,
+  registerHatcheryReadinessSource,
   startHeartbeat,
 } from "./hatchery-metrics.js";
 
@@ -62,6 +63,15 @@ describe("hatchery-metrics", () => {
         profile: "unknown",
         outcome: "failure",
       });
+    }).not.toThrow();
+  });
+
+  it("records the dispatch reason label and registers the readiness gauges without throwing", () => {
+    expect(() => registerHatcheryReadinessSource(() => ({ checks: { github: false }, consecutiveFailures: 0 }))).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => {
+      registerHatcheryReadinessSource(() => ({ checks: { docker: true, castra: true, github: false }, consecutiveFailures: 5 }));
+      recordHatcheryDispatch({ backend: "codex", taskType: "forge", profile: "march", outcome: "failure", reason: "tessera:unconfigured" });
     }).not.toThrow();
   });
 

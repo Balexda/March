@@ -19,7 +19,9 @@
 #   MARCH_HOST_GID        host primary gid for those files (defaults to the uid).
 #   MARCH_STATIO_REPO_DIR repo/worktree path used as the service working dir
 #                         to resolve the GitHub origin. Defaults to MARCH_HOST_HOME.
-#   MARCH_STATIO_TESSERA_CLIENT_KEY  bearer key registered to the statio caller.
+#   MARCH_STATIO_TESSERA_CLIENT_KEY_FILE  key file registered to the statio
+#                         caller (default ~/.march/tessera/keys/statio.key,
+#                         written by `march tessera provision`).
 #   MARCH_TESSERA_URL     Tessera endpoint (default http://tessera:9477).
 #   MARCH_STATIO_PORT     API port (default: deterministic 9689).
 #   MARCH_STATIO_URL      peer URL advertised in-container (default:
@@ -66,11 +68,8 @@ services:
       # Required — compose aborts if unset (the API binds 0.0.0.0 on a shared net).
       - MARCH_STATIO_TOKEN=${MARCH_STATIO_TOKEN:?MARCH_STATIO_TOKEN must be set; the API binds 0.0.0.0 on the march network}
       - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
-      - MARCH_TESSERA_CLIENT_KEY=${MARCH_STATIO_TESSERA_CLIENT_KEY:-}
-      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-}
+      - MARCH_TESSERA_CLIENT_KEY_FILE=${MARCH_STATIO_TESSERA_CLIENT_KEY_FILE:-${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera/keys/statio.key}
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
-      - GH_TOKEN=${GH_TOKEN:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Redirect gh cache, state and data writes off the read-only HOME.
       # Statio sets a fresh GH_CONFIG_DIR for each gh child.
       - GH_NO_UPDATE_NOTIFIER=1

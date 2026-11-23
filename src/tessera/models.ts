@@ -44,6 +44,13 @@ export interface CredentialProvider {
   issue(request: ProviderIssueRequest): Promise<ProviderIssueResult>;
   status(): ProviderStatus;
   cacheSize?(): number;
+  /**
+   * Optional async re-check run before each provider-health poll, so a status
+   * read from stored state still reflects the credential the next issuance
+   * would see (e.g. a removed or revoked operator token). Must not throw
+   * credential material; rejections are ignored.
+   */
+  refresh?(): Promise<void>;
 }
 const ERRORS = {
   unauthorized: [401, "Client authentication required"],
@@ -80,9 +87,18 @@ export function parseTokenRequest(body: unknown): TokenRequest {
     (value.subject !== undefined && typeof value.subject !== "string")) throw new TesseraError("invalid_request");
   return { ...value } as unknown as TokenRequest;
 }
+/** One grant a client holds, as `GET /v1/client` reports it to that client. */
+export interface ClientGrant {
+  readonly identity: Identity;
+  readonly access: "read" | "write";
+  /** Lowercased `owner/name` or `owner/*` entries; empty for the user identity. */
+  readonly repos: string[];
+}
 export interface AuthorizationBoundary {
   authenticate(authorization: string | undefined): string | Promise<string>;
   authorize(caller: string, request: TokenRequest): void | Promise<void>;
+  /** The authenticated caller's own grants (never another client's). Absent = none. */
+  grants?(caller: string): ClientGrant[];
 }
 export const denyAuthorization: AuthorizationBoundary = {
   authenticate() { throw new TesseraError("unauthorized"); },

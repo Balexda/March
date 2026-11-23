@@ -7,13 +7,15 @@ import { getActiveOtel } from "../../observability/otel.js";
 import { startHeartbeat } from "../../observability/hatchery-metrics.js";
 import { registerSpawnWithBrood } from "./brood-registration.js";
 import { JobStore, type JobStoreOptions } from "./jobs.js";
-import { registerRoutes } from "./routes.js";
+import { registerRoutes, type ReadinessProbes } from "./routes.js";
 
 export interface BuildServerOptions {
   /** Provide a pre-built store (e.g. with a fake executor) for tests. */
   readonly store?: JobStore;
   readonly jobStoreOptions?: Omit<JobStoreOptions, "logger">;
   readonly logger?: FastifyBaseLogger;
+  /** Override the `/readyz` probes (tests). */
+  readonly readiness?: ReadinessProbes;
 }
 
 export interface HatcheryServer {
@@ -36,7 +38,7 @@ export async function buildServer(
       logger,
     });
   const app = Fastify({ loggerInstance: logger });
-  await registerRoutes(app, { store });
+  await registerRoutes(app, { store, readiness: options.readiness });
   return { app, store };
 }
 

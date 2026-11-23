@@ -3,7 +3,8 @@ import os from "node:os";
 import type { Logger } from "pino";
 import { createServiceLogger } from "../observability/logger.js";
 import { recordTesseraFallback, tesseraConsumerService } from "../observability/tessera-client-metrics.js";
-import { resolveTesseraConfig } from "./config.js";
+import { createHash } from "node:crypto";
+import { configuredClientKey, resolveTesseraConfig } from "./config.js";
 import type { GitHubEntitlement, GitHubTokenRequest, TesseraStatus } from "./types.js";
 export type { GitHubEntitlement, GitHubTokenRequest, TesseraStatus } from "./types.js";
 
@@ -71,6 +72,19 @@ function statusBody(body: unknown): TesseraStatus {
     providers, soonest_expiry: body.soonest_expiry as string | null,
     cache: { entries: body.cache.entries as number } };
 }
+export interface TesseraClientInfo {
+  readonly client: string;
+  readonly grants: ReadonlyArray<{ identity: "app" | "user"; access: "read" | "write"; repos: string[] }>;
+}
+function clientBody(body: unknown): TesseraClientInfo {
+  if (!object(body) || !nonempty(body.client) || !Array.isArray(body.grants)) invalid(200);
+  const grants = body.grants.map((g: unknown) => {
+    if (!object(g) || !["app", "user"].includes(g.identity as string) || !["read", "write"].includes(g.access as string) ||
+      !Array.isArray(g.repos) || !g.repos.every(nonempty)) invalid(200);
+    return { identity: g.identity as "app" | "user", access: g.access as "read" | "write", repos: [...(g.repos as string[])] };
+  });
+  return { client: body.client, grants };
+}
 function copy(value: GitHubEntitlement): GitHubEntitlement {
   return { ...value, commitIdentity: value.commitIdentity && { ...value.commitIdentity } };
 }
@@ -86,8 +100,9 @@ export class TesseraClient {
     this.config = resolveTesseraConfig(options);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
-  private async request(route: string, req?: GitHubTokenRequest): Promise<unknown> {
-    if (!this.config || (req && !this.config.clientKey)) throw new TesseraClientError("unconfigured");
+  private async request(route: string, req?: GitHubTokenRequest, opts: { auth?: boolean; timeoutMs?: number } = {}): Promise<unknown> {
+    const auth = !!req || opts.auth === true;
+    if (!this.config || (auth && !this.config.clientKey)) throw new TesseraClientError("unconfigured");
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -99,7 +114,7 @@ export class TesseraClient {
         reader?.cancel().catch(() => {});
         reject(new TesseraClientError("unreachable"));
       },
-        route === "/healthz" ? PROBE_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+        opts.timeoutMs ?? (route === "/healthz" ? PROBE_TIMEOUT_MS : REQUEST_TIMEOUT_MS));
     });
     const run = async () => {
       let response: Response;
@@ -107,7 +122,8 @@ export class TesseraClient {
         response = await this.fetchImpl(this.config!.baseUrl + route, {
           method: req ? "POST" : "GET", signal: controller.signal, redirect: "error",
           headers: req ? { authorization: `Bearer ${this.config!.clientKey}`, "content-type": "application/json",
-            ...(req.sliceId ? { "x-march-slice-id": req.sliceId } : {}) } : {},
+            ...(req.sliceId ? { "x-march-slice-id": req.sliceId } : {}) }
+            : auth ? { authorization: `Bearer ${this.config!.clientKey}` } : {},
           body: req ? JSON.stringify({ identity: req.identity, repo: req.repo, access: req.access, refresh: req.refresh }) : undefined,
         });
       } catch { throw new TesseraClientError("unreachable"); }
@@ -175,18 +191,32 @@ export class TesseraClient {
     }
   }
   async status(): Promise<TesseraStatus> { return statusBody(await this.request("/status")); }
+  /**
+   * `GET /v1/client`: this client's own identity and grants, authenticated with
+   * its bearer key — proves the key is accepted without minting a token. A bad or
+   * revoked key rejects with code `unauthorized`.
+   */
+  async client(options: { timeoutMs?: number } = {}): Promise<TesseraClientInfo> {
+    return clientBody(await this.request("/v1/client", undefined, { auth: true, timeoutMs: options.timeoutMs }));
+  }
   async reachable(): Promise<boolean> {
     try { const body = await this.request("/healthz"); return object(body) && body.status === "ok"; }
     catch { return false; }
   }
 }
 // One convenience client per effective configuration. Replacing it on configuration
-// changes avoids retaining old credentials or sharing state across callers.
-let defaultClient: { baseUrl?: string; clientKey?: string; fallback?: string; client: TesseraClient } | undefined;
+// changes avoids retaining old credentials or sharing state across callers. The key
+// compared is the one actually resolved (the key file's CONTENTS when a file is named),
+// so a key provisioned after the first call, or replaced at the same path, takes
+// effect; an unchanged key keeps the client and its token cache.
+let defaultClient: { baseUrl?: string; keyDigest?: string; fallback?: string; client: TesseraClient } | undefined;
 export function getGitHubToken(req: GitHubTokenRequest): Promise<GitHubEntitlement> {
-  const { MARCH_TESSERA_URL: baseUrl, MARCH_TESSERA_CLIENT_KEY: clientKey, MARCH_TESSERA_GH_TOKEN_FALLBACK: fallback } = process.env;
-  if (!defaultClient || defaultClient.baseUrl !== baseUrl || defaultClient.clientKey !== clientKey || defaultClient.fallback !== fallback) {
-    defaultClient = { baseUrl, clientKey, fallback, client: new TesseraClient() };
+  const { MARCH_TESSERA_URL: baseUrl, MARCH_TESSERA_GH_TOKEN_FALLBACK: fallback } = process.env;
+  const key = configuredClientKey(process.env)?.trim();
+  const keyDigest = key ? createHash("sha256").update(key).digest("hex") : undefined;
+  if (!defaultClient || defaultClient.baseUrl !== baseUrl || defaultClient.keyDigest !== keyDigest ||
+    defaultClient.fallback !== fallback) {
+    defaultClient = { baseUrl, keyDigest, fallback, client: new TesseraClient() };
   }
   return defaultClient.client.issueGitHubToken(req);
 }

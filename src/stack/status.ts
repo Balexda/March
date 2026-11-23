@@ -12,7 +12,7 @@ import { defaultTokenPath } from "./up.js";
 /**
  * `march status` — stack health + reachability pre-flight.
  *
- * For each of the six March services it reports three independent facts —
+ * For each March service it reports three independent facts —
  * container state (running/stopped/absent), HTTP reachability on the loopback
  * port, and whether the shared `CASTRA_API_TOKEN` authenticates (where a route
  * is gated on it) — then surfaces the common misconfig classes: token drift, a
@@ -42,6 +42,8 @@ export interface ServiceStatus {
   /** HTTP status code from the health probe, when a response was received. */
   readonly httpStatus?: number;
   readonly token: TokenState;
+  /** Readiness state, for services with a readiness endpoint that answered. */
+  readonly readiness?: "ok" | "degraded" | "down";
   /** Present only for services with a locally-built image. */
   readonly imagePresent?: boolean;
   /** True when this service is up, reachable, and correctly token-wired. */
@@ -66,6 +68,8 @@ export interface HttpProbeResult {
   readonly reachable: boolean;
   /** The HTTP status code, when a response came back. */
   readonly status?: number;
+  /** The parsed JSON body, when the response carried one. */
+  readonly body?: unknown;
 }
 
 export interface StatusOptions {
@@ -167,12 +171,46 @@ export async function fetchProbe(
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: controller.signal,
     });
-    return { reachable: true, status: res.status };
+    let body: unknown;
+    try {
+      body = JSON.parse(await res.text());
+    } catch {
+      body = undefined;
+    }
+    return { reachable: true, status: res.status, ...(body !== undefined ? { body } : {}) };
   } catch {
     return { reachable: false };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Readiness from either body shape: a readyz `{ state, reasons }` (hatchery), or
+ * Tessera's `/status` `providers[]`, which is ready only when the `github-app`
+ * provider is `ok` (Tessera is the only GitHub credential source). Undefined
+ * when the body is neither.
+ */
+export function readinessFromBody(
+  body: unknown,
+): { state: "ok" | "degraded" | "down"; reasons: string[] } | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const b = body as { state?: unknown; reasons?: unknown; providers?: unknown };
+  if (b.state === "ok" || b.state === "degraded" || b.state === "down") {
+    const reasons = Array.isArray(b.reasons) ? b.reasons.filter((r): r is string => typeof r === "string") : [];
+    return { state: b.state, reasons };
+  }
+  if (Array.isArray(b.providers)) {
+    const app = b.providers.find((p) => (p as { provider?: unknown })?.provider === "github-app") as
+      | { state?: unknown }
+      | undefined;
+    if (app?.state === "ok") return { state: "ok", reasons: [] };
+    return {
+      state: "down",
+      reasons: [`cannot vend GitHub credentials: github-app provider ${app ? String(app.state) : "missing"}`],
+    };
+  }
+  return undefined;
 }
 
 async function statusForService(
@@ -257,7 +295,30 @@ async function statusForService(
     }
   }
 
+  // Readiness: a live service that cannot do its job (e.g. hatchery with no
+  // GitHub credential) is `down` — unhealthy; `degraded` is reported only.
+  let readiness: "ok" | "degraded" | "down" | undefined;
+  if (svc.readinessPath && reachable === "ok") {
+    const ready = await deps.probeHttp(`http://127.0.0.1:${port}${svc.readinessPath}`);
+    const parsed = readinessFromBody(ready.body);
+    if (parsed) {
+      readiness = parsed.state;
+      for (const r of parsed.reasons) issues.push(`${parsed.state === "down" ? "not ready" : "degraded"}: ${r}`);
+      if (parsed.state === "down" && parsed.reasons.length === 0) issues.push(`not ready (${svc.readinessPath} state=down)`);
+    } else {
+      // A configured readiness endpoint that times out, refuses, or answers
+      // without a readable state cannot vouch for the service: down.
+      readiness = "down";
+      issues.push(
+        ready.reachable && ready.status !== undefined
+          ? `not ready (${svc.readinessPath} answered HTTP ${ready.status} without a readiness state)`
+          : `not ready (${svc.readinessPath} not answering)`,
+      );
+    }
+  }
+
   const healthy =
+    readiness !== "down" &&
     container === "running" &&
     reachable === "ok" &&
     (token === "ok" || token === "n/a") &&
@@ -270,6 +331,7 @@ async function statusForService(
     reachable,
     ...(health.status !== undefined ? { httpStatus: health.status } : {}),
     token,
+    ...(readiness !== undefined ? { readiness } : {}),
     ...(imagePresent !== undefined ? { imagePresent } : {}),
     healthy,
     issues,
@@ -350,7 +412,7 @@ export function formatStatusTable(status: StackStatus): string {
         : s.reachable === "error"
           ? `error (:${s.port})`
           : "unreachable";
-    const mark = s.healthy ? "✓" : "✗";
+    const mark = !s.healthy ? "✗" : s.readiness === "degraded" ? "!" : "✓";
     lines.push(
       `${mark} ${s.service.padEnd(11)}${s.container.padEnd(10)}${reach.padEnd(16)}${s.token}`,
     );

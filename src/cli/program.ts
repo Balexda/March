@@ -2280,6 +2280,57 @@ tessera.command("git-credential <operation>")
     process.exitCode = await runTesseraGitCredential(operation);
   });
 
+tessera.command("provision")
+  .description(
+    "Write ~/.march/tessera (client keys, policy, operator GitHub token) for Tessera and its consumers. " +
+      "Repos default to the GitHub origins of the profiles registered with Herald (MARCH_HERALD_URL).",
+  )
+  .option("--repos <list>", "Comma-separated owner/name (or owner/*) the grants cover")
+  .option("--from-gh", "Write ~/.march/tessera/github-token from `gh auth token`")
+  .allowExcessArguments(false)
+  .action(async (opts: { repos?: string; fromGh?: boolean }) => {
+    commandHandled = true;
+    const { provisionTessera, ghAuthToken, TesseraProvisionError, TESSERA_CLIENT_GRANTS } = await import("../tessera/provision.js");
+    try {
+      let repos: string[];
+      if (opts.repos !== undefined) {
+        repos = opts.repos.split(",");
+      } else {
+        const { ProfileClient } = await import("../herald/profiles/client.js");
+        const { resolveHatcheryOrigin } = await import("../hatchery/github-read.js");
+        let profiles;
+        try {
+          profiles = await new ProfileClient({ timeoutMs: 5_000 }).list();
+        } catch {
+          throw new TesseraProvisionError("Herald is not reachable to list profiles (MARCH_HERALD_URL); pass --repos owner/name[,…].");
+        }
+        repos = [];
+        for (const p of profiles) {
+          const origin = await resolveHatcheryOrigin(p.repoPath).catch(() => undefined);
+          if (origin?.repo) repos.push(origin.repo);
+          else process.stderr.write(`warning: profile ${p.profile} (${p.repoPath}) has no GitHub origin; skipped\n`);
+        }
+      }
+      const result = provisionTessera({ repos, githubToken: opts.fromGh ? ghAuthToken() : undefined });
+      console.log(`Tessera configuration: ${result.dir}`);
+      console.log(`  repos: ${result.repos.join(", ")}`);
+      for (const c of result.clients) {
+        const grant = TESSERA_CLIENT_GRANTS.find((g) => g.client === c.client)!;
+        console.log(`  ${c.client.padEnd(9)} ${grant.identities.join("+")}/${grant.maxAccess}  ${c.created ? "new key" : "key kept"}  ${c.keyPath}`);
+      }
+      console.log(`  steward key: ${result.stewardKeyPath}`);
+      console.log(`  github-token: ${result.githubToken}${result.githubToken === "missing" ? " (rerun with --from-gh, or Tessera's github-app provider stays unconfigured)" : ""}`);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof TesseraProvisionError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
 tessera.command("serve")
   .description("Run the Tessera HTTP service (issuance requires authorization)")
   .option("--port <port>", "Listen port (default: MARCH_TESSERA_PORT or 9477)")

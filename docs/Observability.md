@@ -243,7 +243,9 @@ never the concrete path.
 |---|---|---|
 | `march.hatchery.requests` (counter) | `march_hatchery_requests_total` | HTTP requests by `{route, method, outcome}` (`outcome` = `success` for 2xx/3xx, else `error`) |
 | `march.hatchery.request.duration` (histogram, `s`) | `march_hatchery_request_duration_seconds_{bucket,count,sum}` | HTTP request latency |
-| `march.hatchery.dispatches` (counter) | `march_hatchery_dispatches_total` | spawn dispatch jobs by `{backend, task_type, profile, outcome}` (`outcome` = `success`/`failure`) |
+| `march.hatchery.dispatches` (counter) | `march_hatchery_dispatches_total` | spawn dispatch jobs by `{backend, task_type, profile, outcome, reason}` (`outcome` = `success`/`failure`; `reason` = the low-cardinality failure code — a Hatchery GitHub code such as `tessera:unconfigured`, or `worker_exit`/`patch_apply_failed`/`branch_collision`/`castra_error`/`docker_error`/`timeout`/`other` — and `none` on success) |
+| `march.hatchery.ready` (gauge, no unit) | `march_hatchery_ready` | `1`/`0` per readiness `{check}` = `docker`/`castra`/`github` (docker/castra as of the last `/readyz`, which the legate polls every tick; github read live) |
+| `march.hatchery.spawn.consecutive_failures` (gauge, no unit) | `march_hatchery_spawn_consecutive_failures` | finished spawn jobs that failed in a row since the last success (`/readyz` goes `degraded` at 2, `down` at 5) |
 | `march.hatchery.active_spawns` (up/down) | `march_hatchery_active_spawns` | spawn jobs currently executing |
 | `march.hatchery.uptime` (gauge, `s`) | `march_hatchery_uptime_seconds` | service process uptime |
 | `march.hatchery.heartbeat` (counter) | `march_hatchery_heartbeat_total` | liveness tick (every 15s) |
@@ -253,7 +255,28 @@ HTTP request metric: `POST /spawns` returns `202` (an HTTP success) and the job
 runs in the background, so a dispatch that *fails* never shows up in
 `march_hatchery_requests_total`. The dashboard's "Dispatch error rate" panel
 reads this counter so failed spawns surface even though the HTTP response was a
-202.
+202. Its `reason` label names the failure class, so a stack-wide outage (the
+2026-11-22 `tessera:unconfigured` incident) reads as one series.
+
+**Readiness, not liveness.** `march_hatchery_heartbeat_total` only proves the
+process is up — it stayed green through five hours of 100% spawn failures. The
+readiness gauges above, and the legate-side `march_stack_service_state` below,
+answer "can Hatchery spawn". Hatchery `GET /readyz` carries the same facts with
+human `reasons` (contract: `docs/subsystems/hatchery/contract.md`).
+
+#### Stack service readiness (legate probe)
+
+The legate probes every stack service once per tick (Hatchery/Brood/Castra
+`/readyz`, Herald `/healthz`, Tessera `/status`; 2s timeout each, never breaking the
+tick), caches the result for `GET /status` → `services`, and emits:
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.stack.service.state` (gauge, no unit) | `march_stack_service_state` | one series per `{service, state}` — `service` ∈ `castra`/`hatchery`/`brood`/`herald`/`tessera`, `state` ∈ `ok`/`degraded`/`down` — valued `1` for the current state and `0` for the others, so `max by (service) (march_stack_service_state{state="down"})` is the red signal. Tessera has no "not deployed" state: it is the only GitHub credential source, so not running, or running but unable to vend, is `down`. |
+
+Defined in [`src/observability/loop-metrics.ts`](../src/observability/loop-metrics.ts)
+(`recordStackServiceStates`), fed by
+[`src/legate/loop/service-health.ts`](../src/legate/loop/service-health.ts).
 
 #### Castra (interactive-sessions host)
 
@@ -420,7 +443,9 @@ and can be observed as a service.
   image: [`docker/hatchery.Dockerfile`](../docker/hatchery.Dockerfile).
 - **API:** `POST /spawns` (creates a job, returns `202 {id}`),
   `GET /spawns/:id` (job status/result), `GET /healthz` (liveness),
-  `GET /readyz` (docker + agent-deck reachable). Spawns can run up to an hour, so
+  `GET /readyz` (readiness: docker + Castra reachable, Tessera reachable and
+  vending GitHub credentials, and the rolling spawn-failure window; `503` when
+  `down`). Spawns can run up to an hour, so
   the API is an async job + poll. The `march hatchery spawn` CLI and the legate
   loop are both clients: the loop's dispatch runner POSTs a spawn and polls the
   job to completion (via `MARCH_HATCHERY_URL`), writing the same result shape its

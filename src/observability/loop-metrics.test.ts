@@ -9,6 +9,7 @@ import {
   recordDwell,
   recordLoopHeartbeat,
   recordSpawnBudget,
+  recordStackServiceStates,
   type LoopTickActivity,
 } from "./loop-metrics.js";
 
@@ -86,6 +87,13 @@ describe("loop-metrics", () => {
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
+  });
+
+  it("recordStackServiceStates is a no-op when disabled and folds when enabled", () => {
+    initOtel({});
+    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "down" })).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => recordStackServiceStates({ hatchery: "down", tessera: "down" })).not.toThrow();
   });
 
   it("recordDependencyUnblock is a no-op when disabled and counts when enabled", () => {

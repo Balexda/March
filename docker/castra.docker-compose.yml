@@ -77,8 +77,9 @@ services:
       # agent-deck lives under the mounted HOME's ~/.local/bin.
       - PATH=${MARCH_HOST_HOME:-/home/jmbattista}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GH_TOKEN=${GH_TOKEN:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # No GH_TOKEN/GITHUB_TOKEN: steward-launch scrubs ambient tokens and
+      # stewards get GitHub credentials from Tessera (key at
+      # ~/.march/steward/tessera-client-key, written by `march tessera provision`).
       # Steward compaction / prompt-cache tuning, written into the generated
       # steward settings.json at serve start (src/shared/claude-session-env.ts).
       # Unset = defaults (on, 1h TTL, 100k idle floor, 200k window).

@@ -72,9 +72,26 @@ export function monitorProviderHealth(app: FastifyInstance, registry: ProviderRe
   const refresh = () => (latest = check());
   let interval: NodeJS.Timeout | undefined;
   let stopObserving: (() => void) | undefined;
+  let closed = false;
+  let polling = false;
+  // Each poll first lets providers re-check their credential (file re-read,
+  // bounded revalidation) so `/status` reports what the next issuance would see.
+  // Providers without a re-check keep the synchronous poll.
+  const poll = () => {
+    const sources = (["app", "user"] as const).map((identity) => registry.select(identity)).filter((p) => p.refresh);
+    if (sources.length === 0) { refresh(); return; }
+    if (polling) return;
+    polling = true;
+    void Promise.allSettled(sources.map(async (provider) => provider.refresh!()))
+      .finally(() => {
+        polling = false;
+        if (!closed) refresh();
+      })
+      .catch(() => {});
+  };
   app.addHook("onReady", async () => {
     refresh();
-    interval = setInterval(refresh, CHECK_INTERVAL_MS).unref();
+    interval = setInterval(poll, CHECK_INTERVAL_MS).unref();
     stopObserving = observeTesseraExpiry(function* () {
       const now = Date.now();
       for (const status of latest.providers) {
@@ -85,6 +102,7 @@ export function monitorProviderHealth(app: FastifyInstance, registry: ProviderRe
     });
   });
   app.addHook("onClose", async () => {
+    closed = true;
     clearInterval(interval);
     stopObserving?.();
   });

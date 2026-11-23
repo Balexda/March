@@ -14,21 +14,28 @@ import {
   type StatusOptions,
 } from "./status.js";
 
-/** All six services running, reachable, image present, token accepted. */
+/** All services running, reachable, image present, token accepted. */
+/** A healthy stack's answer to every probe: token gate, readiness bodies, liveness. */
+async function healthyProbe(url: string, token?: string): Promise<HttpProbeResult> {
+  if (url.includes("/v1/")) {
+    // Token gate: accept the correct token.
+    return token === "tok-123"
+      ? { reachable: true, status: 200 }
+      : { reachable: true, status: 401 };
+  }
+  if (url.endsWith("/readyz")) return { reachable: true, status: 200, body: { ready: true, state: "ok", reasons: [] } };
+  if (url.endsWith("/status")) {
+    return { reachable: true, status: 200, body: { providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }] } };
+  }
+  return { reachable: true, status: 200 };
+}
+
 function healthyOptions(over: Partial<StatusOptions> = {}): StatusOptions {
   return {
     containerState: () => "running",
     imagePresent: () => true,
     readToken: () => "tok-123",
-    probeHttp: async (url, token) => {
-      if (url.includes("/v1/")) {
-        // Token gate: accept the correct token.
-        return token === "tok-123"
-          ? { reachable: true, status: 200 }
-          : { reachable: true, status: 401 };
-      }
-      return { reachable: true, status: 200 };
-    },
+    probeHttp: healthyProbe,
     ...over,
   };
 }
@@ -309,5 +316,92 @@ describe("formatStatusTable", () => {
     const out = formatStatusTable(status);
     expect(out).toContain("Stack: UNHEALTHY");
     expect(out).toContain("container is absent");
+  });
+});
+
+describe("stackStatus — hatchery readiness (/readyz)", () => {
+  const withReadyz = (body: unknown, status = 200): StatusOptions =>
+    healthyOptions({
+      probeHttp: async (url, token) => {
+        if (url.includes("/v1/")) return token === "tok-123" ? { reachable: true, status: 200 } : { reachable: true, status: 401 };
+        if (url.endsWith("/readyz")) return { reachable: true, status, body };
+        return healthyProbe(url, token);
+      },
+    });
+
+  it("a live hatchery whose readiness is down is unhealthy, with the reasons as issues", async () => {
+    const status = await stackStatus(withReadyz({ ready: false, state: "down", reasons: ["no GitHub credential (tessera:unconfigured)"] }, 503));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery.reachable).toBe("ok");
+    expect(hatchery.readiness).toBe("down");
+    expect(hatchery.healthy).toBe(false);
+    expect(hatchery.issues).toContain("not ready: no GitHub credential (tessera:unconfigured)");
+    expect(status.healthy).toBe(false);
+    expect(formatStatusTable(status)).toContain("✗ hatchery");
+  });
+
+  it("degraded readiness is reported but stays healthy", async () => {
+    const status = await stackStatus(withReadyz({ ready: true, state: "degraded", reasons: ["the last 2 spawns failed (worker_exit)"] }));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ readiness: "degraded", healthy: true });
+    expect(hatchery.issues).toEqual(["degraded: the last 2 spawns failed (worker_exit)"]);
+    expect(formatStatusTable(status)).toContain("! hatchery");
+  });
+
+  it("a readiness probe that does not answer is down, not healthy", async () => {
+    const status = await stackStatus(healthyOptions({
+      probeHttp: async (url, token) => (url.endsWith("/readyz") ? { reachable: false } : healthyProbe(url, token)),
+    }));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ reachable: "ok", readiness: "down", healthy: false });
+    expect(hatchery.issues).toContain("not ready (/readyz not answering)");
+  });
+
+  it("a 200 readiness answer without a state is down", async () => {
+    const status = await stackStatus(withReadyz({}));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ readiness: "down", healthy: false });
+    expect(hatchery.issues).toContain("not ready (/readyz answered HTTP 200 without a readiness state)");
+  });
+
+  it("ok readiness adds nothing", async () => {
+    const status = await stackStatus(withReadyz({ ready: true, state: "ok", reasons: [] }));
+    expect(status.healthy).toBe(true);
+    expect(status.services.find((s) => s.service === "hatchery")?.readiness).toBe("ok");
+  });
+});
+
+describe("stackStatus — tessera readiness (/status providers)", () => {
+  const withTessera = (appState: string): StatusOptions =>
+    healthyOptions({
+      probeHttp: async (url, token) => {
+        if (url.includes("/v1/")) return token === "tok-123" ? { reachable: true, status: 200 } : { reachable: true, status: 401 };
+        if (url.endsWith("/status")) {
+          return { reachable: true, status: 200, body: { providers: [{ provider: "github-app", state: appState }, { provider: "github-user", state: "ok" }] } };
+        }
+        return healthyProbe(url, token);
+      },
+    });
+
+  it("manages tessera: probes it on 9477 (/healthz then /status)", async () => {
+    const probed: string[] = [];
+    await stackStatus(healthyOptions({ probeHttp: async (url) => { probed.push(url); return { reachable: true, status: 200 }; } }));
+    expect(probed).toContain("http://127.0.0.1:9477/healthz");
+    expect(probed).toContain("http://127.0.0.1:9477/status");
+  });
+
+  it("a running Tessera that cannot vend GitHub credentials is unhealthy", async () => {
+    const status = await stackStatus(withTessera("unconfigured"));
+    const tessera = status.services.find((s) => s.service === "tessera")!;
+    expect(tessera).toMatchObject({ readiness: "down", healthy: false });
+    expect(tessera.issues).toContain("not ready: cannot vend GitHub credentials: github-app provider unconfigured");
+    expect(status.healthy).toBe(false);
+    // Its consumers name the unhealthy dependency.
+    expect(status.services.find((s) => s.service === "hatchery")?.issues).toContain("depends on tessera, which is not healthy");
+  });
+
+  it("a vending Tessera is healthy", async () => {
+    const status = await stackStatus(withTessera("ok"));
+    expect(status.services.find((s) => s.service === "tessera")).toMatchObject({ readiness: "ok", healthy: true });
   });
 });

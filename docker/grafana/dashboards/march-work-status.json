@@ -50,7 +50,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Brood session-state + teardown service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
+      "description": "Brood session-state + teardown service. DOWN when /readyz fails (docker or git missing) or it stops answering. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -63,29 +63,28 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
             },
             {
-              "type": "range",
+              "type": "value",
               "options": {
-                "from": 0,
-                "to": 0,
-                "result": {
+                "0": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 1
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 0.0001,
-                "to": 1000000000,
-                "result": {
-                  "text": "UP",
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
                   "index": 2
+                },
+                "2": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 3
                 }
               }
             }
@@ -99,8 +98,12 @@
                 "value": null
               },
               {
+                "color": "orange",
+                "value": 1
+              },
+              {
                 "color": "green",
-                "value": 0.0001
+                "value": 2
               }
             ]
           },
@@ -110,7 +113,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 5,
+        "w": 4,
         "x": 0,
         "y": 1
       },
@@ -137,7 +140,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_brood_heartbeat_total[5m]))",
+          "expr": "(max(march_stack_service_state{service=\"brood\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"brood\",state=\"degraded\"}))\nor\n((sum(increase(march_brood_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Brood",
           "range": true,
           "refId": "A"
@@ -151,7 +154,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Hatchery spawn service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
+      "description": "Hatchery spawn service. DOWN when it cannot start agents: no GitHub credential from Tessera (Tessera not running or cannot vend), Castra or docker unreachable, or 5+ spawns failed in a row. DEGRADED on 2+ spawn failures in a row. A GitHub credential means one vended by Tessera; an ambient token does not count. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -164,29 +167,28 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
             },
             {
-              "type": "range",
+              "type": "value",
               "options": {
-                "from": 0,
-                "to": 0,
-                "result": {
+                "0": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 1
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 0.0001,
-                "to": 1000000000,
-                "result": {
-                  "text": "UP",
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
                   "index": 2
+                },
+                "2": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 3
                 }
               }
             }
@@ -200,8 +202,12 @@
                 "value": null
               },
               {
+                "color": "orange",
+                "value": 1
+              },
+              {
                 "color": "green",
-                "value": 0.0001
+                "value": 2
               }
             ]
           },
@@ -211,8 +217,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 5,
+        "w": 4,
+        "x": 4,
         "y": 1
       },
       "id": 2,
@@ -238,7 +244,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_hatchery_heartbeat_total[5m]))",
+          "expr": "(max(march_stack_service_state{service=\"hatchery\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"hatchery\",state=\"degraded\"}))\nor\n((sum(increase(march_hatchery_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Hatchery",
           "range": true,
           "refId": "A"
@@ -252,7 +258,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Herald observation service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
+      "description": "Herald observation service. DOWN when it stops answering. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -265,29 +271,28 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
             },
             {
-              "type": "range",
+              "type": "value",
               "options": {
-                "from": 0,
-                "to": 0,
-                "result": {
+                "0": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 1
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 0.0001,
-                "to": 1000000000,
-                "result": {
-                  "text": "UP",
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
                   "index": 2
+                },
+                "2": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 3
                 }
               }
             }
@@ -301,8 +306,12 @@
                 "value": null
               },
               {
+                "color": "orange",
+                "value": 1
+              },
+              {
                 "color": "green",
-                "value": 0.0001
+                "value": 2
               }
             ]
           },
@@ -312,8 +321,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 10,
+        "w": 4,
+        "x": 8,
         "y": 1
       },
       "id": 3,
@@ -339,7 +348,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_herald_heartbeat_total[5m]))",
+          "expr": "(max(march_stack_service_state{service=\"herald\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"herald\",state=\"degraded\"}))\nor\n((sum(increase(march_herald_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Herald",
           "range": true,
           "refId": "A"
@@ -404,8 +413,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 15,
+        "w": 4,
+        "x": 12,
         "y": 1
       },
       "id": 4,
@@ -445,7 +454,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Castra interactive-session host. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
+      "description": "Castra interactive-sessions host. DOWN when it does not answer within the probe timeout, or its event loop stalls for more than 2s (a blocked agent-deck call freezes every request); DEGRADED when sessions are refusing sends. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. If the legate is not reporting, the card falls back to this service's heartbeat. For the remedy behind a red card, see the console's System panel or `march status`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -458,29 +467,28 @@
                 "match": "null",
                 "result": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 0
                 }
               }
             },
             {
-              "type": "range",
+              "type": "value",
               "options": {
-                "from": 0,
-                "to": 0,
-                "result": {
+                "0": {
                   "text": "DOWN",
+                  "color": "red",
                   "index": 1
-                }
-              }
-            },
-            {
-              "type": "range",
-              "options": {
-                "from": 0.0001,
-                "to": 1000000000,
-                "result": {
-                  "text": "UP",
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
                   "index": 2
+                },
+                "2": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 3
                 }
               }
             }
@@ -494,8 +502,12 @@
                 "value": null
               },
               {
+                "color": "orange",
+                "value": 1
+              },
+              {
                 "color": "green",
-                "value": 0.0001
+                "value": 2
               }
             ]
           },
@@ -506,7 +518,7 @@
       "gridPos": {
         "h": 6,
         "w": 4,
-        "x": 20,
+        "x": 16,
         "y": 1
       },
       "id": 5,
@@ -532,13 +544,118 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_castra_heartbeat_total[5m]))",
+          "expr": "(max(march_stack_service_state{service=\"castra\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"castra\",state=\"degraded\"}))\nor\n((max(march_castra_event_loop_lag_ms) < bool 2000) * 2)\nor\n((sum(increase(march_castra_heartbeat_total[5m])) > bool 0) * 2)",
           "legendFormat": "Castra",
           "range": true,
           "refId": "A"
         }
       ],
       "title": "Castra",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Tessera credential service \u2014 the only source of GitHub credentials for the stack. DOWN when it is not running, or is running but its GitHub App provider cannot vend (unconfigured / degraded / invalid). While it is DOWN, nothing can spawn or act on GitHub. The state comes from the legate's readiness probe, run every tick (march_stack_service_state): whether the service can do its job, not only whether it is alive. Tessera has no heartbeat, so no data reads DOWN. For the remedy behind a red card, see the console's System panel or `march status`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 1
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
+                  "index": 2
+                },
+                "2": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 3
+                }
+              }
+            }
+          ],
+          "noValue": "DOWN",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "(max(march_stack_service_state{service=\"tessera\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"tessera\",state=\"degraded\"}))",
+          "legendFormat": "Tessera",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Tessera",
       "type": "stat"
     },
     {

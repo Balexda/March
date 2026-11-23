@@ -16,8 +16,7 @@ for routes, response shapes, and bearer authentication.
 | --- | --- |
 | `MARCH_STATIO_REPO_DIR` | Compose working directory. Statio resolves the GitHub `origin` from this checkout or worktree before contacting Tessera or GitHub. An in-process caller can supply a known repository slug to the metadata reader or adapter. |
 | `MARCH_TESSERA_URL` | Tessera base URL. Compose defaults to the Tessera service on the shared network, port 9477 unless `MARCH_TESSERA_PORT` is set. |
-| `MARCH_TESSERA_CLIENT_KEY` | Statio's registered client key. Compose supplies it from `MARCH_STATIO_TESSERA_CLIENT_KEY`. Tessera policy must grant `statio` app/read for the repository. |
-| `MARCH_TESSERA_GH_TOKEN_FALLBACK` | Set to `1` to enable the shared client's explicit migration fallback when issuance fails. Disabled by default. |
+| `MARCH_TESSERA_CLIENT_KEY_FILE` | File holding Statio's registered client key (takes precedence over `MARCH_TESSERA_CLIENT_KEY`). Compose defaults it to `~/.march/tessera/keys/statio.key`, which `march tessera provision` writes; `MARCH_STATIO_TESSERA_CLIENT_KEY_FILE` overrides the path. Tessera policy must grant `statio` app/read for the repository. Compose forwards no ambient GitHub token and sets no fallback. |
 
 ## Invariants
 

@@ -31,6 +31,8 @@ export interface RecordHatcheryDispatchInput {
   /** Deployment profile; `"unknown"` for ad-hoc dispatches with none. */
   readonly profile: string;
   readonly outcome: DispatchOutcome;
+  /** Bounded failure code (e.g. `tessera:unconfigured`), `"none"` on success. */
+  readonly reason?: string;
 }
 
 export interface RecordHatcheryRequestInput {
@@ -94,6 +96,30 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
         unit: "s",
       })
       .addCallback((result) => result.observe(process.uptime()));
+    // Readiness gauges (2026-11-22 spawn-credential outage). No `unit`: a
+    // `unit: "1"` gauge gets a `_ratio` suffix from the Prometheus bridge, and
+    // the dashboards query exactly `march_hatchery_ready{check}` and
+    // `march_hatchery_spawn_consecutive_failures`.
+    meter
+      .createObservableGauge("march.hatchery.ready", {
+        description: "1 when the readiness check passes (check=docker|castra|github), else 0",
+      })
+      .addCallback((result) => {
+        const sample = sampleReadiness();
+        if (!sample) return;
+        for (const check of ["docker", "castra", "github"] as const) {
+          const v = sample.checks[check];
+          if (v !== undefined) result.observe(v ? 1 : 0, { check });
+        }
+      });
+    meter
+      .createObservableGauge("march.hatchery.spawn.consecutive_failures", {
+        description: "Consecutive failed spawn jobs since the last success (resets on success)",
+      })
+      .addCallback((result) => {
+        const sample = sampleReadiness();
+        if (sample) result.observe(sample.consecutiveFailures);
+      });
   }
   return {
     requests: requestsCounter!,
@@ -102,6 +128,36 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
     heartbeat: heartbeatCounter!,
     dispatches: dispatchesCounter!,
   };
+}
+
+/** What the readiness gauges observe. A check left undefined is not yet known
+ *  (e.g. castra before the first `/readyz`) and is not emitted. */
+export interface HatcheryReadinessSample {
+  readonly checks: { readonly docker?: boolean; readonly castra?: boolean; readonly github?: boolean };
+  readonly consecutiveFailures: number;
+}
+
+let readinessSource: (() => HatcheryReadinessSample) | undefined;
+
+function sampleReadiness(): HatcheryReadinessSample | undefined {
+  try {
+    return readinessSource?.();
+  } catch {
+    return undefined; // telemetry must never throw into the SDK collect loop
+  }
+}
+
+/**
+ * Register the callback the readiness gauges read at collect time
+ * (`march_hatchery_ready{check}`, `march_hatchery_spawn_consecutive_failures`).
+ * Registering also creates the instruments when telemetry is on. No-op
+ * otherwise.
+ */
+export function registerHatcheryReadinessSource(source: () => HatcheryReadinessSample): void {
+  readinessSource = source;
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  hatcheryInstruments(otel.getMeter());
 }
 
 /** Record one HTTP request: count + duration tagged by route/method/outcome. No-op when disabled. */
@@ -134,6 +190,7 @@ export function recordHatcheryDispatch(input: RecordHatcheryDispatchInput): void
     task_type: input.taskType,
     profile: input.profile,
     outcome: input.outcome,
+    reason: input.reason ?? "none",
   });
 }
 

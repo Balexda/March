@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
 import { JobStore } from "./jobs.js";
-import { validateSpawnRequest } from "./routes.js";
+import { validateSpawnRequest, type ReadinessProbes } from "./routes.js";
 import type { FastifyInstance } from "fastify";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
 
@@ -32,8 +32,10 @@ function fakeResult(): HatcherySpawnResult {
   };
 }
 
-async function makeApp(): Promise<FastifyInstance> {
-  const store = new JobStore({ executor: async () => fakeResult() });
+async function makeApp(
+  readiness?: ReadinessProbes,
+  store: JobStore = new JobStore({ executor: async () => fakeResult() }),
+): Promise<FastifyInstance> {
   // Silent logger to avoid noisy/file output in tests.
   const logger = {
     info: () => {},
@@ -48,7 +50,7 @@ async function makeApp(): Promise<FastifyInstance> {
       return this;
     },
   } as never;
-  const { app } = await buildServer({ store, logger });
+  const { app } = await buildServer({ store, logger, readiness });
   return app;
 }
 
@@ -142,14 +144,68 @@ describe("routes", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("GET /readyz reports docker + castra readiness", async () => {
-    app = await makeApp();
+  it("GET /readyz reports docker + castra + github + spawns readiness", async () => {
+    // Fixed probes: the response shape, not the host's docker/castra/Tessera.
+    app = await makeApp({
+      docker: () => true,
+      castra: async () => true,
+      github: async () => ({ ok: true, source: "tessera", reason: null }),
+    });
     const res = await app.inject({ method: "GET", url: "/readyz" });
-    expect([200, 503]).toContain(res.statusCode);
-    const body = res.json() as { ready: boolean; docker: boolean; castra: boolean };
-    expect(typeof body.ready).toBe("boolean");
-    expect(typeof body.docker).toBe("boolean");
-    expect(typeof body.castra).toBe("boolean");
-    expect(body.ready).toBe(body.docker && body.castra);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ready: true, state: "ok", docker: true, castra: true });
+    expect(body.github).toEqual({ ok: true, source: "tessera", reason: null });
+    expect(body.spawns).toEqual(expect.objectContaining({ recent: 0, consecutive_failures: 0 }));
+    expect(Array.isArray(body.reasons)).toBe(true);
+  });
+
+  it("GET /readyz is 503 down with no GitHub credential (the tessera:unconfigured outage)", async () => {
+    app = await makeApp({ docker: () => true, castra: async () => true, env: { MARCH_TESSERA_URL: "http://tessera:9477" } });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      ready: false, state: "down", docker: true, castra: true,
+      github: { ok: false, source: "none", reason: "tessera:unconfigured" },
+    });
+  });
+
+  it("GET /readyz is 200 ok only when Tessera vends; /healthz stays pure liveness", async () => {
+    // Tessera vends: its provider is ok, and Hatchery's own key + app grant check out.
+    const fetchImpl = (async (url: string) => String(url).endsWith("/v1/client")
+      ? Response.json({ client: "hatchery", grants: [{ identity: "app", access: "read", repos: ["acme/widgets"] }] })
+      : Response.json({ providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }] })) as unknown as typeof fetch;
+    app = await makeApp({
+      docker: () => true, castra: async () => true, fetchImpl,
+      env: { MARCH_TESSERA_URL: "http://tessera:9477", MARCH_TESSERA_CLIENT_KEY: "k" },
+    });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ready: true, state: "ok", github: { ok: true, source: "tessera" }, reasons: [] });
+    const live = await app.inject({ method: "GET", url: "/healthz" });
+    expect(live.json()).toEqual({ status: "ok" });
+  });
+
+  it("GET /readyz is 503 down on the ambient-token fallback (not a supported credential path)", async () => {
+    app = await makeApp({
+      docker: () => true, castra: async () => true,
+      env: { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "t" },
+    });
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ state: "down", github: { ok: false, source: "fallback" } });
+  });
+
+  it("GET /readyz goes down after 5 consecutive spawn failures", async () => {
+    const store = new JobStore({ executor: async () => { throw new Error("Hatchery GitHub read failed (tessera:unconfigured)"); } });
+    app = await makeApp({ docker: () => true, castra: async () => true, github: async () => ({ ok: true, source: "tessera", reason: null }) }, store);
+    for (let i = 0; i < 5; i++) store.create({ prompt: "p", backend: "codex", repoPath: "/r" });
+    await vi.waitFor(() => expect(store.spawnWindow.consecutiveFailures).toBe(5));
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      state: "down",
+      spawns: { recent: 5, failed: 5, consecutive_failures: 5, last_error: "tessera:unconfigured", last_success_at: null },
+    });
   });
 });

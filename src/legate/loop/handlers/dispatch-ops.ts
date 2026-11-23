@@ -357,7 +357,7 @@ export async function recoverDispatch(
   deps.emitTransition({
     type: "slice.recovery.dispatched", sliceId, branch: dispatchBranch(item), ...dispatchActionKeyFields(item),
   });
-  deps.log("[" + ts + "] auto-recovery re-dispatch " + sliceId + " (attempt " + attempt + "/" + DISPATCH_RECOVERY_LIMIT + ")");
+  deps.log("[" + ts + "] auto-recovery re-dispatch " + sliceId + " (attempt " + attempt + ")");
 
   const out = await launchDispatch(state, ts, item, sliceId, deps);
 
@@ -367,7 +367,9 @@ export async function recoverDispatch(
   for (const a of out.actions) {
     if (a.action === "dispatch") {
       a.action = "dispatch-recovery";
-      a.detail = "auto-recovery attempt " + attempt + "/" + DISPATCH_RECOVERY_LIMIT + ": " + a.detail;
+      // No "/limit": recovery retries indefinitely with backoff since #460, and
+      // DISPATCH_RECOVERY_LIMIT is only the operator-ping threshold ("7/2" lied).
+      a.detail = "auto-recovery attempt " + attempt + ": " + a.detail;
       deps.emit({
         schema_version: 1,
         ts,

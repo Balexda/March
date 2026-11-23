@@ -218,15 +218,18 @@ review/override the host-specific vars at the top of
 Once the images are built (see below), **`march up`** brings the whole stack up
 with one command: it resolves a shared `CASTRA_API_TOKEN` (generated and
 persisted to `~/.march/castra-token` on first run, reused thereafter), then
-starts the services in dependency order (otel-lgtm → castra → hatchery → brood →
-herald → legate). It never builds images — if a locally-built `march-*` image is
+starts the services in dependency order (otel-lgtm → castra → tessera →
+hatchery → brood → herald → legate). Tessera is the stack's only GitHub
+credential source, so provision it first: `march tessera provision --from-gh`
+writes `~/.march/tessera` (client keys, policy and the operator token), and
+every consumer reads its key from there. It never builds images — if a locally-built `march-*` image is
 missing it aborts before starting anything and points you at `npm run
 build:images` (or the per-service `npm run build:<service>-image` scripts).
 Re-running is idempotent.
 
 To turn the stack off and recover the resources it holds, run **`march down`**:
 it stops the service containers in reverse dependency order (legate → herald →
-brood → hatchery → castra → otel-lgtm) and works even with `CASTRA_API_TOKEN`
+brood → hatchery → tessera → castra → otel-lgtm) and works even with `CASTRA_API_TOKEN`
 unset. State is preserved by default (named volumes, worktrees, branches,
 in-flight sessions), so a later bring-up resumes where it left off. Pass
 `--volumes` to also remove the named volumes (registries, Herald's event log,

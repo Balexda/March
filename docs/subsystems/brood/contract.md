@@ -62,8 +62,10 @@ is rendered and exits non-zero even on HTTP 200.
 The orphan PR lookup used by `POST /admin/sweep` and periodic reconciliation
 requests a Tessera app/read token scoped to the repository at the profile's
 GitHub origin. Brood retries a GitHub 401 once using a refreshed entitlement.
-The shared client's ambient-token fallback requires
-`MARCH_TESSERA_GH_TOKEN_FALLBACK=1`.
+The Brood compose file sets `MARCH_TESSERA_URL` and points
+`MARCH_TESSERA_CLIENT_KEY_FILE` at `~/.march/tessera/keys/brood.key`
+(`march tessera provision`). It forwards no ambient GitHub token, and the
+token fallback is off.
 
 ### `GET /sessions/:id/logs`
 

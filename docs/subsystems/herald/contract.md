@@ -64,8 +64,7 @@ Herald reads these settings:
 | Variable | Meaning |
 |----------|---------|
 | `MARCH_TESSERA_URL` | Tessera base URL. |
-| `MARCH_TESSERA_CLIENT_KEY` | Herald's own Tessera client key. The compose file forwards it from `MARCH_HERALD_TESSERA_CLIENT_KEY`. |
-| `MARCH_TESSERA_GH_TOKEN_FALLBACK` | The shared client's explicit migration fallback. When set to `1` and issuance fails, `GH_TOKEN` or `GITHUB_TOKEN` serves the same scoped call. The compose file defaults it to `1` until the fallback is removed. |
+| `MARCH_TESSERA_CLIENT_KEY_FILE` | File holding Herald's own Tessera client key (takes precedence over `MARCH_TESSERA_CLIENT_KEY`). The compose file defaults it to `~/.march/tessera/keys/herald.key`, which `march tessera provision` writes; `MARCH_HERALD_TESSERA_CLIENT_KEY_FILE` overrides the path. Compose forwards no `GH_TOKEN`/`GITHUB_TOKEN` and sets no fallback. |
 
 ### Profile merge policy
 

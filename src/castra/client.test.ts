@@ -330,3 +330,34 @@ describe("castra client — requests", () => {
     expect(await down.reachable()).toBe(false);
   });
 });
+
+describe("castra client — stale keep-alive sockets (spawn worker blocked in docker wait)", () => {
+  const transportError = (code: string) =>
+    Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`write ${code}`), { code }) });
+  const sendReq = { profile: "march", sessionId: "s1", prompt: "go" };
+
+  it("retries once on EPIPE (Castra never read the request) and succeeds", async () => {
+    const fetchImpl = vi.fn()
+      .mockRejectedValueOnce(transportError("EPIPE"))
+      .mockResolvedValueOnce(jsonResponse(202, { accepted: true }));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.sendPrompt(sendReq)).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after a second EPIPE and names the cause", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(transportError("EPIPE"));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.sendPrompt(sendReq)).rejects.toThrow(
+      "Could not reach Castra at http://castra:9264: fetch failed (EPIPE: write EPIPE)",
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry other transport failures (a send must never be typed twice)", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(transportError("ECONNRESET"));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.sendPrompt(sendReq)).rejects.toThrow("(ECONNRESET: write ECONNRESET)");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});

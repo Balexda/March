@@ -117,7 +117,10 @@ if (GH_TOKEN === "write-initial") {
   }));
 
   const list = vi.fn(async () => [...profiles]);
-  configureLoopRuntime({ profileClient: { list } as unknown as ProfileClient, intervalSeconds: 60, homeDir: root });
+  configureLoopRuntime({
+    profileClient: { list } as unknown as ProfileClient, intervalSeconds: 60, homeDir: root,
+    probeServices: async () => ({ hatchery: { state: "ok", checked_at: "T", reasons: [], remedy: null, detail: null } }),
+  });
   await runTickOnce();
   expect(requests).toEqual([
     { repo: "org/denied", identity: "app", access: "write", sliceId: "slice-denied" },
@@ -156,4 +159,6 @@ if (GH_TOKEN === "write-initial") {
   expect(process.env.GH_TOKEN).toBeUndefined();
   await runTickOnce();
   expect(list).toHaveBeenCalledTimes(2);
+  // The per-tick service probe result is cached on the snapshot for GET /status.
+  expect(getLoopSnapshot().services?.hatchery?.state).toBe("ok");
 });

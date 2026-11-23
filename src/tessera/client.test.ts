@@ -1,5 +1,8 @@
 /** @l1 @deterministic @ci */
 import http from "node:http";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TesseraClient, TesseraClientError, getGitHubToken } from "./client.js";
 import { recordTesseraFallback, tesseraConsumerService } from "../observability/tessera-client-metrics.js";
@@ -174,6 +177,30 @@ describe("Tessera client", () => {
     vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "two");
     await getGitHubToken(req);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+  it("convenience calls follow the key FILE's contents: provisioned late or replaced at the same path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tessera-keyfile-"));
+    try {
+      const keyFile = join(dir, "hatchery.key");
+      vi.stubEnv("MARCH_TESSERA_URL", "http://convenience-file"); vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "");
+      vi.stubEnv("MARCH_TESSERA_CLIENT_KEY_FILE", keyFile);
+      const auths: string[] = [];
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+        auths.push((init!.headers as Record<string, string>).authorization);
+        return Response.json(wire());
+      });
+      vi.stubGlobal("fetch", fetchImpl);
+      // First call before provisioning: fails closed.
+      await expect(getGitHubToken(req)).rejects.toMatchObject({ code: "unconfigured" });
+      await writeFile(keyFile, "KEY-ONE\n", { mode: 0o600 }); await chmod(keyFile, 0o600);
+      await getGitHubToken(req); await getGitHubToken(req);
+      expect(auths).toEqual(["Bearer KEY-ONE"]); // provisioned key picked up; cache kept while unchanged
+      await writeFile(keyFile, "KEY-TWO\n", { mode: 0o600 });
+      await getGitHubToken(req);
+      expect(auths).toEqual(["Bearer KEY-ONE", "Bearer KEY-TWO"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
   it.each([undefined, "0", "true", "1-user"])("never reads ambient tokens when disabled (%s) or for user", async flag => {
     let reads = 0;

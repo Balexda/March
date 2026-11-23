@@ -31,6 +31,14 @@ export interface MarchService {
   /** HTTP path that reports liveness (200 = reachable + healthy). */
   readonly healthPath: string;
   /**
+   * HTTP path reporting READINESS, probed after a healthy {@link healthPath}
+   * (liveness alone stayed green through the 2026-11-22 spawn-credential
+   * outage). Either a readyz body `{ state: "ok"|"degraded"|"down", reasons }`
+   * (hatchery) or Tessera's `/status` (`providers[]`: down unless the
+   * `github-app` provider is `ok`).
+   */
+  readonly readinessPath?: string;
+  /**
    * HTTP path gated by the shared `CASTRA_API_TOKEN`, used to verify the token
    * actually authenticates rather than 401/404-ing silently. Only set for
    * services that gate a route on the shared token (castra).
@@ -56,6 +64,8 @@ export function containerName(service: string): string {
  *   the other services join.
  * - `castra` is next because `hatchery` / `brood` / `herald` / `legate` all call
  *   it over HTTP.
+ * - `tessera` comes before `hatchery` / `herald` / `legate`: it is the only
+ *   GitHub credential source they use.
  *
  * Tear-down walks this list in reverse so the network owner (`otel-lgtm`) is
  * removed last, after every consumer is gone.
@@ -81,12 +91,24 @@ export const MARCH_SERVICES: readonly MarchService[] = [
     tokenGatedPath: "/v1/sessions",
   },
   {
+    name: "tessera",
+    compose: "tessera.docker-compose.yml",
+    image: "march-tessera:latest",
+    // The tessera compose publishes 127.0.0.1:${MARCH_TESSERA_PORT:-9477}.
+    port: 9477,
+    portEnv: "MARCH_TESSERA_PORT",
+    healthPath: "/healthz",
+    // Running is not enough: it must be able to vend GitHub credentials.
+    readinessPath: "/status",
+  },
+  {
     name: "hatchery",
     compose: "hatchery.docker-compose.yml",
     image: "march-hatchery:latest",
     port: 8080,
     healthPath: "/healthz",
-    dependsOn: ["castra"],
+    readinessPath: "/readyz",
+    dependsOn: ["castra", "tessera"],
   },
   {
     name: "brood",
@@ -102,7 +124,7 @@ export const MARCH_SERVICES: readonly MarchService[] = [
     image: "march-herald:latest",
     port: 8818,
     healthPath: "/healthz",
-    dependsOn: ["castra"],
+    dependsOn: ["castra", "tessera"],
   },
   {
     name: "legate",
@@ -110,7 +132,7 @@ export const MARCH_SERVICES: readonly MarchService[] = [
     image: "march-legate:latest",
     port: 8787,
     healthPath: "/healthz",
-    dependsOn: ["castra", "herald", "brood", "hatchery"],
+    dependsOn: ["castra", "tessera", "herald", "brood", "hatchery"],
   },
 ];
 
