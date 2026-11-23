@@ -366,7 +366,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
   });
 
   it("GET /sessions/:id degrades liveness failures and emits an errored span", async () => {
-    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const created: Span[] = [];
     const tracer = getActiveOtel().getTracer();
     const real = tracer.startSpan.bind(tracer);
@@ -423,6 +423,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       });
     } finally {
       vi.restoreAllMocks();
+      // initOtel({}) only swaps in the no-op handle; dispose the real
+      // providers (and the metric reader's export interval) first.
+      await otel.shutdown();
       initOtel({});
     }
   });
@@ -1132,7 +1135,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
   });
 
   it("POST /sessions emits a brood.register span nested under the inbound traceparent", async () => {
-    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const created: Span[] = [];
     const tracer = getActiveOtel().getTracer();
     const real = tracer.startSpan.bind(tracer);
@@ -1168,6 +1171,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       });
     } finally {
       vi.restoreAllMocks();
+      // initOtel({}) only swaps in the no-op handle; dispose the real
+      // providers (and the metric reader's export interval) first.
+      await otel.shutdown();
       initOtel({});
     }
   });
