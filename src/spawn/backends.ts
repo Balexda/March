@@ -51,12 +51,14 @@ function composeGitScaffoldedEntrypoint(
   // so a stop before the exec ends the inner shell (default handling) and one
   // after reaches the agent. A compound command (e.g. a credential prelude
   // chained with `&&`) cannot be exec'd, so the inner shell traps TERM with
-  // `exit 143`: dash runs a trap only between commands, so a stop before the
+  // `exit $?`: dash runs a trap only between commands, so a stop before the
   // agent starts exits before launching it, and a stop while the agent runs
   // reaches the agent through the group and is acted on only after the agent
-  // exits. The inner status is then 143 rather than the agent's own code.
+  // exits. `$?` in the trap is the last command's status, so the agent's own
+  // code (e.g. 137 if it was killed) is what the wait sees; a prelude that
+  // finished with 0 maps to 143 below because a stop was requested.
   const agentScript = options.compound
-    ? `trap 'exit 143' TERM; ${agentCommand}`
+    ? `trap 'exit $?' TERM; ${agentCommand}`
     : `exec ${agentCommand}`;
   const script = [
     `cd ${CONTAINER_WORKDIR}`,

@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { IN_SPAWN_EMITTER_PATH, wrapEntrypointWithEmitter } from "../observability/in-spawn-emitter.js";
-import { claudeCodeBackend, CONTAINER_WORKDIR, PATCH_SENTINEL } from "./backends.js";
+import { claudeCodeBackend, codexBackend, CONTAINER_WORKDIR, PATCH_SENTINEL } from "./backends.js";
 
 const hasSetsid = spawnSync("sh", ["-c", "command -v setsid"]).status === 0;
 interface Started {
@@ -109,6 +109,12 @@ interface SetupOptions {
   readonly prefix?: string;
   /** Delay before the real `setsid` runs, widening the pre-group window. */
   readonly setsidDelay?: number;
+  /**
+   * Which backend's entrypoint to run. `codex` is the compound command (a
+   * credential copy chained before the agent), with its credential paths
+   * moved under the test root.
+   */
+  readonly backend?: "claude" | "codex";
 }
 
 const realSetsid = spawnSync("sh", ["-c", "command -v setsid"], { encoding: "utf8" }).stdout.trim();
@@ -121,7 +127,8 @@ function setup(agentScript: string, options: SetupOptions = {}) {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(workspace, "README.md"), "base\n");
   fs.writeFileSync(path.join(root, "prompt.txt"), "do the thing\n");
-  fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\n${agentScript}\n`, { mode: 0o755 });
+  const agentName = options.backend === "codex" ? "codex" : "claude";
+  fs.writeFileSync(path.join(bin, agentName), `#!/bin/sh\n${agentScript}\n`, { mode: 0o755 });
   if (options.setsidDelay !== undefined) {
     fs.writeFileSync(
       path.join(bin, "setsid"),
@@ -129,7 +136,15 @@ function setup(agentScript: string, options: SetupOptions = {}) {
       { mode: 0o755 },
     );
   }
-  const [, , script] = claudeCodeBackend.buildEntrypoint(path.join(root, "prompt.txt"));
+  let [, , script] = (options.backend === "codex" ? codexBackend : claudeCodeBackend)
+    .buildEntrypoint(path.join(root, "prompt.txt"));
+  if (options.backend === "codex") {
+    fs.mkdirSync(path.join(root, "codex-auth"));
+    fs.mkdirSync(path.join(root, "codex-home"));
+    script = script
+      .replaceAll("/march/codex-auth", path.join(root, "codex-auth"))
+      .replaceAll("/march/codex-home", path.join(root, "codex-home"));
+  }
   const scaffold = ["sh", "-c", script.replace(`cd ${CONTAINER_WORKDIR}`, `cd '${workspace}'`)];
   const [shell, flag, wrapped] = options.telemetry ? wrapEntrypointWithEmitter(scaffold) : scaffold;
   // Record the status the wrapper hands to the span emitter instead of running it.
@@ -303,6 +318,59 @@ describe.skipIf(!hasSetsid).each([
     expect(await exited).toEqual({ code: 0, signal: null });
     expect(stdout()).toContain(`${PATCH_SENTINEL}:`);
     expect(emittedStatus(root)).toBe(telemetry ? "0" : undefined);
+  }, 20_000);
+});
+
+describe.skipIf(!hasSetsid).each([
+  { label: "bare", telemetry: false },
+  { label: "telemetry-wrapped", telemetry: true },
+])("codex compound entrypoint signal handling ($label)", ({ telemetry }) => {
+  const publishPid = `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`;
+
+  it("reports a codex agent killed during the stop as 137, not a graceful 143", async () => {
+    const { root, child, exited } = setup([
+      `trap 'sleep 0.1; kill -9 $$' TERM`,
+      publishPid,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"), { telemetry, backend: "codex" });
+    await waitForPid(path.join(root, "agent.pid"));
+
+    child.kill("SIGTERM");
+
+    expect(await exited).toEqual({ code: 137, signal: null });
+    if (telemetry) expect(emittedStatus(root)).toBe("137");
+  }, 20_000);
+
+  it("keeps the codex agent's own exit status after a stop", async () => {
+    const { root, child, exited } = setup([
+      `trap 'exit 42' TERM`,
+      publishPid,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"), { telemetry, backend: "codex" });
+    await waitForPid(path.join(root, "agent.pid"));
+
+    child.kill("SIGTERM");
+
+    expect(await exited).toEqual({ code: 42, signal: null });
+  }, 20_000);
+
+  it("delivers a stop that arrives before the codex process group exists", async () => {
+    const { root, child, exited } = setup([
+      publishPid,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"), { telemetry, backend: "codex", setsidDelay: 0.5 });
+    await waitForFile(path.join(root, "setsid.waiting"));
+
+    child.kill("SIGTERM");
+    const result = await Promise.race([
+      exited,
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 8_000)),
+    ]);
+
+    // Codex may or may not have started when the retried stop lands; either
+    // way the stop takes effect and nothing survives.
+    expect(result).toEqual({ code: 143, signal: null });
+    expect(runPids(root)).toEqual([]);
   }, 20_000);
 });
 
