@@ -31,12 +31,23 @@ Other optional fields are the strings `parentId`, `containerId`,
 `failureReason`, a numeric `exitCode`, and the `extractionResult` object
 described below. Unknown keys are ignored.
 
-Registration does not check the ID's characters, but teardown does. Any
-session with a container to tear down (every spawn, and other kinds with a
-tracked `containerId`) needs an ID matching
-`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`. For any other ID, teardown fails its `stop`
-or `container` step on every attempt, and the session stays `tearing-down`.
-Retrying does not fix this, so register such sessions with a matching ID.
+Registration does not check the ID's characters, but teardown does. The
+checks apply to the teardown's primary record, not to the addressed row. That
+is the owning spawn when the target is a spawn or a steward whose `parentId`
+names a spawn, and the target row otherwise. A steward's own ID is therefore
+never checked when it has a spawn parent. Teardown checks the primary ID twice.
+
+1. Archive: every primary ID must be a single path component under the Brood
+   archive directory. That rules out `/`, `.`, and `..`. Any other ID fails
+   the `archive` step and defers every later step.
+2. Compute: a primary with a container to tear down (every spawn, and other
+   kinds with a tracked `containerId`) must also match
+   `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`. Any other ID fails its `stop` or
+   `container` step.
+
+Either failure repeats on every attempt, and the session stays
+`tearing-down`. Retrying does not fix this, so register primary IDs that
+pass both checks.
 
 Registration upserts by ID and returns 201 with a `SessionRecord`. New records
 default to `created`. Re-registration preserves the original kind and creation
