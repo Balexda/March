@@ -72,6 +72,17 @@ function alive(pid: number): boolean {
   }
 }
 
+// An exited agent orphaned by its wrapper stays visible as a zombie until init
+// reaps it, so poll for disappearance instead of sampling once.
+async function goneWithin(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (alive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return true;
+}
+
 describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", () => {
   it("forwards SIGTERM to the agent and exits without emitting a patch", async () => {
     const { root, child, exited, stdout } = setup([
@@ -87,7 +98,7 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
     expect(result).toEqual({ code: 143, signal: null });
     expect(stdout()).toContain("agent-got-term");
     expect(stdout()).not.toContain(PATCH_SENTINEL);
-    expect(alive(agentPid)).toBe(false);
+    expect(await goneWithin(agentPid)).toBe(true);
   }, 20_000);
 
   it("stops an agent with default SIGTERM handling and its descendants", async () => {
@@ -103,9 +114,8 @@ describe.skipIf(!hasSetsid)("git-scaffolded spawn entrypoint signal handling", (
     const result = await exited;
 
     expect(result.code).not.toBe(0);
-    await new Promise((r) => setTimeout(r, 100));
-    expect(alive(agentPid)).toBe(false);
-    expect(alive(grandchildPid)).toBe(false);
+    expect(await goneWithin(agentPid)).toBe(true);
+    expect(await goneWithin(grandchildPid)).toBe(true);
   }, 20_000);
 
   it("still emits the patch when the agent finishes normally", async () => {
