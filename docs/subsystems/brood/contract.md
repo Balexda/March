@@ -50,6 +50,10 @@ The shared client's ambient-token fallback requires
 
 `GET /sessions/:id/logs` returns logs for one tracked `SessionRecord`.
 
+`march brood logs <id>` calls this endpoint through `BroodClient.logs(id)`
+and writes the returned text verbatim to stdout. Service and connection
+errors go to stderr and exit non-zero. Brood selects and reads the log source.
+
 | Condition | Response |
 |-----------|----------|
 | Live container logs are readable for a container-backed `spawn` or `legate` row | `200 text/plain` with `X-March-Log-Source: live-container` |

@@ -119,21 +119,27 @@ describe("BroodClient", () => {
     expect(sessions.map((s) => s.id)).toEqual(["a", "b"]);
   });
 
-  it("logs returns text content and the selected source", async () => {
-    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
-      textResponse(200, "hello\n", { "x-march-log-source": "archive" }),
-    );
-    const client = new BroodClient({
-      baseUrl: "http://brood",
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+  it.each(["live-container", "archive", "castra-session"])(
+    "logs returns text content and the %s source",
+    async (kind) => {
+      const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+        textResponse(200, "hello\n", { "x-march-log-source": kind }),
+      );
+      const client = new BroodClient({
+        baseUrl: "http://brood",
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
 
-    await expect(client.logs("s1")).resolves.toEqual({
-      content: "hello\n",
-      source: { kind: "archive" },
-    });
-    expect(fetchImpl.mock.calls[0][0]).toBe("http://brood/sessions/s1/logs");
-  });
+      await expect(client.logs("s/1")).resolves.toEqual({
+        content: "hello\n",
+        source: { kind },
+      });
+      expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(
+        "http://brood/sessions/s%2F1/logs",
+        expect.objectContaining({ method: "GET" }),
+      );
+    },
+  );
 
   it("logs maps not-found and unavailable service errors", async () => {
     const missing = new BroodClient({
