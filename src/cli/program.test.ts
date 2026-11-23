@@ -247,9 +247,14 @@ describe("march CLI", () => {
     // Permit loading the CLI and its dependencies while denying access to
     // local archive, registry and worktree files or child processes such as Docker and git.
     const packageRoot = path.resolve(path.dirname(CLI_PATH), "..");
+    // Node 22.13+/23.5+ stabilised the permission model as `--permission`, and
+    // Node 24 removed `--experimental-permission`; Node 20 only knows the old flag.
+    const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
+      ? "--permission"
+      : "--experimental-permission";
     const readLogs = (url: string, id: string) =>
       execFileAsync(process.execPath, [
-        "--experimental-permission",
+        permissionFlag,
         "--disable-warning=ExperimentalWarning",
         `--allow-fs-read=${path.dirname(CLI_PATH)}`,
         `--allow-fs-read=${path.join(packageRoot, "node_modules")}`,
