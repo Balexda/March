@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createCastraClientFromEnv, type CastraClient } from "../../castra/client.js";
+import { startBroodSpan } from "../../observability/brood-trace.js";
 import { readContainerLogsAsync } from "./docker-logs.js";
 import { broodDir } from "./store.js";
 import type { SessionLogResult, SessionRecord } from "./types.js";
@@ -20,6 +22,7 @@ export class BroodLogUnavailableError extends Error {
 }
 
 export interface LogReaderDeps {
+  readonly castra?: Pick<CastraClient, "sessionOutput">;
   readonly readContainerLogs?: (
     containerId: string,
   ) => string | Promise<string>;
@@ -119,8 +122,37 @@ export async function readSessionLogs(
 ): Promise<SessionLogResult> {
   const d = resolveDeps(deps);
   let liveFailure: string | undefined;
+  const liveSource =
+    record.kind === "steward" ? "Castra session output" : "Live container logs";
 
-  if (record.kind !== "steward" && record.containerId) {
+  if (
+    record.kind === "steward" &&
+    (record.status === "created" || record.status === "running") &&
+    !record.torndownAt &&
+    record.agentDeckSessionId &&
+    record.profile
+  ) {
+    const span = startBroodSpan({ name: "brood.logs.castra", key: record.id });
+    try {
+      const castra = deps.castra ?? createCastraClientFromEnv();
+      const content = await castra.sessionOutput(
+        record.profile,
+        record.agentDeckSessionId,
+      );
+      span.end();
+      return {
+        source: {
+          kind: "castra-session",
+          agentDeckSessionId: record.agentDeckSessionId,
+          available: true,
+        },
+        content,
+      };
+    } catch (err) {
+      span.end({ error: true });
+      liveFailure = errorMessage(err);
+    }
+  } else if (record.kind !== "steward" && record.containerId) {
     try {
       return {
         source: {
@@ -141,13 +173,13 @@ export async function readSessionLogs(
   // A live read that already failed owns the outcome: an unreadable archive is
   // just another archive miss, so the upstream failure keeps both the
   // contracted 502 status and its diagnostic context.
-  if (liveFailure) {
+  if (liveFailure !== undefined) {
     const archiveDetail =
       archive.kind === "failed"
         ? ` (archived log unreadable: ${archive.detail})`
         : "";
     throw new BroodLogUnavailableError(
-      `Live container logs for session "${record.id}" are unavailable and no archived log exists${archiveDetail}: ${liveFailure}`,
+      `${liveSource} for session "${record.id}" could not be read and no archived log exists${archiveDetail}: ${liveFailure}`,
       "live-source-failed",
     );
   }
@@ -159,8 +191,10 @@ export async function readSessionLogs(
     );
   }
 
+  const missingSource =
+    record.kind === "steward" ? "live Castra session output" : "live container logs";
   throw new BroodLogUnavailableError(
-    `Logs for session "${record.id}" are unavailable: no live container logs or archived log exists.`,
+    `Logs for session "${record.id}" are unavailable: no ${missingSource} or archived log exists.`,
     "no-source",
   );
 }

@@ -53,21 +53,24 @@ The shared client's ambient-token fallback requires
 | Condition | Response |
 |-----------|----------|
 | Live container logs are readable for a container-backed `spawn` or `legate` row | `200 text/plain` with `X-March-Log-Source: live-container` |
-| Live container logs are missing or unreadable and the session's archived `container.log` is readable | `200 text/plain` with `X-March-Log-Source: archive` |
+| Castra output is readable for a live `steward` row with a tracked agent-deck session id and profile | `200 text/plain` with `X-March-Log-Source: castra-session` |
+| The live source is missing or unreadable and the archived `container.log` is readable | `200 text/plain` with `X-March-Log-Source: archive` |
 | The id is not tracked | `404 { "error": "No session with id \"<id>\"." }` |
 | No live source and no archived `container.log` exist | `409 { "error": "<message>" }` |
 | No live source was available and the archived `container.log` is unreadable | `409 { "error": "<message>" }` |
-| The live container read fails and no readable archive exists | `502 { "error": "<message>" }` |
+| The Docker or Castra read fails and no readable archive exists | `502 { "error": "<message>" }` |
 
 The live read runs `docker logs` asynchronously, so it never blocks other
 Brood requests. It returns the container's stdout and stderr in the order they
 arrived. A read that exits non-zero, runs past 15 seconds, or exceeds 16 MiB
 counts as a live-source failure.
 
-The endpoint is read-only. It may call the Docker log read path and read the
-archived `container.log`, but it must not register, update, delete, tear down,
-prune, remove, create, or repair registry rows, Docker resources, archives,
-worktrees, or branches.
+For stewards, Brood reads output from Castra using the tracked profile and
+agent-deck session id. On an archive fallback, Brood checks the steward's
+archive and then the parent spawn's archive.
+
+The endpoint only reads registry rows, Docker logs, Castra session output,
+and archived `container.log` files.
 
 The archived log for a session is read from
 `<home>/.march/brood/archive/<id>/container.log`. Teardown archives a
@@ -118,4 +121,4 @@ provides a slice ID.
 |-----------|-------|----------|---------------------|
 | Unknown session id | `GET /sessions/:id/logs` | `404` with `{ "error": string }` | No tracked row exists for the id. |
 | No live source and no readable archive | `GET /sessions/:id/logs` | `409` with `{ "error": string }` | The session is tracked, but logs cannot be selected. |
-| Live container read fails and no readable archive exists | `GET /sessions/:id/logs` | `502` with `{ "error": string }` | The service reports upstream live-log read context and does not attempt local mutation. The live-log read is time-bounded so an unresponsive Docker daemon cannot stall the service. |
+| Docker or Castra read fails and no readable archive exists | `GET /sessions/:id/logs` | `502` with `{ "error": string }` | The service reports the upstream read failure. Both live reads are time-bounded. |

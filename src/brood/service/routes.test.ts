@@ -4,6 +4,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
+import { CastraClient } from "../../castra/client.js";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { classifyRequestLog, deriveBroodReadView, registerRoutes } from "./routes.js";
 import {
@@ -328,6 +329,75 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(res.headers["x-march-log-source"]).toBe("live-container");
     expect(res.body).toBe("logs from c1\n");
     expect(store.get("s1")).toEqual(before);
+  });
+
+  it.each([
+    {
+      castraStatus: 200,
+      archived: true,
+      status: 200,
+      source: "castra-session",
+      content: "steward output\n",
+    },
+    {
+      castraStatus: 404,
+      archived: true,
+      status: 200,
+      source: "archive",
+      content: "archived output\n",
+    },
+    {
+      castraStatus: 404,
+      archived: false,
+      status: 502,
+      source: undefined,
+      content: "session unavailable",
+    },
+  ])("GET steward logs with Castra status $castraStatus and archive $archived", async ({
+    castraStatus, archived, status, source, content,
+  }) => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      const body = castraStatus === 200
+        ? { output: "steward output\n" }
+        : { error: { code: "not_found", message: "session unavailable" } };
+      return Response.json(body, { status: castraStatus });
+    });
+    const castra = new CastraClient({ baseUrl: "http://castra.test", fetchImpl });
+    const readContainerLogs = vi.fn(() => "unexpected Docker output");
+    const archiveExists = vi.fn(() => archived);
+    const readArchive = vi.fn(() => "archived output\n");
+    const teardown = vi.fn();
+    const { app, store } = await buildApp(teardown, undefined, {
+      logReader: { castra, readContainerLogs, archiveExists, readArchive },
+    });
+    store.register({
+      id: "steward-row",
+      kind: "steward",
+      status: "running",
+      agentDeckSessionId: "castra-id",
+      profile: "tracked-profile",
+    });
+    const before = store.get("steward-row");
+
+    const res = await app.inject({ method: "GET", url: "/sessions/steward-row/logs" });
+
+    expect(res.statusCode).toBe(status);
+    expect(res.headers["x-march-log-source"]).toBe(source);
+    if (status === 200) {
+      expect(res.headers["content-type"]).toContain("text/plain");
+      expect(res.body).toBe(content);
+    } else {
+      expect(res.json().error).toContain(content);
+    }
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(
+      "http://castra.test/v1/sessions/castra-id/output?profile=tracked-profile",
+      expect.objectContaining({ method: "GET", body: undefined }),
+    );
+    expect(readContainerLogs).not.toHaveBeenCalled();
+    expect(archiveExists).toHaveBeenCalledTimes(castraStatus === 200 ? 0 : 1);
+    expect(readArchive).toHaveBeenCalledTimes(source === "archive" ? 1 : 0);
+    expect(teardown).not.toHaveBeenCalled();
+    expect(store.get("steward-row")).toEqual(before);
   });
 
   it("GET /sessions/:id/logs falls back to archive and distinguishes errors", async () => {

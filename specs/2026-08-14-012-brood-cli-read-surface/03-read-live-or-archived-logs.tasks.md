@@ -65,7 +65,7 @@
 
 ### Tasks
 
-- [ ] **Add Castra session output as a log source**
+- [x] **Add Castra session output as a log source**
 
   Extend the Brood service log read module to resolve live `steward` rows through `CastraClient.sessionOutput` using the tracked `agentDeckSessionId` and profile. Preserve archive fallback and unavailable-log behavior when Castra output cannot be read.
 
@@ -76,7 +76,7 @@
   - Castra read failure without archive produces the contracted unavailable-log outcome
   - Castra reads do not mutate Castra session state for AS 3.5
 
-- [ ] **Cover steward log routing in service tests**
+- [x] **Cover steward log routing in service tests**
 
   Extend Brood route and log-reader coverage for the steward-specific source path. Use injected dependencies so tests verify source choice, fallback behavior, and read-only interaction without requiring a live Castra process.
 
