@@ -25,19 +25,56 @@ const started: Started[] = [];
 // A regression could leave the wrapper and the agent's separate process group
 // running, so kill both and wait for the wrapper before removing the files.
 afterEach(async () => {
-  for (const { root, child, exited } of started.splice(0)) {
-    for (const name of ["agent.pid", "grandchild.pid"]) {
-      const pid = readPid(path.join(root, name));
-      if (pid === undefined) continue;
-      const pgid = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim());
-      if (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid) signal(-pgid);
-      signal(pid);
-    }
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await exited;
-    fs.rmSync(root, { recursive: true, force: true });
+  for (const run of started.splice(0)) {
+    await reap(run);
+    fs.rmSync(run.root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Kill every process of one run, found by its unique `MARCH_TEST_ROOT` in
+ * `/proc/<pid>/environ` (inherited across `setsid`), so cleanup does not
+ * depend on the agent publishing its pid. Published pid files are a fallback
+ * where `/proc` is unavailable.
+ */
+async function reap({ root, child, exited }: Started): Promise<void> {
+  const pids = new Set(runPids(root));
+  for (const name of ["agent.pid", "grandchild.pid"]) {
+    const pid = readPid(path.join(root, name));
+    if (pid !== undefined) pids.add(pid);
+  }
+  for (const pid of pids) {
+    const pgid = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim());
+    if (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid && pgid !== processGroup()) signal(-pgid);
+    signal(pid);
+  }
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  await exited;
+}
+
+function runPids(root: string): number[] {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync("/proc");
+  } catch {
+    return [];
+  }
+  const marker = `\0MARCH_TEST_ROOT=${root}\0`;
+  const pids: number[] = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      if (`\0${fs.readFileSync(`/proc/${entry}/environ`, "latin1")}`.includes(marker)) pids.push(Number(entry));
+    } catch {
+      // Exited or not readable.
+    }
+  }
+  return pids;
+}
+
+function processGroup(): number {
+  return Number(spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }).stdout.trim());
+}
 
 function signal(target: number): void {
   try {
@@ -97,8 +134,9 @@ function setup(agentScript: string, options: { readonly telemetry?: boolean } = 
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.on("close", (code, signal) => resolve({ code, signal }));
   });
-  started.push({ root, child, exited });
-  return { root, child, exited, stdout: () => stdout };
+  const run: Started = { root, child, exited };
+  started.push(run);
+  return { root, child, exited, run, stdout: () => stdout };
 }
 
 // Pid files are published by rename, so a present file holds a complete pid.
@@ -197,5 +235,27 @@ describe.skipIf(!hasSetsid).each([
     expect(await exited).toEqual({ code: 0, signal: null });
     expect(stdout()).toContain(`${PATCH_SENTINEL}:`);
     expect(emittedStatus(root)).toBe(telemetry ? "0" : undefined);
+  }, 20_000);
+});
+
+describe.skipIf(!hasSetsid || !fs.existsSync("/proc/self/environ"))("signal test cleanup", () => {
+  it("reaps an agent that never publishes its pid", async () => {
+    const { root, run } = setup([
+      `echo started > "$MARCH_TEST_ROOT/agent.started"`,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"));
+    const deadline = Date.now() + 10_000;
+    while (!fs.existsSync(path.join(root, "agent.started"))) {
+      if (Date.now() >= deadline) throw new Error("agent did not start");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(readPid(path.join(root, "agent.pid"))).toBeUndefined();
+    const before = runPids(root);
+    expect(before.length).toBeGreaterThan(1);
+
+    await reap(run);
+
+    for (const pid of before) expect(await goneWithin(pid)).toBe(true);
+    expect(runPids(root)).toEqual([]);
   }, 20_000);
 });
