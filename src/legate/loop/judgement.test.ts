@@ -85,4 +85,15 @@ describe("judgementErrorCode", () => {
     expect(judgementErrorCode("steward_awaiting_input", "Error:\ndocker down")).toBeUndefined();
     expect(judgementErrorCode("r", undefined)).toBeUndefined();
   });
+
+  it("takes the Hatchery GitHub code from the Error: block only", () => {
+    expect(judgementErrorCode("hatchery_dispatch_failed",
+      "Hatchery dispatch for x failed and was escalated.\n\nError:\nHatchery GitHub read failed (tessera:unconfigured)")).toBe("tessera:unconfigured");
+    // Guidance quoting the phrase does not override the real cause in the Error: block.
+    expect(judgementErrorCode("hatchery_dispatch_failed",
+      "Error:\nspawn worker exited with code 1\n\nIf you see 'Hatchery GitHub read failed (tessera:unauthorized)', reprovision.")).toBe("worker_exit");
+    // No Error: block, or another reason: nothing.
+    expect(judgementErrorCode("hatchery_dispatch_failed", "Hatchery GitHub read failed (tessera:unconfigured)")).toBeUndefined();
+    expect(judgementErrorCode("steward_awaiting_input", "Error:\nHatchery GitHub read failed (tessera:unconfigured)")).toBeUndefined();
+  });
 });

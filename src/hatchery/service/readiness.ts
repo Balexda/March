@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { TesseraClient, TesseraClientError } from "../../tessera/client.js";
 import { resolveTesseraConfig } from "../../tessera/config.js";
 
 /**
@@ -16,7 +18,8 @@ export interface GitHubCredentialCheck {
   readonly ok: boolean;
   readonly source: GitHubCredentialSource;
   /** Why no credential is available (`tessera:unconfigured`, `tessera:unreachable`,
-   *  `tessera:provider_<state>`, or {@link FALLBACK_UNSUPPORTED_REASON}), else null. */
+   *  `tessera:provider_<state>`, `tessera:unauthorized`, `tessera:policy_denied`,
+   *  `tessera:invalid_response`, or {@link FALLBACK_UNSUPPORTED_REASON}), else null. */
   readonly reason: string | null;
 }
 
@@ -66,10 +69,12 @@ export interface GitHubCredentialCheckerOptions {
 /**
  * Can a spawn get a GitHub app/read credential? Tessera is the ONLY supported
  * source: `ok` requires Tessera to be configured (URL + client key), reachable,
- * and its `github-app` provider to report `ok`. The ambient-token fallback is
- * reported (`source: "fallback"`) but is NOT ok — the stack is down without
- * Tessera. The `/status` probe is unauthenticated, times out quickly and is
- * cached for a few seconds, so `/readyz` stays cheap and never hangs.
+ * its `github-app` provider to report `ok`, AND Hatchery's own key to be
+ * accepted with an app grant of read (or write) access — checked with the
+ * authenticated `GET /v1/client`, which mints nothing. The ambient-token
+ * fallback is reported (`source: "fallback"`) but is NOT ok — the stack is down
+ * without Tessera. Both probes time out quickly and the answer is cached for a
+ * few seconds, so `/readyz` stays cheap and never hangs.
  */
 export class GitHubCredentialChecker {
   private readonly env: NodeJS.ProcessEnv;
@@ -109,10 +114,26 @@ export class GitHubCredentialChecker {
         : { ok: false, source: "none", reason: "tessera:unconfigured" };
     }
     const at = this.now();
-    if (this.cached && this.cached.key === config.baseUrl && at - this.cached.at < this.ttlMs) return this.cached.result;
-    const result = await this.probe(config.baseUrl);
-    this.cached = { key: config.baseUrl, at, result };
+    // Keyed on the key's digest too, so a rotated or revoked key is re-checked at once.
+    const key = `${config.baseUrl}\n${createHash("sha256").update(config.clientKey).digest("hex")}`;
+    if (this.cached && this.cached.key === key && at - this.cached.at < this.ttlMs) return this.cached.result;
+    const [provider, access] = await Promise.all([this.probe(config.baseUrl), this.probeAccess(config)]);
+    const result = provider.ok ? access : provider;
+    this.cached = { key, at, result };
     return result;
+  }
+
+  /** Hatchery's own key and policy: accepted, with an app grant that can read. Fails closed. */
+  private async probeAccess(config: { baseUrl: string; clientKey: string }): Promise<GitHubCredentialCheck> {
+    try {
+      const info = await new TesseraClient({ baseUrl: config.baseUrl, clientKey: config.clientKey, env: {}, fetchImpl: this.fetchImpl })
+        .client({ timeoutMs: this.timeoutMs });
+      const canRead = info.grants.some((g) => g.identity === "app" && (g.access === "read" || g.access === "write") && g.repos.length > 0);
+      return canRead ? { ok: true, source: "tessera", reason: null } : { ok: false, source: "tessera", reason: "tessera:policy_denied" };
+    } catch (error) {
+      const code = error instanceof TesseraClientError && /^[a-z_]{1,32}$/.test(error.code) ? error.code : "unreachable";
+      return { ok: false, source: "tessera", reason: `tessera:${code === "policy_denied" ? "policy_denied" : code}` };
+    }
   }
 
   private async probe(baseUrl: string): Promise<GitHubCredentialCheck> {

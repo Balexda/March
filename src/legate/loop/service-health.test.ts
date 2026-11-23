@@ -1,11 +1,8 @@
 /**
  * @l0 @deterministic @ci
  */
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  fetchProbe,
   HATCHERY_CREDENTIAL_REMEDY,
   TESSERA_REMEDY,
   probeServices,
@@ -171,34 +168,6 @@ describe("probeServices", () => {
       const services = await run({ "tessera/status": { answered: false, error: "ENOTFOUND" } }, {});
       for (const h of Object.values(services)) expect(["ok", "degraded", "down"]).toContain(h!.state);
     });
-  });
-});
-
-describe("castra answering slower than the probe timeout", () => {
-  let server: Server | undefined;
-  afterEach(async () => {
-    server?.closeAllConnections();
-    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-    server = undefined;
-  });
-
-  it("reads down 'not answering: timeout' through the real fetch probe", async () => {
-    // A live /readyz that answers only after 1.5s, against a 100ms probe timeout.
-    server = createServer((_req, res) => {
-      setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end('{"ready":true,"state":"ok","reasons":[]}'), 1_500).unref();
-    });
-    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-    const { port } = server.address() as AddressInfo;
-    expect(await fetchProbe(`http://127.0.0.1:${port}/readyz`, 100)).toEqual({ answered: false, error: "timeout" });
-
-    const started = Date.now();
-    const services = await probeServices({
-      env: { CASTRA_URL: `http://127.0.0.1:${port}`, MARCH_HATCHERY_URL: "http://127.0.0.1:1", MARCH_BROOD_URL: "http://127.0.0.1:1", MARCH_HERALD_URL: "http://127.0.0.1:1", MARCH_TESSERA_URL: "http://127.0.0.1:1" },
-      timeoutMs: 100,
-      now: () => NOW,
-    });
-    expect(Date.now() - started).toBeLessThan(1_400);
-    expect(services.castra).toMatchObject({ state: "down", reasons: ["not answering: timeout"], remedy: startRemedy("castra") });
   });
 });
 

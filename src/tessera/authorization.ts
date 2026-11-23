@@ -107,5 +107,12 @@ export async function loadTesseraAuthorization(
       });
       if (!allowed) throw new TesseraError("policy_denied");
     },
+    grants(caller) {
+      return (rules.get(caller) ?? []).flatMap(rule => rule.identities.map(identity => ({
+        identity: identity as "app" | "user",
+        access: rule.maxAccess,
+        repos: identity === "app" ? [...rule.repos].sort() : [],
+      })));
+    },
   };
 }

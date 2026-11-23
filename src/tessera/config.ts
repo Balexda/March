@@ -83,7 +83,7 @@ export function readClientKeyFileSync(file: string): string | undefined {
 }
 
 /** The configured client key: the key file when named, else the env key. */
-function configuredClientKey(env: NodeJS.ProcessEnv): string | undefined {
+export function configuredClientKey(env: NodeJS.ProcessEnv): string | undefined {
   const file = env[TESSERA_CLIENT_KEY_FILE_ENV]?.trim();
   if (file) return readClientKeyFileSync(file);
   return env.MARCH_TESSERA_CLIENT_KEY;

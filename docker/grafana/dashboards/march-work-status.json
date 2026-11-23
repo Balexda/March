@@ -650,7 +650,8 @@
           "editorMode": "code",
           "expr": "(max(march_stack_service_state{service=\"tessera\",state=\"ok\"}) * 2 + max(march_stack_service_state{service=\"tessera\",state=\"degraded\"}))",
           "legendFormat": "Tessera",
-          "range": true,
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ],

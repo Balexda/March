@@ -24,18 +24,68 @@ const statusBody = (appState: string) => ({
     { provider: "github-user", state: "ok", login: null, credential_expires_at: null, expiry_warning: false, last_error: null },
   ],
 });
-const fetchReturning = (impl: () => Promise<Response>) => {
+const HATCHERY_GRANTS = { client: "hatchery", grants: [{ identity: "app", access: "read", repos: ["acme/widgets"] }] };
+/**
+ * Fake Tessera. `impl` answers `/status`; `GET /v1/client` answers `client`
+ * (default: Hatchery's app/read grant) when the bearer is the configured key,
+ * else 401 — the same split the real server makes.
+ */
+const fetchReturning = (impl: () => Promise<Response>, client: () => Promise<Response> = async () => Response.json(HATCHERY_GRANTS)) => {
   const calls: string[] = [];
-  const fetchImpl = (async (url: string) => { calls.push(String(url)); return impl(); }) as unknown as typeof fetch;
-  return { fetchImpl, calls };
+  const auths: (string | null)[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/v1/client")) {
+      const auth = new Headers(init?.headers).get("authorization");
+      auths.push(auth);
+      if (auth !== "Bearer k") return Response.json({ error: { code: "unauthorized", message: "Client authentication required" } }, { status: 401 });
+      return client();
+    }
+    return impl();
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls, auths };
 };
 
 describe("GitHubCredentialChecker (Tessera is the only credential source)", () => {
   it("is ok only when Tessera is configured, reachable, and its github-app provider is ok", async () => {
-    const { fetchImpl, calls } = fetchReturning(async () => Response.json(statusBody("ok")));
+    const { fetchImpl, calls, auths } = fetchReturning(async () => Response.json(statusBody("ok")));
     const r = await new GitHubCredentialChecker({ env: TESSERA_ENV, fetchImpl }).check();
     expect(r).toEqual({ ok: true, source: "tessera", reason: null });
-    expect(calls).toEqual(["http://tessera:9477/status"]);
+    expect(calls.sort()).toEqual(["http://tessera:9477/status", "http://tessera:9477/v1/client"]);
+    expect(auths).toEqual(["Bearer k"]); // the authenticated check uses Hatchery's own key
+  });
+
+  it("is down tessera:unauthorized when Tessera rejects Hatchery's key, even with a healthy provider", async () => {
+    const { fetchImpl } = fetchReturning(async () => Response.json(statusBody("ok")));
+    expect(await new GitHubCredentialChecker({ env: { ...TESSERA_ENV, MARCH_TESSERA_CLIENT_KEY: "revoked" }, fetchImpl }).check())
+      .toEqual({ ok: false, source: "tessera", reason: "tessera:unauthorized" });
+  });
+
+  it("is down tessera:policy_denied when Hatchery's grants hold no app read access", async () => {
+    for (const grants of [[], [{ identity: "user", access: "write", repos: [] }], [{ identity: "app", access: "read", repos: [] }]]) {
+      const { fetchImpl } = fetchReturning(async () => Response.json(statusBody("ok")), async () => Response.json({ client: "hatchery", grants }));
+      expect(await new GitHubCredentialChecker({ env: TESSERA_ENV, fetchImpl }).check())
+        .toEqual({ ok: false, source: "tessera", reason: "tessera:policy_denied" });
+    }
+    const write = fetchReturning(async () => Response.json(statusBody("ok")),
+      async () => Response.json({ client: "steward", grants: [{ identity: "app", access: "write", repos: ["acme/*"] }] }));
+    expect((await new GitHubCredentialChecker({ env: TESSERA_ENV, fetchImpl: write.fetchImpl }).check()).ok).toBe(true);
+  });
+
+  it("fails closed when the client check is unanswerable (an older Tessera without /v1/client)", async () => {
+    const { fetchImpl } = fetchReturning(async () => Response.json(statusBody("ok")),
+      async () => Response.json({ message: "Route GET:/v1/client not found", error: "Not Found", statusCode: 404 }, { status: 404 }));
+    expect(await new GitHubCredentialChecker({ env: TESSERA_ENV, fetchImpl }).check())
+      .toEqual({ ok: false, source: "tessera", reason: "tessera:invalid_response" });
+  });
+
+  it("re-checks at once when the client key changes, inside the TTL", async () => {
+    const env: NodeJS.ProcessEnv = { ...TESSERA_ENV };
+    const { fetchImpl } = fetchReturning(async () => Response.json(statusBody("ok")));
+    const checker = new GitHubCredentialChecker({ env, fetchImpl, now: () => 0 });
+    expect((await checker.check()).ok).toBe(true);
+    env.MARCH_TESSERA_CLIENT_KEY = "revoked";
+    expect((await checker.check()).reason).toBe("tessera:unauthorized");
   });
 
   it("is down tessera:provider_<state> when the github-app provider cannot vend", async () => {
@@ -63,17 +113,17 @@ describe("GitHubCredentialChecker (Tessera is the only credential source)", () =
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it("caches the /status answer for the TTL", async () => {
+  it("caches the answer for the TTL", async () => {
     let t = 0;
     const { fetchImpl, calls } = fetchReturning(async () => Response.json(statusBody("ok")));
     const checker = new GitHubCredentialChecker({ env: TESSERA_ENV, fetchImpl, ttlMs: 5_000, now: () => t });
     await checker.check();
     t = 4_000;
     await checker.check();
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2); // one /status + one /v1/client
     t = 6_000;
     await checker.check();
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
     expect(checker.latest?.ok).toBe(true);
   });
 

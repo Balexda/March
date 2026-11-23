@@ -27,9 +27,10 @@ export function selectTesseraProviders(
   env: NodeJS.ProcessEnv,
   onDiscoveryError?: (code: TesseraErrorCode) => void,
   fetchImpl?: typeof fetch,
+  onOperatorTokenError?: (code: TesseraErrorCode) => void,
 ): CredentialProvider[] {
   const tokenFile = env[TESSERA_GITHUB_TOKEN_FILE]?.trim();
-  const source = tokenFile ? new OperatorTokenSource({ tokenFile, fetchImpl }) : undefined;
+  const source = tokenFile ? new OperatorTokenSource({ tokenFile, fetchImpl, onError: onOperatorTokenError }) : undefined;
   const providers: CredentialProvider[] = [];
   if ((config.appId && config.privateKey) || !source) {
     providers.push(new GithubAppProvider({ ...config, fetchImpl, onDiscoveryError }));
@@ -61,6 +62,10 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
     const providers = selectTesseraProviders(config, process.env, (code) => {
       emitTesseraSpan("tessera.discovery", { error: true, attributes: { provider: "github-app", outcome: code } });
       logger.warn({ provider: "github-app", outcome: code }, "Tessera identity discovery failed");
+    }, undefined, (code) => {
+      // Bounded code only: the operator token is never logged or put on a span.
+      emitTesseraSpan("tessera.discovery", { error: true, attributes: { provider: "operator-token", outcome: code } });
+      logger.warn({ provider: "operator-token", outcome: code }, "Tessera operator token cannot vend credentials");
     });
     await Promise.all(providers.map((provider) => provider.start()));
     if (stopping) return;

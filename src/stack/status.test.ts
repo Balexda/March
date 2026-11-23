@@ -15,20 +15,27 @@ import {
 } from "./status.js";
 
 /** All services running, reachable, image present, token accepted. */
+/** A healthy stack's answer to every probe: token gate, readiness bodies, liveness. */
+async function healthyProbe(url: string, token?: string): Promise<HttpProbeResult> {
+  if (url.includes("/v1/")) {
+    // Token gate: accept the correct token.
+    return token === "tok-123"
+      ? { reachable: true, status: 200 }
+      : { reachable: true, status: 401 };
+  }
+  if (url.endsWith("/readyz")) return { reachable: true, status: 200, body: { ready: true, state: "ok", reasons: [] } };
+  if (url.endsWith("/status")) {
+    return { reachable: true, status: 200, body: { providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }] } };
+  }
+  return { reachable: true, status: 200 };
+}
+
 function healthyOptions(over: Partial<StatusOptions> = {}): StatusOptions {
   return {
     containerState: () => "running",
     imagePresent: () => true,
     readToken: () => "tok-123",
-    probeHttp: async (url, token) => {
-      if (url.includes("/v1/")) {
-        // Token gate: accept the correct token.
-        return token === "tok-123"
-          ? { reachable: true, status: 200 }
-          : { reachable: true, status: 401 };
-      }
-      return { reachable: true, status: 200 };
-    },
+    probeHttp: healthyProbe,
     ...over,
   };
 }
@@ -318,7 +325,7 @@ describe("stackStatus — hatchery readiness (/readyz)", () => {
       probeHttp: async (url, token) => {
         if (url.includes("/v1/")) return token === "tok-123" ? { reachable: true, status: 200 } : { reachable: true, status: 401 };
         if (url.endsWith("/readyz")) return { reachable: true, status, body };
-        return { reachable: true, status: 200 };
+        return healthyProbe(url, token);
       },
     });
 
@@ -341,6 +348,22 @@ describe("stackStatus — hatchery readiness (/readyz)", () => {
     expect(formatStatusTable(status)).toContain("! hatchery");
   });
 
+  it("a readiness probe that does not answer is down, not healthy", async () => {
+    const status = await stackStatus(healthyOptions({
+      probeHttp: async (url, token) => (url.endsWith("/readyz") ? { reachable: false } : healthyProbe(url, token)),
+    }));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ reachable: "ok", readiness: "down", healthy: false });
+    expect(hatchery.issues).toContain("not ready (/readyz not answering)");
+  });
+
+  it("a 200 readiness answer without a state is down", async () => {
+    const status = await stackStatus(withReadyz({}));
+    const hatchery = status.services.find((s) => s.service === "hatchery")!;
+    expect(hatchery).toMatchObject({ readiness: "down", healthy: false });
+    expect(hatchery.issues).toContain("not ready (/readyz answered HTTP 200 without a readiness state)");
+  });
+
   it("ok readiness adds nothing", async () => {
     const status = await stackStatus(withReadyz({ ready: true, state: "ok", reasons: [] }));
     expect(status.healthy).toBe(true);
@@ -356,7 +379,7 @@ describe("stackStatus — tessera readiness (/status providers)", () => {
         if (url.endsWith("/status")) {
           return { reachable: true, status: 200, body: { providers: [{ provider: "github-app", state: appState }, { provider: "github-user", state: "ok" }] } };
         }
-        return { reachable: true, status: 200 };
+        return healthyProbe(url, token);
       },
     });
 

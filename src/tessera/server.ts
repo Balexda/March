@@ -76,6 +76,13 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
   });
   app.get("/healthz", async () => ({ status: "ok" }));
   app.get("/status", monitorProviderHealth(app, registry, startedAt));
+  // The caller's own identity and grants, so a consumer's readiness can verify its
+  // key is accepted and its policy covers what it needs without minting a token.
+  // Authentication is the shared /v1 onRequest hook (401 for a bad or revoked key).
+  app.get("/v1/client", async request => {
+    const caller = requests.get(request)!.caller;
+    return { client: caller, grants: authorization.grants?.(caller) ?? [] };
+  });
   app.post("/v1/github/token", async request => {
     const parsed = parseTokenRequest(request.body);
     const context = requests.get(request)!;

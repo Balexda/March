@@ -4,18 +4,17 @@ import { dispatchReasonCode, hatcheryGitHubCode } from "../../hatchery/dispatch-
 /**
  * The bounded Hatchery error code an escalation carries, for the log line (so
  * the operator reads "tessera:unconfigured", not just "hatchery_dispatch_failed").
- * Only the `Error:` block of a dispatch-failure detail is classified — the rest
- * of the detail is operator guidance whose wording must not match a pattern.
- * An unclassifiable dispatch error yields nothing rather than "other".
+ * Only a `hatchery_dispatch_failed` detail is classified, and only its `Error:`
+ * block (the GitHub code first, then the fixed failure classes) — the rest of
+ * the detail is operator guidance whose wording must not match a pattern. Any
+ * other reason, a detail without an `Error:` block, or an unclassifiable error
+ * yields nothing rather than "other".
  */
 export function judgementErrorCode(reason: unknown, detail: unknown): string | undefined {
-  if (typeof detail !== "string") return undefined;
-  const github = hatcheryGitHubCode(detail);
-  if (github) return github;
-  if (reason !== "hatchery_dispatch_failed") return undefined;
+  if (reason !== "hatchery_dispatch_failed" || typeof detail !== "string") return undefined;
   const block = /(?:^|\n)Error:\n([\s\S]*?)(?:\n\n|$)/.exec(detail)?.[1];
   if (!block) return undefined;
-  const code = dispatchReasonCode(block);
+  const code = hatcheryGitHubCode(block) ?? dispatchReasonCode(block);
   return code === "other" ? undefined : code;
 }
 

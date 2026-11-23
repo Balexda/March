@@ -305,9 +305,15 @@ async function statusForService(
       readiness = parsed.state;
       for (const r of parsed.reasons) issues.push(`${parsed.state === "down" ? "not ready" : "degraded"}: ${r}`);
       if (parsed.state === "down" && parsed.reasons.length === 0) issues.push(`not ready (${svc.readinessPath} state=down)`);
-    } else if (ready.reachable && ready.status !== undefined && ready.status >= 500) {
+    } else {
+      // A configured readiness endpoint that times out, refuses, or answers
+      // without a readable state cannot vouch for the service: down.
       readiness = "down";
-      issues.push(`not ready (${svc.readinessPath} answered HTTP ${ready.status})`);
+      issues.push(
+        ready.reachable && ready.status !== undefined
+          ? `not ready (${svc.readinessPath} answered HTTP ${ready.status} without a readiness state)`
+          : `not ready (${svc.readinessPath} not answering)`,
+      );
     }
   }
 

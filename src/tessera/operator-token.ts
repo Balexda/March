@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { REPO_PATTERN, TesseraError, type CommitIdentity, type CredentialProvider, type Identity, type ProviderIssueRequest, type ProviderIssueResult, type ProviderStatus } from "./models.js";
+import { REPO_PATTERN, TesseraError, isTesseraErrorCode, type CommitIdentity, type CredentialProvider, type Identity, type ProviderIssueRequest, type ProviderIssueResult, type ProviderStatus, type TesseraErrorCode } from "./models.js";
 
 /**
  * Operator-token credential source: the interim way Tessera vends a WORKING
@@ -19,6 +19,12 @@ import { REPO_PATTERN, TesseraError, type CommitIdentity, type CredentialProvide
 
 /** Nominal re-check horizon reported as `expires_at` (the token has no real expiry). */
 export const OPERATOR_TOKEN_HORIZON_MS = 3_600_000;
+/**
+ * Longest an unchanged token file goes without revalidation against GitHub, so
+ * an upstream revocation is noticed. With the provider-health poll (60s) this
+ * bounds a revocation's visibility to ~6 min at ≤ ~12 `/user` calls an hour.
+ */
+export const OPERATOR_TOKEN_REVALIDATE_MS = 300_000;
 const MAX_TOKEN_BYTES = 4096;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const LOGIN = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i;
@@ -29,6 +35,11 @@ export interface OperatorTokenSourceOptions {
   readonly fetchImpl?: typeof fetch;
   readonly timeoutMs?: number;
   readonly now?: () => number;
+  /**
+   * Called once on each TRANSITION into a failure state (not on every poll),
+   * with a bounded code only — never credential content.
+   */
+  readonly onError?: (code: TesseraErrorCode) => void;
 }
 
 interface Fingerprint { readonly ino: number; readonly size: number; readonly mtimeMs: number }
@@ -71,6 +82,9 @@ export class OperatorTokenSource {
   private lastError: ProviderStatus["last_error"] = null;
   private revision: object = {};
   private pending?: Promise<void>;
+  private pendingForced = false;
+  private validatedAt = -Infinity;
+  private reported: TesseraErrorCode | null = null;
 
   constructor(options: OperatorTokenSourceOptions) {
     this.options = options;
@@ -78,8 +92,26 @@ export class OperatorTokenSource {
 
   private now(): number { return (this.options.now ?? Date.now)(); }
 
+  /** The failure code the current state maps to, or null when healthy. */
+  private failureCode(): TesseraErrorCode | null {
+    if (this.state === "ok") return null;
+    if (this.state === "unconfigured") return "provider_unconfigured";
+    if (isTesseraErrorCode(this.lastError)) return this.lastError;
+    return this.state === "invalid" ? "credential_invalid" : "provider_unavailable";
+  }
+
+  /** Report a transition into (or between) failure states; clear on recovery. */
+  private reportTransition(): void {
+    const code = this.failureCode();
+    if (code && code !== this.reported) {
+      try { this.options.onError?.(code); } catch { /* reporting must never break issuance */ }
+    }
+    this.reported = code;
+  }
+
   /** Validate the token against GitHub `/user`; sets state + login. Never throws. */
   private async validate(token: string): Promise<void> {
+    this.validatedAt = this.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
@@ -122,11 +154,19 @@ export class OperatorTokenSource {
   }
 
   /**
-   * Re-read the file when it changed (or when forced) and revalidate a new or
-   * not-yet-healthy token. Concurrent callers share one load.
+   * Re-read the file and revalidate a new, not-yet-healthy, or stale (older than
+   * {@link OPERATOR_TOKEN_REVALIDATE_MS}) token — or any token when forced.
+   * Concurrent callers share one load; a forced caller never settles for a
+   * non-forced load that skipped validation.
    */
   async load(force = false): Promise<void> {
-    this.pending ??= (async () => {
+    if (this.pending && (this.pendingForced || !force)) return this.pending;
+    if (this.pending) {
+      await this.pending.catch(() => {});
+      return this.load(true);
+    }
+    this.pendingForced = force;
+    this.pending = (async () => {
       const read = await readTokenFile(this.options.tokenFile);
       if ("error" in read) {
         this.token = undefined;
@@ -141,8 +181,13 @@ export class OperatorTokenSource {
       if (changed) this.revision = {};
       this.token = read.token;
       this.fingerprint = read.fingerprint;
-      if (changed || force || this.state !== "ok") await this.validate(read.token);
-    })().finally(() => { this.pending = undefined; });
+      const stale = this.now() - this.validatedAt >= OPERATOR_TOKEN_REVALIDATE_MS;
+      if (changed || force || stale || this.state !== "ok") await this.validate(read.token);
+    })().finally(() => {
+      this.pending = undefined;
+      this.pendingForced = false;
+      this.reportTransition();
+    });
     return this.pending;
   }
 
@@ -183,6 +228,11 @@ export class OperatorTokenProvider implements CredentialProvider {
 
   async start(): Promise<void> {
     await this.source.load(true);
+  }
+
+  /** Re-read the file (and revalidate when stale) so `/status` tracks reality. */
+  async refresh(): Promise<void> {
+    await this.source.load(false);
   }
 
   async issue(request: ProviderIssueRequest): Promise<ProviderIssueResult> {

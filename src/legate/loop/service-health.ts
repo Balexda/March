@@ -82,9 +82,12 @@ export async function fetchProbe(url: string, timeoutMs: number, fetchImpl: type
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchImpl(url, { method: "GET", signal: controller.signal, redirect: "error" });
+    // A body that stalls past the timeout rejects here and is a transport
+    // failure (outer catch), never a bodiless "answered" probe.
+    const text = await res.text();
     let body: unknown = null;
     try {
-      body = JSON.parse(await res.text());
+      body = JSON.parse(text);
     } catch {
       body = null;
     }

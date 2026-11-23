@@ -22,6 +22,9 @@ services:
         MARCH_BUILD_TIME: "${MARCH_BUILD_TIME:-}"
     image: march-tessera:latest
     container_name: march-tessera
+    # Run as the host user, like the sibling services: the provisioned files
+    # below are 0600 and owned by that user.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
     restart: on-failure
     command: ["tessera", "serve", "--host", "0.0.0.0", "--port", "${MARCH_TESSERA_PORT:-9477}"]
     ports:
@@ -43,8 +46,8 @@ services:
     volumes:
       - march-tessera-logs:/march/logs
       # Provisioned config + keys (`march tessera provision`), read-only. The
-      # files are 0600 and owned by the host user; the image's `node` user is
-      # uid 1000, so MARCH_HOST_UID must be 1000 (or run as that uid).
+      # files are 0600 and owned by the host user, which the `user:` mapping
+      # above (MARCH_HOST_UID/GID) runs the service as.
       - ${MARCH_HOST_HOME:-/home/jmbattista}/.march/tessera:/march/tessera:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz"]

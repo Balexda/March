@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTesseraAuthorization } from "./authorization.js";
 import { normalizeRepos, provisionTessera, TESSERA_CLIENT_GRANTS, TesseraProvisionError } from "./provision.js";
 import { readClientKeyFileSync, resolveTesseraConfig } from "./config.js";
+import { buildTesseraServer } from "./server.js";
+import { TesseraClient } from "./client.js";
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), "tessera-provision-")); });
@@ -53,6 +55,43 @@ describe("provisionTessera", () => {
     expect(readClientKeyFileSync(join(dir, "keys", "hatchery.key"))).toBe(hatcheryKey);
     expect(resolveTesseraConfig({ env: { MARCH_TESSERA_URL: "http://tessera:9477", MARCH_TESSERA_CLIENT_KEY_FILE: join(dir, "keys", "hatchery.key") } }))
       .toEqual({ baseUrl: "http://tessera:9477", clientKey: hatcheryKey });
+  });
+
+  it("GET /v1/client returns only the caller's own grants, and 401s a bad key", async () => {
+    provisionTessera({ repos: ["acme/widgets"], githubToken: "gho_abc", home, generateKey: keys });
+    const dir = join(home, ".march", "tessera");
+    const authorize = await loadTesseraAuthorization({ TESSERA_CLIENT_KEYS_FILE: join(dir, "clients.json"), TESSERA_POLICY_FILE: join(dir, "policy.json") });
+    const app = buildTesseraServer({ authorize, logger: false });
+    try {
+      const hatcheryKey = readFileSync(join(dir, "keys", "hatchery.key"), "utf8");
+      const ok = await app.inject({ method: "GET", url: "/v1/client", headers: { authorization: `Bearer ${hatcheryKey}` } });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json()).toEqual({ client: "hatchery", grants: [{ identity: "app", access: "read", repos: ["acme/widgets"] }] });
+      expect(ok.body).not.toContain(hatcheryKey);
+      expect(ok.body).not.toContain("legate");
+      const legateKey = readFileSync(join(dir, "keys", "legate.key"), "utf8");
+      const legate = await app.inject({ method: "GET", url: "/v1/client", headers: { authorization: `Bearer ${legateKey}` } });
+      expect(legate.json().grants).toEqual([
+        { identity: "app", access: "write", repos: ["acme/widgets"] },
+        { identity: "user", access: "write", repos: [] },
+      ]);
+      const bad = await app.inject({ method: "GET", url: "/v1/client", headers: { authorization: "Bearer not-a-key" } });
+      expect(bad.statusCode).toBe(401);
+      expect(bad.json()).toEqual({ error: { code: "unauthorized", message: "Client authentication required" } });
+      expect((await app.inject({ method: "GET", url: "/v1/client" })).statusCode).toBe(401);
+
+      // The Node client speaks it end to end.
+      const fetchImpl = (async (url: string, init?: RequestInit) => {
+        const res = await app.inject({ method: "GET", url: new URL(url).pathname, headers: init?.headers as Record<string, string> });
+        return new Response(res.body, { status: res.statusCode, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch;
+      expect(await new TesseraClient({ baseUrl: "http://tessera", clientKey: hatcheryKey, env: {}, fetchImpl }).client())
+        .toEqual({ client: "hatchery", grants: [{ identity: "app", access: "read", repos: ["acme/widgets"] }] });
+      await expect(new TesseraClient({ baseUrl: "http://tessera", clientKey: "nope", env: {}, fetchImpl }).client())
+        .rejects.toMatchObject({ code: "unauthorized", status: 401 });
+    } finally {
+      await app.close();
+    }
   });
 
   it("keeps existing keys and the token on rerun, and updates the repos", () => {

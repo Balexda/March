@@ -145,16 +145,17 @@ describe("routes", () => {
   });
 
   it("GET /readyz reports docker + castra + github + spawns readiness", async () => {
-    app = await makeApp();
+    // Fixed probes: the response shape, not the host's docker/castra/Tessera.
+    app = await makeApp({
+      docker: () => true,
+      castra: async () => true,
+      github: async () => ({ ok: true, source: "tessera", reason: null }),
+    });
     const res = await app.inject({ method: "GET", url: "/readyz" });
-    expect([200, 503]).toContain(res.statusCode);
+    expect(res.statusCode).toBe(200);
     const body = res.json() as Record<string, any>;
-    expect(typeof body.docker).toBe("boolean");
-    expect(typeof body.castra).toBe("boolean");
-    expect(["ok", "degraded", "down"]).toContain(body.state);
-    expect(body.ready).toBe(body.state !== "down");
-    expect(res.statusCode).toBe(body.state === "down" ? 503 : 200);
-    expect(body.github).toEqual(expect.objectContaining({ ok: expect.any(Boolean), source: expect.any(String) }));
+    expect(body).toMatchObject({ ready: true, state: "ok", docker: true, castra: true });
+    expect(body.github).toEqual({ ok: true, source: "tessera", reason: null });
     expect(body.spawns).toEqual(expect.objectContaining({ recent: 0, consecutive_failures: 0 }));
     expect(Array.isArray(body.reasons)).toBe(true);
   });
@@ -170,9 +171,10 @@ describe("routes", () => {
   });
 
   it("GET /readyz is 200 ok only when Tessera vends; /healthz stays pure liveness", async () => {
-    const fetchImpl = (async () => Response.json({
-      providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }],
-    })) as unknown as typeof fetch;
+    // Tessera vends: its provider is ok, and Hatchery's own key + app grant check out.
+    const fetchImpl = (async (url: string) => String(url).endsWith("/v1/client")
+      ? Response.json({ client: "hatchery", grants: [{ identity: "app", access: "read", repos: ["acme/widgets"] }] })
+      : Response.json({ providers: [{ provider: "github-app", state: "ok" }, { provider: "github-user", state: "ok" }] })) as unknown as typeof fetch;
     app = await makeApp({
       docker: () => true, castra: async () => true, fetchImpl,
       env: { MARCH_TESSERA_URL: "http://tessera:9477", MARCH_TESSERA_CLIENT_KEY: "k" },

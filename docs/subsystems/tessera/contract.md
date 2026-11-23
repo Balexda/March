@@ -91,6 +91,7 @@ configuration variable and, for invalid entries, the row number.
 | `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured and degraded providers. |
 | `GET /status` | Unauthenticated service/uptime, provider states, soonest expiry and cache entry count. Never credentials or policy. |
 | `POST /v1/github/token` | Authenticated callers with an explicit matching grant can request a token. An App token is scoped to one `owner/name`. |
+| `GET /v1/client` | Authenticated. Returns the caller's own `{ "client": "<id>", "grants": [{ "identity", "access", "repos" }] }`: one entry per granted identity, `access` the grant's maximum, `repos` the lowercased `owner/name` or `owner/*` entries (empty for `user`). Never another client's grants, keys or digests, and it mints nothing. A consumer's readiness uses it to prove its key is accepted and its policy covers what it needs. |
 
 Every `/v1/*` request authenticates its bearer key before body validation.
 Tessera hashes the supplied key with SHA-256 and compares fixed-length digests in
@@ -195,8 +196,20 @@ always serves the `user` slot when the file is set.
   with loose permissions or bad contents is `invalid`.
 - **Rotation.** Every request checks the file's inode, size and mtime. A changed
   file is re-read and validated again, so a rotated token takes effect without
-  a restart. `refresh: true` forces a re-read and validation. A replaced token
-  gets a new credential revision.
+  a restart. `refresh: true` forces a re-read and validation, even when it
+  arrives while an ordinary re-read is in flight. A replaced token gets a new
+  credential revision.
+- **Freshness.** An unchanged token is revalidated against `/user` once it is
+  older than 5 minutes, so an upstream revocation cannot hide behind an
+  unchanged file. The provider-health poll (every 60 s) re-reads the file and
+  applies that bound before `/status` is recomputed: a removed file shows as
+  `unconfigured` within about a minute, a revoked token as `invalid` within
+  about six, at no more than about 12 `/user` calls an hour.
+- **Failure reporting.** Each transition into a failure state emits one errored
+  `tessera.discovery` span (`provider: operator-token`, `outcome` one of
+  `credential_invalid`, `provider_unavailable`, `mint_failed`,
+  `provider_unconfigured`) and one warning log, never on every poll and never
+  with credential content. Startup and `/healthz` stay up.
 - **Issuance.** Client authentication and per-client policy still gate every
   request before the provider is called. An app request returns the token
   with the requested `repo` echoed and `identity` set to the login. `expires_at`
@@ -289,7 +302,12 @@ literals (10/8, 172.16/12, 192.168/16); any other host must use `https:`.
   `write`. The client authenticates `POST /v1/github/token` with its bearer key
   and forwards `sliceId` as `x-march-slice-id`.
 - `getGitHubToken(req)` is the process-environment convenience call. It retains
-  a client until endpoint, key or fallback configuration changes.
+  a client (and its token cache) until the endpoint, the resolved key or the
+  fallback configuration changes. The key compared is the one actually read,
+  so a key file provisioned after the first call, or replaced at the same path,
+  takes effect on the next call.
+- `client({ timeoutMs? })` calls the authenticated `GET /v1/client` and returns
+  `{ client, grants }`. A bad or revoked key rejects with code `unauthorized`.
 - `status()` returns the wire `TesseraStatus` shape from `GET /status`:
   `service`, `uptime_s`, `providers`, `soonest_expiry`, and `cache.entries`.
 - `reachable()` probes only `GET /healthz` and returns false on failure. It

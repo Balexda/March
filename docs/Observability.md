@@ -266,8 +266,8 @@ human `reasons` (contract: `docs/subsystems/hatchery/contract.md`).
 
 #### Stack service readiness (legate probe)
 
-The legate probes every stack service once per tick (Hatchery/Brood `/readyz`,
-Castra/Herald `/healthz`, Tessera `/status`; 2s timeout each, never breaking the
+The legate probes every stack service once per tick (Hatchery/Brood/Castra
+`/readyz`, Herald `/healthz`, Tessera `/status`; 2s timeout each, never breaking the
 tick), caches the result for `GET /status` → `services`, and emits:
 
 | OTel instrument | Prometheus series | Meaning |
