@@ -384,6 +384,7 @@ describe("march CLI", () => {
           homeDir, traceparent,
           pathExists: () => true,
           substrate: {
+            stopCompute: async ({ sessionId }) => ({ outcome: "stopped", containerId: sessionId }),
             removeCompute: async ({ sessionId }) => { calls.push(sessionId); },
             removeWorkspace: () => ({ worktreeRemoved: true, branchDeleted: true }),
           },
@@ -397,7 +398,7 @@ describe("march CLI", () => {
       const before = store.list();
       for (const [id, payload, statusCode] of [
         ["pending", {}, 409], ["live", {}, 409], ["live-steward", {}, 409],
-        ["live", { force: true, kill: true, reason: "rejected" }, 400],
+        ["live", { kill: true, reason: "rejected" }, 409],
         ["missing", {}, 404],
       ] as const) {
         const rejected = await app.inject({
@@ -408,7 +409,7 @@ describe("march CLI", () => {
       for (const [id, flags, diagnostic] of [
         ["pending", [], "Pass force"],
         ["live-steward", [], "Pass force"],
-        ["live", ["--force", "--kill"], "kill mode is unsupported"],
+        ["live", ["--kill"], "Pass force"],
         ["missing", [], "is not tracked by Brood"],
       ] as const) {
         await expect(runTeardown(url, id, ...flags)).rejects.toMatchObject({
@@ -441,7 +442,7 @@ describe("march CLI", () => {
       const forced = await runTeardown(url, "live-steward", "--force", "--json", "--reason", "operator cleanup");
       expect(JSON.parse(forced.stdout)).toEqual({
         id: "live", status: "torndown", warnings: missingEvidence,
-        steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
+        steps: ["stop", "archive", "container", "steward", "worktree", "branch"].map((step) =>
           expect.objectContaining({ step, outcome: "ok" })),
       });
       expect(store.get("live")?.teardownReason).toBe("operator cleanup");

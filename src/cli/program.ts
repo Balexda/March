@@ -2403,10 +2403,10 @@ brood
 brood
   .command("teardown <id>")
   .description(
-    "Tear down a session via Brood, with immediate container removal",
+    "Tear down a session via Brood and archive its evidence",
   )
-  .option("--force", "Permit teardown of a created or running spawn and protected retries")
-  .option("--kill", "Request explicit kill mode (currently unsupported by Brood)")
+  .option("--force", "Permit teardown of a created or running spawn and protected retries, with graceful stop by default")
+  .option("--kill", "Skip graceful stop and force container removal after archiving (force admission still applies)")
   .option("--reason <reason>", "Record a cleanup reason on the session")
   .option("--json", "Print the service result as JSON")
   .action(

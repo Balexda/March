@@ -46,15 +46,26 @@ original `failureReason`. Omitting a reason on retry preserves the stored value.
 
 `march brood teardown <id> [--force] [--kill] [--reason <text>] [--json]`
 sends the request to Brood. The response contains the primary session ID,
-status, ordered archive, container, steward, worktree, and branch steps, and
-warnings. After the archive succeeds, the host substrate immediately removes
-only the ephemeral container resolved from the session kind and ID, then
-verifies absence. The recorded container ID supplies logs. Compose service
-containers are excluded. Docker errors, deadline breaches, and unverified
-removal produce a failed container step and leave teardown retryable. Castra
-removes the steward with worktree pruning disabled. Brood then removes the
-tracked worktree and branch separately, in that order. Failed steward removal
-defers both Git steps. Failed Git steps leave teardown retryable. The CLI
+status, ordered cleanup steps, and warnings. Ordinary forced teardown of
+ephemeral compute checks for a graceful stop before capturing final evidence.
+The host substrate gives the stop check up to 10 seconds, sends SIGTERM to the
+verified container if it is running, and verifies it exited and remains
+present. The spawn entrypoint's `sh` (the container's main process) forwards
+SIGTERM to the agent's process group, so the signal reaches the agent, including a stop that arrives before the agent has started. A stopped agent keeps its own exit status, so an agent killed during the stop (137) is never reported as a graceful stop. With telemetry on, the wrapping `sh` becomes the main process and forwards SIGTERM to the entrypoint before emitting its span. The `stop` step reports `ok` for a verified graceful stop and
+`skipped` for already stopped or absent compute. An unsupported, unverified,
+or timed-out stop reports `failed`, defers the remaining steps, and leaves the
+session retryable. Removal after a verified stop targets the same container ID
+without forcing it. With `--kill`, Brood skips the stop step and requests
+immediate removal after the archive succeeds. Running and created spawns and
+their protected retries still require `--force`.
+
+The host substrate resolves ephemeral compute by session kind and ID and
+verifies absence after removal. The recorded container ID supplies logs.
+Compose service containers are excluded. Docker errors, deadline breaches,
+and unverified removal produce a failed container step and leave teardown
+retryable. Castra removes the steward with worktree pruning disabled. Brood
+then removes the tracked worktree and branch separately, in that order. Failed container or steward removal
+defers both Git steps, so compute that may still be running keeps its workspace. Failed Git steps leave teardown retryable. The CLI
 prints the status, steps, and warnings in text mode or emits the service
 result with `--json`. Only `torndown` exits zero. A `tearing-down` result
 is rendered and exits non-zero even on HTTP 200.
@@ -97,8 +108,10 @@ Unavailable sources produce warnings and preserve previously archived evidence.
 A source digest mismatch also preserves any earlier verified patch and its
 matching extraction result. A read-back mismatch fails the archive step.
 An archive write failure before removal yields a failed archive step and blocks
-all removal. A journal finalization failure leaves the row `tearing-down` and
-returns the completed step outcomes with a warning. If Brood stops after
+all removal. After a graceful stop, this leaves the stopped container present
+so a retry can capture its evidence. A journal finalization failure leaves
+the row `tearing-down` and returns the completed step outcomes with a warning.
+If Brood stops after
 journaling `torndown` and before updating the registry, the next teardown request
 completes the registry transition without repeating removal, even after a
 status-only PATCH. Recovery applies only while the row keeps the container,
@@ -202,9 +215,8 @@ The service returns HTTP 400 for invalid filter values and HTTP 503 when
 requested liveness observation is unavailable. `listViews()` surfaces
 HTTP errors, transport failures, and responses missing the views array.
 
-Teardown returns HTTP 404 for an unknown ID, HTTP 409 when force is required,
-and HTTP 400 for explicit kill mode, even with force. Rejection precedes
-registry updates and cleanup. Rejections end an errored `brood.teardown`
+Teardown returns HTTP 404 for an unknown ID and HTTP 409 when force is required.
+Rejection precedes registry updates and cleanup. Rejections end an errored `brood.teardown`
 span under the inbound trace context when supplied. The CLI exits non-zero
 on these errors and when Brood is unreachable.
 

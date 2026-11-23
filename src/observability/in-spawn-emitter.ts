@@ -76,22 +76,42 @@ export function buildSpawnOtelContext(input: {
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Wrap a backend `["sh","-c", cmd]` entrypoint so it times the agent run and
  * emits a span afterwards. Non-`sh -c` shapes are returned unchanged. The
  * emitter is best-effort (`2>/dev/null || true`) and the original exit code is
  * always preserved.
+ *
+ * The wrapping `sh` is the container's main process, so Docker delivers stop
+ * signals only to it. It runs the original command as a child `sh` and forwards
+ * SIGTERM (for SIGTERM or SIGINT) to that child, whose own trap stops the
+ * agent. A trapped signal interrupts `wait` with 128+n, so the trap counts
+ * signals and any `wait` that the trap interrupted (status >128) is retried,
+ * however many stops arrive. It then emits the span with the child's real
+ * status.
  */
 export function wrapEntrypointWithEmitter(
   argv: readonly string[],
 ): readonly string[] {
   if (argv.length !== 3 || argv[0] !== "sh" || argv[1] !== "-c") return argv;
   const cmd = argv[2];
-  const wrapped =
-    `__ms=$(date +%s%N 2>/dev/null || echo 0); ` +
-    `( ${cmd} ); __rc=$?; ` +
-    `node ${IN_SPAWN_EMITTER_PATH} "$__ms" "$__rc" 2>/dev/null || true; ` +
-    `exit $__rc`;
+  const wrapped = [
+    `__ms=$(date +%s%N 2>/dev/null || echo 0)`,
+    `__march_child=`,
+    `__march_stop=`,
+    `__march_sigs=0`,
+    `trap '__march_stop=1; __march_sigs=$((__march_sigs + 1)); [ -n "$__march_child" ] && kill -s TERM "$__march_child" 2>/dev/null' TERM INT`,
+    `sh -c ${shellQuote(cmd)} & __march_child=$!`,
+    `if [ -n "$__march_stop" ]; then kill -s TERM "$__march_child" 2>/dev/null; fi`,
+    `__rc=; while :; do __seen=$__march_sigs; __next=0; wait "$__march_child" || __next=$?; if [ "$__next" -eq 127 ] && [ -n "$__rc" ]; then break; fi; __rc=$__next; if [ "$__seen" = "$__march_sigs" ] || [ "$__rc" -le 128 ]; then break; fi; done`,
+    `trap - TERM INT`,
+    `node ${IN_SPAWN_EMITTER_PATH} "$__ms" "$__rc" 2>/dev/null || true`,
+    `exit $__rc`,
+  ].join("; ");
   return ["sh", "-c", wrapped];
 }
 

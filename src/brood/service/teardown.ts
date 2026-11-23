@@ -23,7 +23,12 @@ import {
   type TeardownResources,
 } from "./teardown-archive.js";
 import { broodArchiveDir } from "./store.js";
-import { hostTeardownSubstrate, type ComputeTarget, type TeardownSubstrate } from "./substrate.js";
+import {
+  hostTeardownSubstrate,
+  type ComputeTarget,
+  type StopComputeResult,
+  type TeardownSubstrate,
+} from "./substrate.js";
 import type {
   SessionRecord,
   TeardownRequest,
@@ -46,14 +51,6 @@ export class BroodConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "BroodConflictError";
-  }
-}
-
-/** Brood cannot honor the requested teardown mode. Routes map this to 400. */
-export class BroodUnsupportedModeError extends Error {
-  constructor() {
-    super("Explicit kill mode is unsupported. Omit kill to use immediate container removal.");
-    this.name = "BroodUnsupportedModeError";
   }
 }
 
@@ -135,7 +132,7 @@ function resolveDeps(deps: TeardownDeps): ResolvedDeps {
 const activeTeardowns = new Map<string, Promise<TeardownResult>>();
 
 /**
- * Archive before reclaiming compute, steward, worktree and branch in that order.
+ * Stop compute when needed, then archive before removing any runtime artifacts.
  * A failed step keeps the session retryable. The workspace is shared with the
  * steward, so Git cleanup requires verified steward removal.
  */
@@ -234,9 +231,6 @@ async function runTeardown(
     },
   });
 
-  if (request.kill) {
-    rejectTeardown(span, "unsupported-mode", new BroodUnsupportedModeError());
-  }
   if (primary.status === "torndown" && (!steward || steward.status === "torndown")) {
     return finish("success");
   }
@@ -315,9 +309,22 @@ async function runTeardown(
   // Stewards whose Castra removal this attempt verified (`removed` or `absent`).
   const verifiedStewards: StewardIdentity[] = [];
   let attempt: number | undefined;
+  const activeEphemeral = !spawn &&
+    ["running", "created", "tearing-down"].includes(primary.status);
+  const shouldStop = !request.kill && (spawn || primary.containerId) &&
+    (request.force || activeEphemeral);
+  let stopped: StopComputeResult | undefined;
   try {
     if (!archive) throw archiveError;
     attempt = archive.start(snapshot, request, d.now());
+    if (shouldStop) {
+      const stopStep = await stopCompute();
+      steps.push(stopStep);
+      if (stopStep.outcome === "failed") {
+        deferSteps(["archive", "container", "steward", "worktree", "branch"], "compute stop failed");
+        return finalize("error");
+      }
+    }
     await archiveTeardownEvidence(
       dir,
       primary,
@@ -333,14 +340,11 @@ async function runTeardown(
     warnings.push(`archive failed: ${message(err)}`);
   }
 
-  endStepSpan(archiveSpan, steps[0]!);
+  const archiveStep = steps[steps.length - 1]!;
+  endStepSpan(archiveSpan, archiveStep);
 
-  if (steps[0]!.outcome === "failed") {
-    for (const step of ["container", "steward", "worktree", "branch"] as const) {
-      const deferred: TeardownStep = { step, outcome: "skipped", detail: "deferred: archive failed" };
-      steps.push(deferred);
-      endStepSpan(span.startChild(`brood.teardown.${step}`), deferred);
-    }
+  if (archiveStep.outcome === "failed") {
+    deferSteps(["container", "steward", "worktree", "branch"], "archive failed");
     return finalize("error");
   }
 
@@ -352,7 +356,8 @@ async function runTeardown(
     try {
       const compute = resolveComputeTarget(primary);
       if (compute) {
-        await d.substrate.removeCompute(compute);
+        if (stopped) await d.substrate.removeCompute(compute, stopped);
+        else await d.substrate.removeCompute(compute);
         steps.push({ step: "container", outcome: "ok", detail: "absence verified" });
       } else {
         steps.push({ step: "container", outcome: "skipped" });
@@ -402,7 +407,14 @@ async function runTeardown(
   // never removed. Check membership here, synchronously adjacent to the Git
   // steps (no await in between), and defer both rather than delete its workspace.
   const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(unchangedStewardIds(verifiedStewards));
-  const gitDeferral = stewardRemovalFailed
+  // Compute that may still be running (e.g. restarted after the stop check)
+  // must keep its workspace; reclaim Git only after verified compute absence.
+  const computeRemovalFailed = steps.some(
+    (step) => step.step === "container" && step.outcome === "failed",
+  );
+  const gitDeferral = computeRemovalFailed
+    ? "deferred: compute removal failed"
+    : stewardRemovalFailed
     ? "deferred: steward removal failed"
     : unverifiedSteward
       ? "deferred: steward registered or changed during teardown"
@@ -476,6 +488,37 @@ async function runTeardown(
   return finalize(
     stewardRemovalFailed ? "error" : failed || changedSteward ? "partial" : "success",
   );
+
+  async function stopCompute(): Promise<TeardownStep> {
+    const child = span.startChild("brood.teardown.stop");
+    let step: TeardownStep;
+    try {
+      const compute = resolveComputeTarget(primary);
+      if (!compute || !d.substrate.stopCompute) {
+        throw new Error("Graceful stop is unsupported for this compute target");
+      }
+      stopped = await d.substrate.stopCompute(compute);
+      step = stopped.outcome === "stopped"
+        ? { step: "stop", outcome: "ok", detail: "graceful stop verified" }
+        : {
+          step: "stop", outcome: "skipped",
+          detail: stopped.outcome === "absent" ? "already absent" : "already stopped",
+        };
+    } catch (err) {
+      step = { step: "stop", outcome: "failed", detail: message(err) };
+      warnings.push(`compute stop failed: ${step.detail}`);
+    }
+    endStepSpan(child, step);
+    return step;
+  }
+
+  function deferSteps(deferredSteps: TeardownStep["step"][], reason: string): void {
+    for (const step of deferredSteps) {
+      const deferred: TeardownStep = { step, outcome: "skipped", detail: `deferred: ${reason}` };
+      steps.push(deferred);
+      endStepSpan(step === "archive" ? archiveSpan : span.startChild(`brood.teardown.${step}`), deferred);
+    }
+  }
 
   async function removeOneSteward(row: SessionRecord): Promise<TeardownStep> {
     const label = groupStewards.length > 1 ? ` (${row.id})` : "";
@@ -619,14 +662,14 @@ function resolveComputeTarget(record: SessionRecord): ComputeTarget | undefined 
     ? spawnContainerName(record.id)
     : `march-${record.kind}-${record.id}`;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(record.id)) {
-    throw new Error(`Invalid session identity for container removal: "${record.id}"`);
+    throw new Error(`Invalid session identity for compute teardown: "${record.id}"`);
   }
   return { sessionId: record.id, kind: record.kind, containerName };
 }
 
 function rejectTeardown(
   span: BroodChildSpan,
-  outcome: "not-found" | "unsupported-mode" | "conflict",
+  outcome: "not-found" | "conflict",
   error: Error,
 ): never {
   span.setAttributes({ "march.teardown.outcome": outcome });
@@ -650,8 +693,12 @@ export function isDeferredTeardownStep(step: TeardownStep): boolean {
  * nothing-to-reclaim / already-gone.
  */
 function stepSpanOutcome(step: TeardownStep): string {
-  if (step.outcome === "ok") return step.step === "archive" ? "ok" : "removed";
+  if (step.outcome === "ok") {
+    if (step.step === "stop") return "stopped";
+    return step.step === "archive" ? "ok" : "removed";
+  }
   if (step.outcome === "failed") return "failed";
+  if (step.step === "stop" && step.detail === "already stopped") return "already-stopped";
   return isDeferredTeardownStep(step) ? "deferred" : "not-found";
 }
 

@@ -18,6 +18,10 @@ export const CONTAINER_WORKDIR = "/march/workspace";
  */
 export const PATCH_SENTINEL = "__MARCH_PATCH_B64__";
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Wrap a backend's *agent command* in the deterministic git scaffold so the
  * worker produces its patch from a real container-local git repo rather than
@@ -26,7 +30,8 @@ export const PATCH_SENTINEL = "__MARCH_PATCH_B64__";
  * (which now makes the change AND commits it), and emits the diff:
  *
  *   1. `git init` + a fixed identity, then commit the snapshot as the base.
- *   2. run the agent command inside a subshell; preserve its exit code.
+ *   2. run the agent command in its own process group, forwarding SIGTERM/
+ *      SIGINT to it (graceful stop); preserve its exit code.
  *   3. if the agent failed (non-zero), exit with its code — no patch.
  *   4. if `HEAD == base` but the tree is dirty, capture the uncommitted work so
  *      nothing is lost; if `HEAD == base` and the tree is clean, fail clearly
@@ -39,7 +44,22 @@ export const PATCH_SENTINEL = "__MARCH_PATCH_B64__";
  */
 function composeGitScaffoldedEntrypoint(
   agentCommand: string,
+  options: { readonly compound?: boolean } = {},
 ): readonly string[] {
+  // No stop may be swallowed between setsid and the agent starting.
+  // A simple command is exec'd: it keeps the setsid pid and leads its group,
+  // so a stop before the exec ends the inner shell (default handling) and one
+  // after reaches the agent. A compound command (e.g. a credential prelude
+  // chained with `&&`) cannot be exec'd, so the inner shell traps TERM with
+  // `exit $?`: dash runs a trap only between commands, so a stop before the
+  // agent starts exits before launching it, and a stop while the agent runs
+  // reaches the agent through the group and is acted on only after the agent
+  // exits. `$?` in the trap is the last command's status, so the agent's own
+  // code (e.g. 137 if it was killed) is what the wait sees; a prelude that
+  // finished with 0 maps to 143 below because a stop was requested.
+  const agentScript = options.compound
+    ? `trap 'exit $?' TERM; ${agentCommand}`
+    : `exec ${agentCommand}`;
   const script = [
     `cd ${CONTAINER_WORKDIR}`,
     `git init -q`,
@@ -48,8 +68,27 @@ function composeGitScaffoldedEntrypoint(
     `git add -A`,
     `git commit -q -m spawn-base --allow-empty >/dev/null 2>&1 || true`,
     `__march_base=$(git rev-parse HEAD)`,
-    `( ${agentCommand} )`,
-    `__march_rc=$?`,
+    // The container's main process is this `sh`, which does not pass signals
+    // on to its children. Run the agent in its own session/process group and
+    // forward SIGTERM/SIGINT to that whole group so Brood's graceful stop
+    // (`docker kill --signal SIGTERM`) reaches the agent. `kill -s TERM -- -PGID`
+    // is the form dash (the bookworm image `sh`) accepts.
+    `__march_agent=`,
+    `__march_term=`,
+    `__march_sigs=0`,
+    `# The group exists only once setsid has run, so a stop that arrives earlier`,
+    `# is retried (up to ~5s) until the group can be signaled or the pid is gone.`,
+    `__march_stop_agent() { __march_try=0; while ! kill -s TERM -- "-$__march_agent" 2>/dev/null; do __march_try=$((__march_try + 1)); if [ "$__march_try" -ge 100 ] || ! kill -0 "$__march_agent" 2>/dev/null; then return 0; fi; sleep 0.05; done; }`,
+    `trap '__march_term=1; __march_sigs=$((__march_sigs + 1)); [ -n "$__march_agent" ] && __march_stop_agent' TERM INT`,
+    `setsid sh -c ${shellQuote(agentScript)} &`,
+    `__march_agent=$!`,
+    `if [ -n "$__march_term" ]; then __march_stop_agent; fi`,
+    `# A trapped signal interrupts wait with 128+n, so a wait during which the`,
+    `# trap ran and that returned >128 is retried. dash keeps a reaped child's`,
+    `# status retrievable; 127 on a retry means the earlier status was final.`,
+    `__march_rc=; while :; do __march_seen=$__march_sigs; __march_next=0; wait "$__march_agent" || __march_next=$?; if [ "$__march_next" -eq 127 ] && [ -n "$__march_rc" ]; then break; fi; __march_rc=$__march_next; if [ "$__march_seen" = "$__march_sigs" ] || [ "$__march_rc" -le 128 ]; then break; fi; done`,
+    `trap - TERM INT`,
+    `if [ -n "$__march_term" ] && [ "$__march_rc" -eq 0 ]; then exit 143; fi`,
     `if [ "$__march_rc" -ne 0 ]; then exit "$__march_rc"; fi`,
     `# Capture any edits the agent left uncommitted — even if it ALSO made a`,
     `# commit (e.g. it committed the main change, then ticked a tasks.md box or`,
@@ -130,11 +169,12 @@ export const codexBackend: SpawnBackend = {
     },
   ],
   buildEntrypoint(promptFilePath: string): readonly string[] {
-    // Keep the credential-mount `cp` prelude; the git scaffold wraps the whole
-    // agent command. `--skip-git-repo-check` is now harmless (the scaffold
-    // creates a real repo) but left in so the codex command is unchanged.
+    // The credential-mount `cp` prelude makes this a compound command.
+    // `--skip-git-repo-check` is now harmless (the scaffold creates a real
+    // repo) but left in so the codex command is unchanged.
     return composeGitScaffoldedEntrypoint(
       `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${promptFilePath}`,
+      { compound: true },
     );
   },
   allowedEgressHosts: ["chatgpt.com"],
