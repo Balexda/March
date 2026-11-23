@@ -275,7 +275,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     store.completeTeardown("s-done", [], "2026-06-13T00:00:00.000Z");
     store.beginTeardown("s-admitted", [], "{}\n", {});
     for (const id of ["s-done", "s-admitted"]) {
-      await app.inject({ method: "PATCH", url: `/sessions/${id}`, payload: { status: "stopped" } });
+      const moved = await app.inject({ method: "PATCH", url: `/sessions/${id}`, payload: { status: "stopped" } });
+      expect(moved.statusCode, id).toBe(200);
+      expect(moved.json<{ status: string }>().status, id).toBe("stopped");
       expect((await app.inject({
         method: "PATCH", url: `/sessions/${id}`, payload: { extractionResult: { ...extractionResult, spawnId: id } },
       })).statusCode, id).toBe(409);
@@ -288,6 +290,53 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     })).statusCode).toBe(200);
   });
 
+  it("keeps an admitted steward's extractionResult closed after a status-only PATCH", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({ method: "POST", url: "/sessions", payload: { id: "sp", kind: "spawn", status: "stopped" } });
+    for (const id of ["st-admitted", "st-other"]) {
+      await app.inject({ method: "POST", url: "/sessions", payload: { id, kind: "steward", parentId: "sp", status: "running" } });
+    }
+    store.beginTeardown("sp", ["st-admitted"], "{}\n", {});
+    const moved = await app.inject({ method: "PATCH", url: "/sessions/st-admitted", payload: { status: "stopped" } });
+    expect(moved.statusCode).toBe(200);
+    expect(moved.json<{ status: string }>().status).toBe("stopped");
+    const extraction = (spawnId: string) => ({
+      spawnId, backend: "claude-code", status: "failed",
+      failureReason: "no-patch-produced", diagnostic: "none", extractedAt: "2026-06-13T00:00:00.000Z",
+    });
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/st-admitted", payload: { extractionResult: extraction("st-admitted") },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: "POST", url: "/sessions",
+      payload: { id: "st-admitted", kind: "steward", extractionResult: extraction("st-admitted") },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: "PATCH", url: "/sessions/st-other", payload: { status: "stopped", extractionResult: extraction("st-other") },
+    })).statusCode).toBe(200);
+  });
+
+  it("logs a nonterminal teardown even when every cleanup step succeeded", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const logger = pino({ level: "warn" }, { write: (line) => logs.push(JSON.parse(line)) });
+    const { app } = await buildApp(async (id) => ({
+      id,
+      status: "tearing-down",
+      steps: (["archive", "container", "steward", "worktree", "branch"] as const)
+        .map((step) => ({ step, outcome: "ok" as const })),
+      warnings: ["archive finalization failed: disk full"],
+    }), undefined, { logger: logger as unknown as FastifyInstance["log"] });
+    const response = await app.inject({ method: "POST", url: "/sessions/spawn-1/teardown" });
+    expect(response.statusCode).toBe(200);
+    const incomplete = logs.filter((entry) => entry.msg === "brood teardown cleanup incomplete");
+    expect(incomplete).toEqual([expect.objectContaining({
+      session_id: "spawn-1",
+      teardown_status: "tearing-down",
+      teardown_steps: [],
+      teardown_warnings: ["archive finalization failed: disk full"],
+    })]);
+  });
+
   it("rejects a PATCH that clears torndownAt and keeps the first timestamp", async () => {
     const { app, store } = await buildApp();
     await app.inject({ method: "POST", url: "/sessions", payload: { id: "s-done", kind: "spawn", status: "stopped" } });
@@ -298,9 +347,9 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         method: "PATCH", url: "/sessions/s-done", payload: { status: "stopped", torndownAt },
       })).statusCode).toBe(400);
     }
-    await app.inject({
+    expect((await app.inject({
       method: "PATCH", url: "/sessions/s-done", payload: { torndownAt: "2027-01-01T00:00:00.000Z" },
-    });
+    })).statusCode).toBe(200);
     expect(store.get("s-done")?.torndownAt).toBe("2026-06-13T00:00:00.000Z");
     expect(store.get("s-done")?.status).toBe("torndown");
     expect((await app.inject({

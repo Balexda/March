@@ -832,6 +832,8 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       const recovered = await teardownSession(store, spawnId, {}, rec.deps);
       expect(rec.calls).toEqual([]);
       expect(recovered.status).toBe("tearing-down");
+      const firstTorndownAt = store.get(spawnId)?.torndownAt;
+      expect(firstTorndownAt).toBeDefined();
       expect(recovered.warnings).toEqual([expect.stringContaining('"ad-session-bbb"')]);
       expect(store.get(stewardId)?.status).toBe("torndown");
       expect(store.get("ad-session-bbb")?.status).toBe("running");
@@ -840,6 +842,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       expect(retried.status).toBe("torndown");
       expect(rec.calls).toContain("steward:ad-session-bbb");
       expect(store.get("ad-session-bbb")?.status).toBe("torndown");
+      expect(store.get(spawnId)?.torndownAt).toBe(firstTorndownAt);
     } finally {
       store.close();
     }
@@ -943,6 +946,64 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([]);
     } finally {
       spy.mockRestore();
+      store.close();
+    }
+  });
+
+  it("leaves a steward that moved to another spawn mid-teardown under its new owner", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "20260520-qqqqqq", kind: "spawn", status: "stopped" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      const result = await remove(input);
+      store.register({ id: stewardId, kind: "steward", parentId: "20260520-qqqqqq", status: "running" });
+      return result;
+    };
+    try {
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(store.get(stewardId)).toMatchObject({ parentId: "20260520-qqqqqq", status: "running" });
+      expect(store.get(stewardId)?.torndownAt).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    ["re-parented to another spawn", { parentId: "20260520-qqqqqq" }, false],
+    ["re-registered with a new Castra session", { agentDeckSessionId: "ad-session-new" }, true],
+  ] as const)("does not recover a verified steward that was %s", async (_label, change, sameSpawn) => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "20260520-qqqqqq", kind: "spawn", status: "stopped" });
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({ id: stewardId, kind: "steward", status: "running", ...change });
+      rec.calls.length = 0;
+
+      const recovered = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("running");
+      expect(recovered.status).toBe(sameSpawn ? "tearing-down" : "torndown");
+      if (sameSpawn) {
+        expect(recovered.warnings.join("\n")).toContain(`"${stewardId}"`);
+        const retried = await teardownSession(store, spawnId, {}, rec.deps);
+        expect(retried.status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-new");
+        expect(store.get(stewardId)?.status).toBe("torndown");
+      }
+    } finally {
       store.close();
     }
   });

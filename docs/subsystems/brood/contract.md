@@ -63,9 +63,11 @@ The `brood.teardown` span follows the inbound W3C trace parent when supplied.
 Cleanup steps appear as ordered events and child spans with their outcome and
 diagnostic detail when available. Step details are capped at 500 characters.
 A failed or deferred step marks the teardown span errored. Brood writes a
-structured request warning for incomplete cleanup, including on HTTP 200.
-The warning includes the primary session ID as `session_id`, the
-`teardown_status`, and the failed and deferred `teardown_steps`.
+structured request warning for incomplete cleanup, including on HTTP 200, and
+for any nonterminal result even when every cleanup step succeeded (for example,
+a journal finalization failure). The warning includes the primary session ID as
+`session_id`, the `teardown_status`, the failed and deferred `teardown_steps`,
+and, for a nonterminal result, the capped `teardown_warnings`.
 
 The Brood dashboard counts teardown results with `march.brood.teardowns`
 and tracks seconds with `march.brood.teardown.duration`. Both instruments
@@ -107,14 +109,18 @@ any steward removal fails, or a steward registers under the spawn while earlier
 steps are in progress, Git cleanup is deferred and the row stays retryable. The
 journal's `finished` entry lists only the stewards whose removal that attempt
 verified.
-Recovery marks only the stewards that attempt verified; any steward registered
-afterwards stays live and the result is `tearing-down` with a warning naming it
-until a retry removes it. Once a teardown is admitted, or the row carries
-`torndownAt`, `PATCH /sessions/:id` and re-registration reject an
-`extractionResult` with 409, even if a later lifecycle PATCH changes `status`,
-so the archived result is final. `torndownAt` is write-once: a PATCH may set it
-but a `null` or empty value is rejected with 400 and an existing timestamp is
-kept. Archive failures
+The journal records each verified steward's registration identity (row, parent,
+and Castra session and profile). Recovery marks only stewards whose current
+registration still matches that identity; a steward re-registered under the
+same spawn stays live and the result is `tearing-down` with a warning naming it
+until a retry removes it, and a steward that moved to another spawn keeps its
+status under its new owner. Completion only marks stewards that still belong to
+the primary and keeps any existing `torndownAt`. Once a teardown is admitted
+(for the primary or any steward it admitted), or the row carries `torndownAt`,
+`PATCH /sessions/:id` and re-registration reject an `extractionResult` with 409,
+even if a later lifecycle PATCH changes `status`, so the archived result is
+final. `torndownAt` is write-once: a PATCH may set it but a `null` or empty
+value is rejected with 400 and an existing timestamp is kept. Archive failures
 end errored spans, following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 

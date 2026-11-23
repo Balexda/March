@@ -15,7 +15,10 @@ import {
 } from "./steward-removal.js";
 import {
   archiveTeardownEvidence,
+  sameSteward,
+  stewardIdentity,
   TeardownArchive,
+  type StewardIdentity,
   teardownResources,
   type TeardownResources,
 } from "./teardown-archive.js";
@@ -258,7 +261,12 @@ async function runTeardown(
     // update for the group the attempt verified, without repeating cleanup.
     // A re-registration that changed resource identity falls through to a
     // real teardown of the new resources instead.
-    const verified = completion.stewardIds ?? [];
+    // Complete only steward registrations that still match what the attempt
+    // removed (same row, parent, and Castra target); a re-registered steward
+    // was never verified gone and is left for a real retry.
+    const verified = (completion.stewards ?? [])
+      .filter((recorded) => sameSteward(recorded, store.get(recorded.id)))
+      .map((recorded) => recorded.id);
     completeRegistry(completion.at, verified);
     return unremovedStewards(verified) ? finish("partial") : finish("success");
   }
@@ -303,7 +311,8 @@ async function runTeardown(
   }
 
   // Stewards whose Castra removal this attempt verified (`removed` or `absent`).
-  const verifiedStewardIds: string[] = [];
+  const verifiedStewards: StewardIdentity[] = [];
+  const verifiedStewardIds = (): string[] => verifiedStewards.map((steward) => steward.id);
   let attempt: number | undefined;
   try {
     if (!archive) throw archiveError;
@@ -391,7 +400,7 @@ async function runTeardown(
   // A steward registered while earlier steps awaited shares the worktree but was
   // never removed. Check membership here, synchronously adjacent to the Git
   // steps (no await in between), and defer both rather than delete its workspace.
-  const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(verifiedStewardIds);
+  const unverifiedSteward = !stewardRemovalFailed && unremovedStewards(verifiedStewardIds());
   const gitDeferral = stewardRemovalFailed
     ? "deferred: steward removal failed"
     : unverifiedSteward
@@ -485,7 +494,7 @@ async function runTeardown(
       }
       // `removed` — a real session was reaped; `absent` — Castra verified no
       // session for this worktree. Either way the steward is gone.
-      verifiedStewardIds.push(row.id);
+      verifiedStewards.push(stewardIdentity(row));
       return {
         step: "steward",
         outcome: res.outcome === "removed" ? "ok" : "skipped",
@@ -537,14 +546,14 @@ async function runTeardown(
           status: outcome === "success" ? "torndown" : "tearing-down",
           steps,
           warnings,
-        }, at, { stewardIds: verifiedStewardIds, resources: teardownResources(primary) });
+        }, at, { stewards: verifiedStewards, resources: teardownResources(primary) });
         finalizationSpan.end();
       } catch (error) {
         warnings.push(`archive finalization failed: ${message(error)}`);
         finalizationSpan.end({ error: true });
         return finish("error");
       }
-      if (outcome === "success") completeRegistry(at, verifiedStewardIds);
+      if (outcome === "success") completeRegistry(at, verifiedStewardIds());
     }
     return finish(outcome);
   }

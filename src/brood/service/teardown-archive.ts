@@ -20,8 +20,34 @@ interface AttemptFinished {
   warnings: string[];
   /** Stewards whose removal this attempt verified. */
   stewardIds?: string[];
+  /** Registration identity of each verified steward, checked before recovery. */
+  stewards?: StewardIdentity[];
   /** Primary resource identity this attempt reclaimed. */
   resources?: TeardownResources;
+}
+
+/** The steward registration a removal verified: its row, owner, and Castra target. */
+export interface StewardIdentity {
+  id: string;
+  parentId: string | null;
+  sessionId: string;
+  profile: string | null;
+}
+
+export function stewardIdentity(record: SessionRecord): StewardIdentity {
+  return {
+    id: record.id,
+    parentId: record.parentId ?? null,
+    sessionId: record.agentDeckSessionId ?? record.id,
+    profile: record.profile ?? null,
+  };
+}
+
+export function sameSteward(recorded: StewardIdentity, current: SessionRecord | undefined): boolean {
+  if (!current || current.kind !== "steward") return false;
+  const now = stewardIdentity(current);
+  return recorded.id === now.id && recorded.parentId === now.parentId &&
+    recorded.sessionId === now.sessionId && recorded.profile === now.profile;
 }
 
 export interface TeardownResources {
@@ -114,12 +140,14 @@ export class TeardownArchive {
     attempt: number,
     result: TeardownResult,
     at: string,
-    verified: { stewardIds: string[]; resources: TeardownResources },
+    verified: { stewards: StewardIdentity[]; resources: TeardownResources },
   ): void {
     const { status, steps, warnings } = result;
     this.append({
       attempt, event: "finished", at, status, steps, warnings,
-      stewardIds: verified.stewardIds, resources: verified.resources,
+      stewardIds: verified.stewards.map((steward) => steward.id),
+      stewards: verified.stewards,
+      resources: verified.resources,
     });
   }
 

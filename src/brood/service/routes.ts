@@ -628,7 +628,9 @@ export async function registerRoutes(
           outcome,
           ...(detail ? { detail: detail.slice(0, TEARDOWN_DETAIL_LIMIT) } : {}),
         }));
-      if (affectedSteps.length > 0) {
+      // A nonterminal result is incomplete even when every cleanup step
+      // succeeded (e.g. journal finalization failed); the warnings carry why.
+      if (affectedSteps.length > 0 || result.status !== "torndown") {
         request.log.warn({
           route: request.routeOptions.url,
           method: request.method,
@@ -636,6 +638,9 @@ export async function registerRoutes(
           session_id: result.id,
           teardown_status: result.status,
           teardown_steps: affectedSteps,
+          ...(result.status !== "torndown"
+            ? { teardown_warnings: result.warnings.map((warning) => warning.slice(0, TEARDOWN_DETAIL_LIMIT)) }
+            : {}),
         }, "brood teardown cleanup incomplete");
       }
       return result;

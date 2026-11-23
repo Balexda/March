@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS teardown_snapshots (
   snapshot TEXT NOT NULL,
   completing_attempt INTEGER
 );
+CREATE TABLE IF NOT EXISTS teardown_members (
+  member_id TEXT PRIMARY KEY,
+  primary_id TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
 `;
 
@@ -317,8 +321,14 @@ export class SessionStore implements SessionRepository {
       const original = this.db.prepare("SELECT snapshot FROM teardown_snapshots WHERE id = ?")
         .get(id) as { snapshot: string };
       this.update(id, { ...changes, status: "tearing-down" });
+      const admit = this.db.prepare(
+        "INSERT INTO teardown_members (member_id, primary_id) VALUES (?, ?) " +
+        "ON CONFLICT(member_id) DO UPDATE SET primary_id = excluded.primary_id",
+      );
       for (const stewardId of stewardIds) {
-        if (stewardId !== id) this.update(stewardId, { status: "tearing-down" });
+        if (stewardId === id) continue;
+        this.update(stewardId, { status: "tearing-down" });
+        admit.run(stewardId, id);
       }
       return original.snapshot;
     });
@@ -330,7 +340,8 @@ export class SessionStore implements SessionRepository {
   }
 
   teardownAdmitted(id: string): boolean {
-    return this.db.prepare("SELECT 1 FROM teardown_snapshots WHERE id = ?").get(id) !== undefined;
+    return this.db.prepare("SELECT 1 FROM teardown_snapshots WHERE id = ?").get(id) !== undefined ||
+      this.db.prepare("SELECT 1 FROM teardown_members WHERE member_id = ?").get(id) !== undefined;
   }
 
   pendingTeardownCompletion(id: string): number | undefined {
@@ -341,12 +352,18 @@ export class SessionStore implements SessionRepository {
 
   completeTeardown(id: string, stewardIds: readonly string[], at: string): void {
     this.teardownTransaction(() => {
-      const changes = { status: "torndown", torndownAt: at } as const;
+      // Keep the first completed-teardown timestamp on rows that already have one.
+      const complete = (rowId: string) => this.update(rowId, {
+        status: "torndown",
+        torndownAt: this.get(rowId)?.torndownAt ?? at,
+      });
       for (const stewardId of stewardIds) {
-        if (stewardId !== id) this.update(stewardId, changes);
+        // A steward re-registered under another parent belongs to that group now.
+        if (stewardId !== id && this.get(stewardId)?.parentId === id) complete(stewardId);
       }
-      this.update(id, changes);
+      complete(id);
       this.db.prepare("DELETE FROM teardown_snapshots WHERE id = ?").run(id);
+      this.db.prepare("DELETE FROM teardown_members WHERE primary_id = ?").run(id);
     });
   }
 
