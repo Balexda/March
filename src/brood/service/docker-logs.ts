@@ -11,6 +11,8 @@ export interface DockerLogsOptions {
   readonly bin?: string;
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
+  /** Process launcher (tests inject controlled streams). Defaults to `spawn`. */
+  readonly spawnImpl?: typeof spawn;
 }
 
 /**
@@ -38,7 +40,7 @@ export function readContainerLogsAsync(
     let failure: string | undefined;
     let settled = false;
 
-    const child = spawn(bin, ["logs", containerId], {
+    const child = (opts.spawnImpl ?? spawn)(bin, ["logs", containerId], {
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -1,9 +1,12 @@
 /**
  * @l1 @deterministic @ci
  */
+import type { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { readContainerLogsAsync } from "./docker-logs.js";
 
@@ -39,11 +42,31 @@ describe("readContainerLogsAsync", () => {
   });
 
   it("keeps a stdout multibyte character split around a stderr chunk", async () => {
-    // stdout: E2 82 | stderr: "X" | stdout: AC  ->  "€" must survive intact.
-    const bin = fakeDocker(
-      'printf "\\342\\202"; sleep 0.1; printf "X" >&2; sleep 0.1; printf "\\254"',
-    );
-    const out = await readContainerLogsAsync("c1", { bin });
+    // Drive delivery explicitly (no process scheduling): stdout E2 82, then
+    // stderr "X", then stdout AC — the split "€" must survive intact.
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      kill: () => true,
+    });
+    const spawnImpl = (() => child) as unknown as typeof spawn;
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+    const pending = readContainerLogsAsync("c1", { spawnImpl });
+    stdout.write(Buffer.from([0xe2, 0x82]));
+    await tick();
+    stderr.write(Buffer.from("X"));
+    await tick();
+    stdout.write(Buffer.from([0xac]));
+    await tick();
+    stdout.end();
+    stderr.end();
+    await tick();
+    child.emit("close", 0, null);
+
+    const out = await pending;
     expect(out).toBe("X\u20ac");
     expect(out).not.toContain("\ufffd");
   });
