@@ -24,6 +24,18 @@ derived read views in `views`. It accepts `kind`, `status`, `parentId`, and
 [Brood CLI read contract](../../../specs/2026-08-14-012-brood-cli-read-surface/brood-cli-read-surface.contracts.md)
 describes the response and operator output.
 
+`march brood sessions` takes no positional arguments. It combines Castra's
+live `march/` inventory with `GET /sessions?kind=spawn` read views across all
+tracked statuses. It prints the unprefixed interactive names and the tracked
+spawn IDs in labeled sections. A name matching any tracked spawn ID is labeled
+unavailable with the collision reason. A healthy empty Castra inventory prints
+an explicit empty result.
+
+Both reads have deadlines. A failed read causes a nonzero exit and a diagnostic
+on stderr for each unavailable source. Available sections are labeled partial,
+and interactive names are advertised as attachable only when Brood has
+confirmed that they do not collide.
+
 `POST /sessions/:id/teardown` accepts optional `force`, `kill`, and `reason`.
 A steward ID resolves to its owning spawn for admission. Created and running
 spawns require force. Brood records that requirement before archiving and

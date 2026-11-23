@@ -5,7 +5,7 @@
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
-Castra exposes open process-health/status routes and a bearer-token-protected `/v1/*` JSON API over agent-deck interactive sessions. Protected routes use `Authorization: Bearer <token>` and return the uniform error envelope documented in `## Error Modes` on non-2xx responses.
+Castra exposes open process-health/status routes and a bearer-token-protected `/v1/*` JSON API for agent-deck session operations and live tmux inventory. Protected routes use `Authorization: Bearer <token>` and return the uniform error envelope documented in `## Error Modes` on non-2xx responses.
 
 ### `GET /healthz`
 
@@ -26,6 +26,19 @@ Castra exposes open process-health/status routes and a bearer-token-protected `/
 | Response envelope | `200` with `{ "service": "march-castra", "version": string, "uptimeSeconds": number, "agentDeck": { "reachable": boolean } }`. |
 | Authentication behavior | Open; bearer token is not required. |
 | Visible status or error behavior | Reports agent-deck reachability as data in the response body; a false `agentDeck.reachable` value does not change the HTTP status. |
+
+### `GET /v1/interactive-sessions`
+
+| Field | Contract |
+| --- | --- |
+| Request | `GET /v1/interactive-sessions` with `Authorization: Bearer <token>` when authentication is configured. |
+| Response | `200` with `{ "names": string[] }`. Names are unprefixed suffixes of live `march/<name>` sessions on Castra's tmux server. |
+| Empty result | A healthy tmux installation with no running server or no eligible sessions returns `200` with `{ "names": [] }`. |
+| Failure | Unauthorized requests return `401`. Missing tmux, socket permission errors, timeouts, and other tmux failures return `502` with code `tmux_error`. Unexpected service failures return `500`. |
+
+`CastraClient.listInteractiveSessions()` returns the names and rejects failed
+or malformed responses. The tmux call has a 3-second deadline and the client
+request has a 5-second deadline.
 
 ### `GET /v1/sessions`
 
@@ -164,4 +177,5 @@ All non-2xx responses use this JSON envelope:
 | Missing session | Show, send, output, and set routes | `404` with `{ "error": { "code": "not_found", "message": string } }` | agent-deck reports that the requested session id is absent. Remove treats this condition as success with `removed: false`. |
 | Conflict | Launch route | `409` with `{ "error": { "code": "conflict", "message": string } }` | Castra detects a concurrent launch/worktree mismatch and refuses to attach the caller to the wrong session. |
 | Agent-deck failure | Protected routes that invoke agent-deck | `502` with `{ "error": { "code": "agent_deck_error", "message": string } }` | agent-deck exits non-zero, returns unparseable output, cannot identify a launched session, or otherwise fails outside the typed validation/not-found/conflict cases. |
+| tmux inventory failure | `GET /v1/interactive-sessions` | `502` with `{ "error": { "code": "tmux_error", "message": string } }` | The live tmux read failed. |
 | Internal failure | Any route | `500` with `{ "error": { "code": "internal", "message": "Internal server error." } }` | Unexpected server errors are logged server-side; the public body stays generic and does not expose dependency internals. |

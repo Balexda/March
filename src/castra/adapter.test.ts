@@ -25,6 +25,7 @@ import {
   buildSessionShowArgs,
   createAgentDeckAdapter,
   expectedWorktreeDirName,
+  listInteractiveSessions,
   looksLikeComposerRefusal,
   paneTail,
   parseAgentDeckSession,
@@ -56,6 +57,45 @@ function session(overrides: Partial<CastraSession> = {}): Record<string, unknown
     status: overrides.status ?? "idle",
   };
 }
+
+describe("live interactive inventory", () => {
+  it("reads only live march/ names from Castra's tmux server with a timeout", () => {
+    childProcessMock.execFileSync.mockReturnValueOnce("other\nmarch/\nmarch/conductor\nmarch/second name\n");
+    expect(listInteractiveSessions()).toEqual(["conductor", "second name"]);
+    expect(childProcessMock.execFileSync).toHaveBeenLastCalledWith(
+      "tmux",
+      ["list-sessions", "-F", "#{session_name}"],
+      expect.objectContaining({ timeout: 3_000, killSignal: "SIGKILL" }),
+    );
+  });
+
+  it("returns empty when the live server has no eligible sessions", () => {
+    childProcessMock.execFileSync.mockReturnValueOnce("unrelated\n");
+    expect(listInteractiveSessions()).toEqual([]);
+  });
+
+  it.each([
+    "no server running on /tmp/tmux/default",
+    "error connecting to /tmp/tmux/default (No such file or directory)",
+  ])("returns empty for %s", (stderr) => {
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error("exit 1"), { status: 1, stderr });
+    });
+    expect(listInteractiveSessions()).toEqual([]);
+  });
+
+  it.each([
+    [{ code: "ENOENT" }, "tmux executable was not found"],
+    [{ code: "ETIMEDOUT" }, "timed out"],
+    [{ status: 1, stderr: "error connecting to /tmp/tmux/default (Permission denied)" }, "Permission denied"],
+    [{ status: 1, stderr: "server exited unexpectedly" }, "server exited unexpectedly"],
+  ])("reports tmux failure %j", (failure, message) => {
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error("tmux failed"), failure);
+    });
+    expect(() => listInteractiveSessions()).toThrow(message);
+  });
+});
 
 describe("castra adapter — argv builders", () => {
   it("builds list args with the profile flag", () => {

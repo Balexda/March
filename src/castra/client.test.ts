@@ -37,6 +37,27 @@ describe("castra client — config resolution", () => {
 });
 
 describe("castra client — requests", () => {
+  it("validates live inventory and keeps malformed and failed responses distinct from empty", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(200, { names: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { names: [null] }))
+      .mockResolvedValueOnce(jsonResponse(401, {
+        error: { code: "unauthorized", message: "Missing or invalid bearer token." },
+      }));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", token: "secret", fetchImpl });
+
+    await expect(client.listInteractiveSessions()).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledWith("http://castra:9264/v1/interactive-sessions",
+      expect.objectContaining({
+        method: "GET",
+        headers: { authorization: "Bearer secret" },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    await expect(client.listInteractiveSessions()).rejects.toThrow("valid interactive session inventory");
+    await expect(client.listInteractiveSessions()).rejects.toMatchObject({ status: 401, code: "unauthorized" });
+  });
+
   it("launches a session with the bearer token and trace header", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse(201, {

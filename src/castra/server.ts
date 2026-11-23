@@ -15,6 +15,7 @@ import {
 import {
   createAgentDeckAdapter,
   createAgentDeckRecoveryRuntime,
+  listInteractiveSessions,
   type AgentDeckAdapter,
   type RecoveryRuntime,
 } from "./adapter.js";
@@ -29,6 +30,7 @@ import {
   CastraAgentDeckError,
   CastraConflictError,
   CastraNotFoundError,
+  CastraTmuxError,
   type CastraErrorCode,
   CastraValidationError,
 } from "./types.js";
@@ -39,6 +41,8 @@ const SLICE_ID_HEADER = "x-march-slice-id";
 export interface BuildServerOptions {
   /** agent-deck adapter; defaults to the real execFileSync-backed one. */
   readonly adapter?: AgentDeckAdapter;
+  /** Override the live tmux inventory reader in tests. */
+  readonly interactiveInventory?: typeof listInteractiveSessions;
   /**
    * Shared bearer token gating `/v1/*`. When empty/undefined, auth is disabled
    * (open) — the serve entry warns at startup so this is a deliberate, visible
@@ -213,6 +217,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       void reply.code(409).send(errorBody("conflict", err.message));
       return;
     }
+    if (err instanceof CastraTmuxError) {
+      void reply.code(502).send(errorBody("tmux_error", err.message));
+      return;
+    }
     if (err instanceof CastraAgentDeckError) {
       void reply.code(502).send(errorBody("agent_deck_error", err.message));
       return;
@@ -229,6 +237,12 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       .code(404)
       .send(errorBody("not_found", `No route for ${request.method} ${request.url}`));
   });
+
+  app.get("/v1/interactive-sessions", async (request) =>
+    withCastraSpan({ op: "interactive_inventory", traceKey: traceKeyFor(request) }, () => ({
+      names: (options.interactiveInventory ?? listInteractiveSessions)(),
+    })),
+  );
 
   // --- health / status (open) ---------------------------------------------
   app.get("/healthz", async () => ({ status: "ok" }));

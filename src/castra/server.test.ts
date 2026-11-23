@@ -11,6 +11,7 @@ import {
   CastraAgentDeckError,
   CastraConflictError,
   CastraNotFoundError,
+  CastraTmuxError,
   type CastraSession,
 } from "./types.js";
 import { createCastraLogger } from "../observability/logger.js";
@@ -47,6 +48,30 @@ describe("castra server", () => {
 
   afterEach(async () => {
     if (app) await app.close();
+  });
+
+  it("authenticates live inventory and preserves empty results and tmux errors", async () => {
+    const interactiveInventory = vi.fn()
+      .mockReturnValueOnce(["conductor"])
+      .mockReturnValueOnce([])
+      .mockImplementationOnce(() => { throw new CastraTmuxError("tmux permission denied"); });
+    const adapter = fakeAdapter();
+    app = buildServer({ adapter, token: "secret", interactiveInventory });
+    const url = "/v1/interactive-sessions";
+    const headers = { authorization: "Bearer secret" };
+
+    expect((await app.inject({ url })).statusCode).toBe(401);
+    expect(interactiveInventory).not.toHaveBeenCalled();
+    expect((await app.inject({ url, headers })).json()).toEqual({ names: ["conductor"] });
+    const empty = await app.inject({ url, headers });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ names: [] });
+    const failure = await app.inject({ url, headers });
+    expect(failure.statusCode).toBe(502);
+    expect(failure.json()).toEqual({
+      error: { code: "tmux_error", message: "tmux permission denied" },
+    });
+    expect(adapter.list).not.toHaveBeenCalled();
   });
 
   describe("health & status (open, no auth)", () => {

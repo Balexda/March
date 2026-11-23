@@ -4,6 +4,7 @@ import {
   CastraAgentDeckError,
   CastraConflictError,
   CastraNotFoundError,
+  CastraTmuxError,
   type CastraSession,
 } from "./types.js";
 import { CASTRA_DEFAULT_MODEL } from "./config.js";
@@ -793,14 +794,52 @@ export interface RecoveryRuntime {
 }
 
 /** Run `tmux <args>` against the same server socket agent-deck addresses. */
-function runTmux(args: readonly string[]): string {
+function runTmux(args: readonly string[], timeout?: number): string {
   const out = execFileSync("tmux", args as string[], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
-    env: resolveAgentDeckEnv(process.env, process.getuid?.()),
+    env: resolveAgentDeckEnv(
+      timeout === undefined ? process.env : { ...process.env, LC_ALL: "C" },
+      process.getuid?.(),
+    ),
+    ...(timeout === undefined ? {} : { timeout, killSignal: "SIGKILL" }),
   });
   return typeof out === "string" ? out : "";
+}
+
+/** Live inventory on Castra's tmux server. */
+export function listInteractiveSessions(): string[] {
+  const prefix = "march/";
+  let stdout: string;
+  try {
+    stdout = runTmux(["list-sessions", "-F", "#{session_name}"], 3_000);
+  } catch (err) {
+    const failure = err as NodeJS.ErrnoException & { status?: number; stderr?: string };
+    const detail = failure.stderr?.trim();
+    // A refused connection or missing socket means no server. A spawn
+    // ENOENT means the executable itself is missing.
+    if (
+      failure.status === 1 &&
+      detail &&
+      (/^no server running on .+$/.test(detail) ||
+        /^error connecting to .+ \(No such file or directory\)$/.test(detail) ||
+        detail === "no sessions")
+    ) {
+      return [];
+    }
+    if (failure.code === "ENOENT") {
+      throw new CastraTmuxError("tmux executable was not found on Castra's PATH.");
+    }
+    if (failure.code === "ETIMEDOUT") {
+      throw new CastraTmuxError("tmux session inventory timed out.");
+    }
+    throw new CastraTmuxError("tmux session inventory failed: " + (detail || failure.message));
+  }
+  return stdout
+    .split("\n")
+    .filter((name) => name.startsWith(prefix) && name.length > prefix.length)
+    .map((name) => name.slice(prefix.length));
 }
 
 export function createAgentDeckRecoveryRuntime(): RecoveryRuntime {
