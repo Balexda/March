@@ -59,12 +59,14 @@ function runPids(root: string): number[] {
   } catch {
     return [];
   }
-  const marker = `\0MARCH_TEST_ROOT=${root}\0`;
+  // Environment bytes are the UTF-8 the child was given, so compare bytes.
+  const marker = Buffer.from(`\0MARCH_TEST_ROOT=${root}\0`, "utf8");
   const pids: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     try {
-      if (`\0${fs.readFileSync(`/proc/${entry}/environ`, "latin1")}`.includes(marker)) pids.push(Number(entry));
+      const environ = Buffer.concat([Buffer.from([0]), fs.readFileSync(`/proc/${entry}/environ`)]);
+      if (environ.includes(marker)) pids.push(Number(entry));
     } catch {
       // Exited or not readable.
     }
@@ -101,8 +103,18 @@ function readPid(file: string): number | undefined {
   }
 }
 
-function setup(agentScript: string, options: { readonly telemetry?: boolean } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-signal-"));
+interface SetupOptions {
+  readonly telemetry?: boolean;
+  /** Directory name prefix under the OS temp dir (e.g. non-ASCII). */
+  readonly prefix?: string;
+  /** Delay before the real `setsid` runs, widening the pre-group window. */
+  readonly setsidDelay?: number;
+}
+
+const realSetsid = spawnSync("sh", ["-c", "command -v setsid"], { encoding: "utf8" }).stdout.trim();
+
+function setup(agentScript: string, options: SetupOptions = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), options.prefix ?? "march-spawn-signal-"));
   const workspace = path.join(root, "workspace");
   const bin = path.join(root, "bin");
   fs.mkdirSync(workspace);
@@ -110,6 +122,13 @@ function setup(agentScript: string, options: { readonly telemetry?: boolean } = 
   fs.writeFileSync(path.join(workspace, "README.md"), "base\n");
   fs.writeFileSync(path.join(root, "prompt.txt"), "do the thing\n");
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\n${agentScript}\n`, { mode: 0o755 });
+  if (options.setsidDelay !== undefined) {
+    fs.writeFileSync(
+      path.join(bin, "setsid"),
+      `#!/bin/sh\necho > "$MARCH_TEST_ROOT/setsid.waiting"\nsleep ${options.setsidDelay}\nexec '${realSetsid}' "$@"\n`,
+      { mode: 0o755 },
+    );
+  }
   const [, , script] = claudeCodeBackend.buildEntrypoint(path.join(root, "prompt.txt"));
   const scaffold = ["sh", "-c", script.replace(`cd ${CONTAINER_WORKDIR}`, `cd '${workspace}'`)];
   const [shell, flag, wrapped] = options.telemetry ? wrapEntrypointWithEmitter(scaffold) : scaffold;
@@ -238,6 +257,26 @@ describe.skipIf(!hasSetsid).each([
     expect(emittedStatus(root)).toBe(telemetry ? "42" : undefined);
   }, 20_000);
 
+  it("delivers a stop that arrives before the agent's process group exists", async () => {
+    const { root, child, exited } = setup([
+      `echo $$ > "$MARCH_TEST_ROOT/agent.tmp" && mv "$MARCH_TEST_ROOT/agent.tmp" "$MARCH_TEST_ROOT/agent.pid"`,
+      `while :; do sleep 0.05; done`,
+    ].join("\n"), { telemetry, setsidDelay: 0.5 });
+    await waitForFile(path.join(root, "setsid.waiting"));
+
+    child.kill("SIGTERM");
+    const result = await Promise.race([
+      exited,
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 8_000)),
+    ]);
+
+    expect(result).toEqual({ code: 143, signal: null });
+    // The stop may land before the agent starts; either way nothing survives.
+    const agentPid = readPid(path.join(root, "agent.pid"));
+    if (agentPid !== undefined) expect(await goneWithin(agentPid)).toBe(true);
+    expect(runPids(root)).toEqual([]);
+  }, 20_000);
+
   it("stops an agent with default SIGTERM handling and its descendants", async () => {
     const { root, child, exited } = setup([
       `sleep 30 & echo $! > "$MARCH_TEST_ROOT/grandchild.tmp" && mv "$MARCH_TEST_ROOT/grandchild.tmp" "$MARCH_TEST_ROOT/grandchild.pid"`,
@@ -268,11 +307,14 @@ describe.skipIf(!hasSetsid).each([
 });
 
 describe.skipIf(!hasSetsid || !fs.existsSync("/proc/self/environ"))("signal test cleanup", () => {
-  it("reaps an agent that never publishes its pid", async () => {
+  it.each([
+    { label: "ASCII", prefix: "march-spawn-signal-" },
+    { label: "non-ASCII", prefix: "march-spawn-signal-é-" },
+  ])("reaps an agent that never publishes its pid ($label root)", async ({ prefix }) => {
     const { root, run } = setup([
       `echo started > "$MARCH_TEST_ROOT/agent.started"`,
       `while :; do sleep 0.05; done`,
-    ].join("\n"));
+    ].join("\n"), { prefix });
     const deadline = Date.now() + 10_000;
     while (!fs.existsSync(path.join(root, "agent.started"))) {
       if (Date.now() >= deadline) throw new Error("agent did not start");
