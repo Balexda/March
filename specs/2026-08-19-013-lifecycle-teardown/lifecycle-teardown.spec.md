@@ -139,7 +139,7 @@ Recommended implementation sequence:
 | US1 | Request A Safe Teardown | — | specs/2026-08-19-013-lifecycle-teardown/01-request-a-safe-teardown.tasks.md |
 | US2 | Preserve Teardown Evidence | US1 | specs/2026-08-19-013-lifecycle-teardown/02-preserve-teardown-evidence.tasks.md |
 | US3 | Reclaim Runtime Artifacts By Exact Identity | US1, US2 | specs/2026-08-19-013-lifecycle-teardown/03-reclaim-runtime-artifacts-by-exact-identity.tasks.md |
-| US4 | Make Teardown Idempotent And Retryable | US2, US3 | — |
+| US4 | Make Teardown Idempotent And Retryable | US2, US3 | specs/2026-08-19-013-lifecycle-teardown/04-make-teardown-idempotent-and-retryable.tasks.md |
 | US5 | Observe Teardown Outcomes | US1 | specs/2026-08-19-013-lifecycle-teardown/05-observe-teardown-outcomes.tasks.md |
 
 ## Requirements *(mandatory)*
