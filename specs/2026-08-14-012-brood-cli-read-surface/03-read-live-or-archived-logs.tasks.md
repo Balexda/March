@@ -101,7 +101,7 @@
 
 ### Tasks
 
-- [ ] **Wire `march brood logs` to Brood**
+- [x] **Wire `march brood logs` to Brood**
 
   Add the `logs <id>` subcommand in `src/cli/program.ts` as a thin `BroodClient` call that writes log content to stdout. Keep all Docker, Castra, archive, and source-selection behavior behind the service endpoint.
 
@@ -112,7 +112,7 @@
   - Brood service connection failures exit non-zero without raw registry or archive fallback for FR-016
   - The command introduces no teardown, watch, follow, attach, launch, or cleanup behavior for FR-018
 
-- [ ] **Prove CLI logs are read-only**
+- [x] **Prove CLI logs are read-only**
 
   Add focused CLI and client coverage showing `march brood logs <id>` delegates to Brood and only renders the response. Include coverage for successful log output, unavailable logs, unknown ids, and unreachable Brood.
 

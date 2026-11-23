@@ -218,6 +218,68 @@ describe("march CLI", () => {
     }
   });
 
+  it("reads Brood logs using only the service endpoint", async () => {
+    const app = Fastify();
+    const home = makeTmpDir();
+    const requests: string[] = [];
+    const logs = [
+      { id: "live", source: "live-container", content: "first line\nsecond line\n" },
+      { id: "archived", source: "archive", content: "archived without a final newline" },
+      { id: "steward", source: "castra-session", content: "steward output\n" },
+    ];
+    const failures = [
+      { id: "missing", status: 404, error: 'No session with id "missing".' },
+      { id: "unavailable", status: 409, error: "Logs are unavailable." },
+      { id: "upstream-error", status: 502, error: "Logs are unavailable: Castra read failed." },
+    ];
+    app.addHook("onRequest", async (request) => {
+      requests.push(`${request.method} ${request.url}`);
+    });
+    app.get<{ Params: { id: string } }>("/sessions/:id/logs", (request, reply) => {
+      const log = logs.find(({ id }) => id === request.params.id);
+      if (log) {
+        return reply.type("text/plain").header("X-March-Log-Source", log.source).send(log.content);
+      }
+      const failure = failures.find(({ id }) => id === request.params.id);
+      return reply.code(failure?.status ?? 500).send({ error: failure?.error ?? "Unexpected id" });
+    });
+
+    // Permit loading the CLI and its dependencies while denying access to
+    // local archive, registry and worktree files or child processes such as Docker and git.
+    const packageRoot = path.resolve(path.dirname(CLI_PATH), "..");
+    const readLogs = (url: string, id: string) =>
+      execFileAsync(process.execPath, [
+        "--experimental-permission",
+        "--disable-warning=ExperimentalWarning",
+        `--allow-fs-read=${path.dirname(CLI_PATH)}`,
+        `--allow-fs-read=${path.join(packageRoot, "node_modules")}`,
+        `--allow-fs-read=${path.join(packageRoot, "package.json")}`,
+        CLI_PATH, "brood", "logs", id,
+      ], {
+        env: { ...process.env, HOME: home, MARCH_OTEL: "0", MARCH_BROOD_URL: url, CASTRA_URL: url },
+        timeout: 5000,
+      });
+
+    let url: string;
+    try {
+      url = await app.listen({ host: "127.0.0.1", port: 0 });
+      for (const { id, content } of logs) {
+        await expect(readLogs(url, id)).resolves.toEqual({ stdout: content, stderr: "" });
+      }
+      for (const { id, error } of failures) {
+        await expect(readLogs(url, id)).rejects.toMatchObject({
+          code: 1, stdout: "", stderr: error + "\n",
+        });
+      }
+      expect(requests).toEqual([...logs, ...failures].map(({ id }) => `GET /sessions/${id}/logs`));
+    } finally {
+      await app.close();
+    }
+    await expect(readLogs(url, "archived")).rejects.toMatchObject({
+      code: 1, stdout: "", stderr: expect.stringContaining("Could not reach the brood service"),
+    });
+  }, 15000);
+
   it.skipIf(!sqliteAvailable)("renders real Brood teardown results and admission errors", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
     const app = Fastify();

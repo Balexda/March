@@ -2504,6 +2504,22 @@ brood
     }
   });
 
+brood
+  .command("logs <id>")
+  .description("Read logs for a tracked session from the Brood service")
+  .action(async (id: string) => {
+    commandHandled = true;
+    try {
+      const { BroodClient } = await import("../brood/service/client.js");
+      const { content } = await new BroodClient().logs(id);
+      process.stdout.write(content);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 const herald = program
   .command("herald")
   .description("Manage Herald system-state observation (heartbeat + event log)");
