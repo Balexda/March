@@ -1,3 +1,4 @@
+import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
@@ -36,7 +37,9 @@ export interface GhostDecision {
 
 /** Pure: which worker sessions are orphaned ghosts safe to tear down. */
 export function assess(state: LoopState): GhostDecision[] {
-  const out: GhostDecision[] = [];
+  const out: GhostDecision[] = pendingTeardowns(state, "ghost-cleanup")
+    .map(({ sessionId }) => ({ sessionId, title: "", dirName: sessionId }));
+  const pending = new Set(out.map(({ sessionId }) => sessionId));
   if (!Array.isArray(state.sessions)) return out;
   const activeDirs = new Set<string>();
   const activeSessionIds = new Set<string>();
@@ -57,7 +60,7 @@ export function assess(state: LoopState): GhostDecision[] {
   const nowMs = Date.parse(state.ts);
   for (const session of state.sessions) {
     if (!session || typeof session !== "object") continue;
-    if (!isWorkerSession(session, state.workerGroup)) continue;
+    if (pending.has(String(session.id)) || !isWorkerSession(session, state.workerGroup)) continue;
     if (typeof session.id === "string" && activeSessionIds.has(session.id)) continue;
     // Already deferred to Brood (a prior tick got a not-tracked 404) — don't
     // re-attempt the deterministic 404 every tick.
@@ -81,7 +84,9 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
     // that trace (sibling under the deterministic session anchor) instead of
     // orphaning a separate root (#234).
     const teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward", traceKey: d.sessionId });
+    const pending = pendingTeardowns(state, "ghost-cleanup").some(({ sessionId }) => sessionId === d.sessionId);
     if (teardown.ok) {
+      setTeardownPending(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, false);
       dropSession(state, d.sessionId);
       res.mutated = true;
       res.actions.push({
@@ -90,7 +95,7 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
         title: d.title,
         detail: `removed ghost steward (worktree ${d.dirName} not tracked by any non-terminal slice)`,
       });
-    } else if (teardown.notTracked) {
+    } else if (teardown.notTracked && !pending) {
       // Brood has no record of this session (404) — it's a reconciliation gap
       // Brood owns (adopt the open-PR steward, or reap the dead orphan), NOT a
       // teardown the legate should re-issue. Tombstone it so we surface ONCE and
@@ -106,8 +111,8 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
         detail: `brood does not track ghost steward (worktree ${d.dirName}); deferred to Brood reconciliation, not retrying: ${teardown.detail}`,
       });
     } else {
-      // Transient failure (Brood unreachable / 5xx) — defer and retry next tick;
-      // do NOT tombstone, the next tick may reach Brood.
+      setTeardownPending(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, true);
+      res.mutated = true;
       res.actions.push({
         action: "ghost-cleanup-failed",
         sessionId: d.sessionId,

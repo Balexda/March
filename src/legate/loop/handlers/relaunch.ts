@@ -1,3 +1,4 @@
+import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
@@ -501,13 +502,17 @@ async function reconcileBrood(
         reason: "steward-relaunch",
         traceKey: d.sliceId,
       });
-      if (teardown.ok) notes.push("reaped prior steward " + ids.priorSessionId);
-      else if (teardown.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
+      if (teardown.ok) {
+        dropSession(state, ids.priorSessionId);
+        notes.push("reaped prior steward " + ids.priorSessionId);
+      } else if (teardown.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
       else {
+        setTeardownPending(state, ctx, "relaunch", ids.priorSessionId, d.sliceId, true);
         notes.push("prior reap failed: " + teardown.detail);
         ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} failed: ${teardown.detail}`);
       }
     } catch (err) {
+      setTeardownPending(state, ctx, "relaunch", ids.priorSessionId, d.sliceId, true);
       notes.push("prior reap errored: " + errMsg(err));
       ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} errored: ${errMsg(err)}`);
     }
@@ -547,6 +552,18 @@ export async function apply(
   deps: RelaunchDeps = defaultRelaunchDeps,
 ): Promise<HandlerResult> {
   const res = emptyHandlerResult();
+  for (const { sessionId, traceKey } of pendingTeardowns(state, "relaunch")) {
+    try {
+      const teardown = await ctx.broodTeardown(sessionId, { force: true, reason: "steward-relaunch", traceKey });
+      if (teardown.ok) {
+        setTeardownPending(state, ctx, "relaunch", sessionId, traceKey, false);
+        dropSession(state, sessionId);
+        res.mutated = true;
+      }
+    } catch (err) {
+      ctx.log(`relaunch ${traceKey}: retrying prior teardown of ${sessionId} failed: ${errMsg(err)}`);
+    }
+  }
   if (decisions.length === 0) return res;
   const nowMs = parseMs(ctx.ts);
 

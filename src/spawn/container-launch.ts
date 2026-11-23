@@ -78,7 +78,7 @@ interface ParsedMountFlag {
  * and `docker images` sees a consistent naming surface across the spawn's
  * lifecycle.
  */
-function spawnContainerName(spawnId: string): string {
+export function spawnContainerName(spawnId: string): string {
   return `march-spawn-${spawnId}`;
 }
 

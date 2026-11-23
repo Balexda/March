@@ -122,6 +122,15 @@ describe("removeSpawnWorktreeExact", () => {
     expect(branchExists(repoRoot, wt.branch)).toBe(false);
   });
 
+  it("leaves a branch and checkout intact when the branch is checked out elsewhere", () => {
+    const repoRoot = makeRepo();
+    const adjacent = createSpawnWorktree(repoRoot);
+    const result = removeSpawnWorktreeExact(repoRoot, { branch: adjacent.branch });
+    expect(result.branchDeleted).toBe(false);
+    expect(fs.existsSync(adjacent.worktreePath)).toBe(true);
+    expect(branchExists(repoRoot, adjacent.branch)).toBe(true);
+  });
+
   it("is idempotent — a second call against gone artifacts is a no-op", () => {
     const repoRoot = makeRepo();
     const wt = createSpawnWorktree(repoRoot);

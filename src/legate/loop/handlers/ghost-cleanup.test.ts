@@ -68,6 +68,24 @@ describe("ghost-cleanup handler", () => {
     expect(state.sessionsById.has("ghost")).toBe(false);
   });
 
+  it("retries a deferred ghost after the observation disappears", async () => {
+    const state = loopState({
+      sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
+    });
+    let ok = false;
+    const c = ctx(() => ok
+      ? { ok: true, notTracked: false, detail: "" }
+      : { ok: false, notTracked: false, deferred: true, detail: "tearing-down" });
+
+    await apply(assess(state), c, state);
+    expect(state.sessions.map((session) => session.id)).toEqual(["ghost"]);
+    state.sessions = [];
+    ok = true;
+    await apply(assess(state), c, state);
+    expect(c.broodTeardown).toHaveBeenCalledTimes(2);
+    expect(assess(state)).toEqual([]);
+  });
+
   it("defers (no drop) and tombstones when Brood does not track the session (404)", async () => {
     const state = loopState({
       sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],

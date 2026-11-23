@@ -1,82 +1,64 @@
-import { removeSpawnContainer } from "../../spawn/container-launch.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   removeSpawnWorktreeExact,
   type RemoveWorktreeResult,
 } from "../worktree.js";
 
-/**
- * Substrate adapter for brood teardown — the substrate-specific call-outs that
- * reclaim a session's compute + checkout (issue #169, part of #166).
- *
- * Brood owns the teardown *contract* (the fixed, idempotent, best-effort step
- * order in `teardown.ts`); this seam isolates *how* each resource is reclaimed
- * so the substrate can be swapped without touching that contract. It mirrors the
- * Castra-client seam already used for steward removal: a named interface plus a
- * default host implementation, injected through `TeardownDeps`.
- *
- *   - container: the mounted host docker socket today → an orchestrator API
- *     (k8s/Nomad/Fargate) in a SaaS deployment.
- *   - worktree/branch: a shared-host git worktree today → an ephemeral
- *     per-execution environment/volume in a SaaS deployment.
- *
- * Capturing logs + a record snapshot (the *archive* step) is intentionally NOT
- * part of this seam — moving the archive destination to object storage is issue
- * #168, so it stays a separate dep on `TeardownDeps`.
- */
-export interface TeardownSubstrate {
-  /**
-   * Reclaim the spawn's compute — the running container on the host today, a
-   * pod/task on an orchestrator in a SaaS deployment (the substrate detail is
-   * abstracted away). Idempotent and best-effort — a missing instance is a
-   * successful no-op. An implementation MAY throw to signal a real failure (e.g.
-   * an orchestrator API rejecting the delete), which teardown records as a
-   * failed `container` step before continuing to the later steps; a non-throwing
-   * implementation (see {@link hostTeardownSubstrate}) cannot surface its
-   * failures this way, so the step reflects "removal attempted" rather than
-   * "removal verified".
-   */
-  removeSpawn(spawnId: string): void;
+export interface ComputeTarget {
+  sessionId: string;
+  kind: string;
+  containerName: string;
+}
 
-  /**
-   * Reclaim the spawn's workspace by EXACT identifier — the host worktree path
-   * and/or branch today, an ephemeral per-execution environment/volume in a
-   * SaaS deployment. Implementations MUST NOT enumerate or prune other
-   * workspaces: brood removes only the exact tracked path it was handed, never a
-   * blanket `git worktree prune` (issue #155). Returns per-target flags rather
-   * than throwing.
-   */
+/** Substrate-specific call-outs for reclaiming session compute and workspace. */
+export interface TeardownSubstrate {
+  /** Resolve only after verifying absence. Throw on failed or unverified removal. */
+  removeCompute(target: ComputeTarget): Promise<void>;
+
+  /** Reclaim only the supplied worktree path or branch. */
   removeWorkspace(
     repoRoot: string,
     target: { worktreePath?: string; branch?: string },
   ): RemoveWorktreeResult;
 }
 
-/**
- * Default substrate: the shared host running brood. Container reclamation goes
- * through the mounted docker socket (`removeSpawnContainer`); checkout
- * reclamation goes through `removeSpawnWorktreeExact`, which removes ONLY the
- * exact worktree path / branch and NEVER runs `git worktree prune` (#155).
- *
- * Caveat: `removeSpawnContainer` is non-throwing by contract — it swallows
- * every docker failure (daemon down, permissions, "no such container") rather
- * than throwing. So with this substrate the teardown `container` step always
- * reports `ok` ("removal attempted"); a host-side docker failure is NOT
- * observable via the step outcome and must be diagnosed out of band (e.g.
- * `docker ps -a`). A substrate that needs failures surfaced as a failed step
- * (e.g. an orchestrator adapter) should throw from `removeSpawn` instead.
- */
+const execFileAsync = promisify(execFile);
+const dockerOptions = { timeout: 10_000, killSignal: "SIGKILL" } as const;
+
+async function findContainer(name: string): Promise<string> {
+  const { stdout } = await execFileAsync("docker", [
+    "container", "ls", "--all", "--no-trunc",
+    "--filter", "name=^/" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+    "--format", '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}',
+  ], dockerOptions);
+  return stdout.trim();
+}
+
+async function removeHostCompute({ containerName }: ComputeTarget): Promise<void> {
+  const found = await findContainer(containerName);
+  if (!found) return;
+  const [id, name, composeProject] = found.split(/\s+/);
+  if (!/^[a-f0-9]{64}$/.test(id) || name !== containerName || composeProject) {
+    throw new Error(`Container "${containerName}" is not a verified ephemeral session target`);
+  }
+  // Delete by immutable ID so a replacement at the same name is never removed.
+  try {
+    await execFileAsync("docker", ["container", "rm", "--force", "--", id], dockerOptions);
+  } catch (err) {
+    const failure = err as { code?: number; signal?: string; stderr?: string };
+    if (failure.code !== 1 || failure.signal ||
+        failure.stderr?.trim() !== `Error response from daemon: No such container: ${id}`) {
+      throw err;
+    }
+  }
+  if (await findContainer(containerName)) {
+    throw new Error(`Container "${containerName}" still exists after removal`);
+  }
+}
+
+/** Default adapter for the shared host's Docker socket and Git checkout. */
 export const hostTeardownSubstrate: TeardownSubstrate = {
-  removeSpawn: removeSpawnContainer,
+  removeCompute: removeHostCompute,
   removeWorkspace: removeSpawnWorktreeExact,
 };
-
-// Extension point (SaaS readiness, #166): provide an alternative
-// `TeardownSubstrate` whose `removeSpawn` calls an orchestrator API
-// (k8s/Nomad/Fargate) and whose `removeWorkspace` destroys an ephemeral
-// per-execution environment/volume, then inject it via `TeardownDeps.substrate`.
-// The exact-path / never-prune contract on `removeWorkspace` (#155) binds
-// every implementation. No real orchestrator adapter ships yet:
-//
-//   export function createOrchestratorSubstrate(
-//     opts: OrchestratorSubstrateOptions,
-//   ): TeardownSubstrate { ... }

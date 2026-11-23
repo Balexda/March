@@ -91,7 +91,7 @@ function deleteBranch(repoRoot: string, branch: string): boolean {
   // branch was never created.
   if (!branchExists(repoRoot, branch)) return true;
   try {
-    execFileSync("git", ["branch", "-D", branch], {
+    execFileSync("git", ["branch", "-D", "--", branch], {
       cwd: repoRoot,
       stdio: "ignore",
     });

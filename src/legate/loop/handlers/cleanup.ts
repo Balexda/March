@@ -1,3 +1,4 @@
+import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { sessionMatchesSlice } from "../pure/session.js";
@@ -35,11 +36,13 @@ export interface CleanupDecision {
 export function assess(state: LoopState): CleanupDecision[] {
   const out: CleanupDecision[] = [];
   if (!state.statePresent) return out;
+  const pending = new Map(pendingTeardowns(state, "cleanup").map((entry) => [entry.traceKey, entry.sessionId]));
   for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
-    const sessionId = String(slice.worker_session_id || "");
+    const priorAttempt = pending.get(sliceId);
+    const sessionId = priorAttempt ?? String(slice.worker_session_id || "");
     if (!sessionId) continue;
-    if (!state.sessions.some((s) => sessionMatchesSlice(s, slice))) continue;
+    if (!priorAttempt && !state.sessions.some((s) => sessionMatchesSlice(s, slice))) continue;
     const pr = state.perSlice[sliceId]?.pr;
     if (!pr || pr.skipped) continue;
     const terminalState = pr.state;
@@ -64,12 +67,16 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
 
     // traceKey = slice id: brood.teardown's spans nest under this slice's trace
     // (the same anchor as the legate.cleanup action span) instead of orphaning (#234).
-    let teardown = await ctx.broodTeardown(d.sessionId, { reason, traceKey: d.sliceId });
+    let teardownId = d.sessionId;
+    let attemptedTracked = true;
+    const pending = pendingTeardowns(state, "cleanup").some((entry) => entry.traceKey === d.sliceId);
+    let teardown = await ctx.broodTeardown(teardownId, { reason, traceKey: d.sliceId });
 
     // 404 not-tracked: Brood has no record of this session. Distinguish a
     // live-but-untracked steward from one that's genuinely gone (#225) — a
     // missing registry record must not block cleanup forever.
-    if (!teardown.ok && teardown.notTracked) {
+    if (!teardown.ok && teardown.notTracked && !pending) {
+      attemptedTracked = false;
       const live = liveSession(state, d.sessionId);
       if (live) {
         // Address the steward by its CANONICAL id: the slice may have matched it
@@ -97,7 +104,9 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
             : { ok: false, detail: "broodRegister unavailable" };
           if (reg.ok) {
             ctx.log(`cleanup reconciled untracked steward ${canonicalId} into Brood (${d.sliceId}); retrying teardown`);
-            teardown = await ctx.broodTeardown(canonicalId, { force: true, reason, traceKey: d.sliceId });
+            attemptedTracked = true;
+            teardownId = canonicalId;
+            teardown = await ctx.broodTeardown(teardownId, { force: true, reason, traceKey: d.sliceId });
           } else {
             teardown = { ok: false, notTracked: false, detail: `reconcile failed: ${reg.detail}` };
           }
@@ -114,6 +123,7 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
       }
     }
 
+    if (attemptedTracked) setTeardownPending(state, ctx, "cleanup", teardownId, d.sliceId, !teardown.ok);
     if (!teardown.ok) {
       // A genuine teardown failure (Castra unreachable, worktree removal failed,
       // or reconcile/retry failed). DEFER + retry — never archive over an orphan

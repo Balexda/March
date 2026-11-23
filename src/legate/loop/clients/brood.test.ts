@@ -8,7 +8,7 @@ import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../../.
 
 function seam(over: Partial<BroodSeam> = {}): BroodSeam {
   return {
-    teardown: vi.fn(async (id: string) => ({ id, status: "removed", warnings: [] })),
+    teardown: vi.fn(async (id: string) => ({ id, status: "torndown", warnings: [] })),
     list: vi.fn(async () => []),
     register: vi.fn(async (input) => ({ ...input, status: input.status ?? "running", createdAt: "T", updatedAt: "T" }) as any),
     update: vi.fn(async (id, changes) => ({ id, kind: "steward", createdAt: "T", updatedAt: "T", ...changes }) as any),
@@ -18,10 +18,17 @@ function seam(over: Partial<BroodSeam> = {}): BroodSeam {
 
 describe("loop brood client (async BroodClient seam)", () => {
   it("teardown returns ok on a confirmed teardown and forwards flags", async () => {
-    const client = seam({ teardown: vi.fn(async (id) => ({ id, status: "removed", warnings: ["worktree busy"] })) });
+    const client = seam({ teardown: vi.fn(async (id) => ({ id, status: "torndown", warnings: ["worktree busy"] })) });
     const res = await broodTeardown("sess-1", { force: true, reason: "merged" }, client);
-    expect(res).toEqual({ ok: true, notTracked: false, detail: "teardown sess-1: removed (warnings: worktree busy)" });
+    expect(res).toEqual({ ok: true, notTracked: false, detail: "teardown sess-1: torndown (warnings: worktree busy)" });
     expect(client.teardown).toHaveBeenCalledWith("sess-1", { force: true, kill: undefined, reason: "merged" });
+  });
+
+  it.each(["tearing-down", "stopped"])("defers on a successful HTTP response with status %s", async (status) => {
+    const client = seam({ teardown: vi.fn(async (id) => ({ id, status })) });
+    await expect(broodTeardown("sess-1", {}, client)).resolves.toEqual({
+      ok: false, notTracked: false, deferred: true, detail: `teardown sess-1: ${status}`,
+    });
   });
 
   it("teardown flags a 404 not-found as notTracked (defer, not success)", async () => {
@@ -49,7 +56,7 @@ describe("loop brood client (async BroodClient seam)", () => {
     afterEach(() => vi.unstubAllGlobals());
 
     const okResponse = (): Response =>
-      new Response(JSON.stringify({ id: "sess-1", status: "removed" }), {
+      new Response(JSON.stringify({ id: "sess-1", status: "torndown" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });

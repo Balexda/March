@@ -90,6 +90,21 @@ describe("cleanup handler", () => {
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.archived", sliceId: "s" });
   });
 
+  it("retries deferred cleanup after the steward disappears from Castra", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx([{ ok: false, notTracked: false, deferred: true, detail: "tearing-down" }, ok()]);
+
+    await apply(assess(state), c, state);
+    expect(state.raw.slices.s).toBeDefined();
+    expect(state.raw.archived_slices.s).toBeUndefined();
+
+    state.sessions = [];
+    state.sessionsById.clear();
+    await apply(assess(state), c, state);
+    expect(c.broodTeardown).toHaveBeenCalledTimes(2);
+    expect(state.raw.archived_slices.s).toBeDefined();
+  });
+
   it("reconciles a live-but-untracked steward into Brood, then reaps + archives (#225)", async () => {
     const state = withTerminalSlice("MERGED");
     // First teardown 404s (untracked); after reconcile, the retry succeeds.

@@ -15,7 +15,7 @@
 
 ### Tasks
 
-- [ ] **Reclaim session compute through the teardown substrate**
+- [x] **Reclaim session compute through the teardown substrate**
 
   Resolve the exact compute target from the lifecycle record and make teardown verify removal. Cover AS 3.1 at the Brood and host substrate boundaries.
 
@@ -24,7 +24,7 @@
   - After the archive succeeds, remove only the resolved container. Verified absence succeeds, including an already absent container. A removal error other than a missing container, a deadline breach, or an unverified post-condition yields a failed container step and leaves teardown retryable.
   - Dispatch rollback retains best-effort removal. New failures surface in teardown tracing. Update the affected subsystem contracts with the verified removal behavior.
 
-- [ ] **Keep unfinished teardown in legate loop state**
+- [x] **Keep unfinished teardown in legate loop state**
 
   Apply FR-014b so a failed or deferred step from this slice is retried instead of dropped. Cover the consumer at the legate client boundary.
 
@@ -32,7 +32,7 @@
   - `broodTeardown` returns `ok` only for a `torndown` response. A `tearing-down` or other non-terminal `2xx` response returns a distinct deferred result.
   - The `cleanup`, `ghost-cleanup`, and `relaunch` callers keep the session in loop state until `ok`, so a later tick retries teardown.
 
-- [ ] **Preserve exact steward and workspace cleanup**
+- [x] **Preserve exact steward and workspace cleanup**
 
   Keep Brood responsible for shared checkout cleanup and exercise the end-to-end isolation boundary in AS 3.2–3.5.
 
