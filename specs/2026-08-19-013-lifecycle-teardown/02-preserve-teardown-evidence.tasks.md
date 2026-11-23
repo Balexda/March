@@ -47,7 +47,9 @@
 
 ## Specification Debt
 
-_None — no specification debt was recorded._
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-010 | Container log read and write share one archive step | review:Data Integrity | High | High | spec:SD-010 |
 
 ## Open Implementation Questions
 
