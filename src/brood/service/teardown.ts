@@ -21,6 +21,8 @@ import type {
   TeardownStep,
 } from "./types.js";
 
+export const TEARDOWN_DETAIL_LIMIT = 500;
+
 /** The requested session does not exist. Routes map this to HTTP 404. */
 export class BroodNotFoundError extends Error {
   constructor(message: string) {
@@ -183,8 +185,7 @@ export async function teardownSession(
     rejectTeardown(span, "unsupported-mode", new BroodUnsupportedModeError());
   }
   if (primary.status === "torndown" && (!steward || steward.status === "torndown")) {
-    span.end();
-    return { id: primary.id, status: "torndown", steps, warnings };
+    return finish("success");
   }
 
   // A stored force decision holds until teardown completes, even if a
@@ -298,8 +299,9 @@ export async function teardownSession(
           // worktree/branch removal and leave the row retryable. Do NOT mark
           // torndown over an unconfirmed Castra removal (#304).
           stewardRemovalFailed = true;
-          steps.push({ step: "steward", outcome: "failed", detail: res.detail });
-          warnings.push(`steward removal failed: ${res.detail ?? "unconfirmed"}`);
+          const detail = (res.detail || "removal unconfirmed").slice(0, TEARDOWN_DETAIL_LIMIT);
+          steps.push({ step: "steward", outcome: "failed", detail });
+          warnings.push(`steward removal failed: ${detail}`);
         } else {
           // `removed` — a real session was reaped; `absent` — Castra verified no
           // session for this worktree. Either way the steward is gone, so it is
@@ -307,7 +309,9 @@ export async function teardownSession(
           steps.push({
             step: "steward",
             outcome: res.outcome === "removed" ? "ok" : "skipped",
-            detail: res.outcome === "removed" ? res.detail : "already gone",
+            detail: res.outcome === "removed"
+              ? res.detail?.slice(0, TEARDOWN_DETAIL_LIMIT)
+              : "already gone",
           });
         }
       } catch (err) {
@@ -335,22 +339,22 @@ export async function teardownSession(
         detail: "deferred: steward removal failed",
       });
     } else if (primary.worktreePath && primary.repoPath) {
-      if (!d.pathExists(primary.worktreePath)) {
-        steps.push({
-          step: "worktree",
-          outcome: "skipped",
-          detail: "already removed",
-        });
-      } else {
-        const res = d.substrate.removeWorkspace(primary.repoPath, {
-          worktreePath: primary.worktreePath,
-        });
-        if (res.worktreeRemoved) {
-          steps.push({ step: "worktree", outcome: "ok" });
+      try {
+        if (!d.pathExists(primary.worktreePath)) {
+          steps.push({ step: "worktree", outcome: "skipped", detail: "already removed" });
         } else {
-          steps.push({ step: "worktree", outcome: "failed" });
-          warnings.push(`worktree "${primary.worktreePath}" may still exist`);
+          const res = d.substrate.removeWorkspace(primary.repoPath, {
+            worktreePath: primary.worktreePath,
+          });
+          if (!res.worktreeRemoved) {
+            throw new Error(`worktree "${primary.worktreePath}" may still exist`);
+          }
+          steps.push({ step: "worktree", outcome: "ok" });
         }
+      } catch (err) {
+        const detail = message(err);
+        steps.push({ step: "worktree", outcome: "failed", detail });
+        warnings.push(detail);
       }
     } else {
       steps.push({ step: "worktree", outcome: "skipped" });
@@ -370,14 +374,18 @@ export async function teardownSession(
         detail: "deferred: steward removal failed",
       });
     } else if (primary.branch && primary.repoPath) {
-      const res = d.substrate.removeWorkspace(primary.repoPath, {
-        branch: primary.branch,
-      });
-      if (res.branchDeleted) {
+      try {
+        const res = d.substrate.removeWorkspace(primary.repoPath, {
+          branch: primary.branch,
+        });
+        if (!res.branchDeleted) {
+          throw new Error(`branch "${primary.branch}" may still exist`);
+        }
         steps.push({ step: "branch", outcome: "ok" });
-      } else {
-        steps.push({ step: "branch", outcome: "failed" });
-        warnings.push(`branch "${primary.branch}" may still exist`);
+      } catch (err) {
+        const detail = message(err);
+        steps.push({ step: "branch", outcome: "failed", detail });
+        warnings.push(detail);
       }
     } else {
       steps.push({ step: "branch", outcome: "skipped" });
@@ -439,7 +447,12 @@ function rejectTeardown(
 }
 
 function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return (err instanceof Error ? err.message : String(err)).slice(0, TEARDOWN_DETAIL_LIMIT);
+}
+
+/** A response represents deferred cleanup as a skipped step with a reason. */
+export function isDeferredTeardownStep(step: TeardownStep): boolean {
+  return step.outcome === "skipped" && step.detail?.startsWith("deferred:") === true;
 }
 
 /**
@@ -451,7 +464,7 @@ function message(err: unknown): string {
 function stepSpanOutcome(step: TeardownStep): string {
   if (step.outcome === "ok") return step.step === "archive" ? "ok" : "removed";
   if (step.outcome === "failed") return "failed";
-  return step.detail?.startsWith("deferred") ? "deferred" : "not-found";
+  return isDeferredTeardownStep(step) ? "deferred" : "not-found";
 }
 
 /** Stamp a sub-step child span with its outcome (+detail) and end it. */
@@ -461,5 +474,5 @@ function endStepSpan(child: BroodChildSpan, step: TeardownStep): void {
     "march.teardown.outcome": stepSpanOutcome(step),
     ...(step.detail ? { "march.teardown.detail": step.detail } : {}),
   });
-  child.end({ error: step.outcome === "failed" });
+  child.end({ error: step.outcome === "failed" || isDeferredTeardownStep(step) });
 }

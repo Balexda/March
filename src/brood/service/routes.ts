@@ -32,6 +32,8 @@ import {
   BroodConflictError,
   BroodNotFoundError,
   BroodUnsupportedModeError,
+  isDeferredTeardownStep,
+  TEARDOWN_DETAIL_LIMIT,
   teardownSession,
 } from "./teardown.js";
 import type {
@@ -584,7 +586,7 @@ export async function registerRoutes(
     const body = (request.body ?? {}) as TeardownRequest;
     const traceparent = inboundTraceparent(request.headers);
     try {
-      return await teardown(
+      const result = await teardown(
         id,
         {
           force: body.force === true,
@@ -593,6 +595,24 @@ export async function registerRoutes(
         },
         traceparent,
       );
+      const affectedSteps = result.steps
+        .filter((step) => step.outcome === "failed" || isDeferredTeardownStep(step))
+        .map(({ step, outcome, detail }) => ({
+          step,
+          outcome,
+          ...(detail ? { detail: detail.slice(0, TEARDOWN_DETAIL_LIMIT) } : {}),
+        }));
+      if (affectedSteps.length > 0) {
+        request.log.warn({
+          route: request.routeOptions.url,
+          method: request.method,
+          status_code: reply.statusCode,
+          session_id: result.id,
+          teardown_status: result.status,
+          teardown_steps: affectedSteps,
+        }, "brood teardown cleanup incomplete");
+      }
+      return result;
     } catch (err) {
       if (err instanceof BroodNotFoundError) {
         reply.code(404);

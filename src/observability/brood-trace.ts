@@ -115,7 +115,9 @@ export function startBroodSpan(input: StartBroodSpanInput): BroodSpan {
       };
     },
     end(opts?: { error?: boolean }) {
-      if (opts?.error) span.setStatus({ code: SpanStatusCode.ERROR });
+      if (opts?.error !== undefined) {
+        span.setStatus({ code: opts.error ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+      }
       span.end();
     },
   };
