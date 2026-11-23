@@ -39,7 +39,13 @@
 
 ## Specification Debt
 
-_None — no specification debt was recorded._
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-004 | Compute removal has no stop mode, so `kill` is accepted but ignored | review:Contract-implementation drift | High | High | spec:SD-004 |
+| SD-007 | Teardown call-outs have no enforced deadlines | review:Non-Functional Quality | High | High | spec:SD-007 |
+| SD-008 | Teardown reason overwrites the session's failure diagnostic | review:Data Model | Medium | High | spec:SD-008 |
+| SD-009 | Force guard can be bypassed on retry after an aborted forced attempt | review:Functional Correctness | High | High | spec:SD-009 |
+| SD-010 | Container log read and write share one archive step | review:Data Integrity | High | High | spec:SD-010 |
 
 ## Dependency Order
 
