@@ -29,21 +29,64 @@ The catalog maps the [PRD](../../docs/prds/2026-001-issue-triage.prd.md) vocabul
 
 ## Interfaces
 
+Call shapes below are logical. They fix inputs, results, and errors, not a TypeScript module or route name, which the implementing slice chooses.
+
 ### Provision repository labels
 
-**Inputs** include registered repositories from [Herald's profile registry](../../src/herald/profiles/types.ts), the catalog above, and repository-scoped permission to list and create repository labels.
+```text
+provisionTriageLabels(repositories, catalog) -> ProvisionResult | ProvisionFailure
+```
 
-**Result** reports each repository's created and already-present catalog entries. Create missing definitions only. Leave existing definitions, labels outside the catalog, and all issue assignments untouched. A concurrent create counts as already present only after confirming the required definition exists.
+| Input | Source | Constraint |
+|---|---|---|
+| `repositories` | Registered repositories from [Herald's profile registry](../../src/herald/profiles/types.ts) | Deduplicated by GitHub repository identity, so a repository shared by profiles is provisioned once. |
+| `catalog` | The [label catalog](#label-catalog) above | Every entry is checked by name. |
+| Access | Repository-scoped GitHub credential | Permission to list and create repository labels only. |
 
-**Failure** identifies the repository and failed operation. Bound registry and GitHub calls, report incomplete coverage as failure, and emit an errored span when tracing is enabled. Existing definitions and successful creates remain usable on retry. Apply [operating philosophy rules 2 and 3](../../docs/operating-philosophy.md#three-rules-of-thumb).
+| Result field | Meaning |
+|---|---|
+| `repository` | GitHub repository identity, one row per distinct repository. |
+| `created` | Catalog entries that were missing and are now created. |
+| `alreadyPresent` | Catalog entries that already existed, including any confirmed after a concurrent create. Existing colors and descriptions are kept. |
+
+Create missing definitions only. Leave existing definitions, labels outside the catalog, and all issue assignments untouched. A complete second run reports every entry as `alreadyPresent` and makes zero mutations.
+
+| Error condition | Behavior |
+|---|---|
+| Registry or GitHub call fails or exceeds its bound | Return `ProvisionFailure` naming the repository and failed operation (list or create). Emit an errored span when tracing is enabled. |
+| Some repositories or entries unconfirmed | Report the run as a failure for incomplete coverage, not as a partial success. |
+| Concurrent create conflict | Re-check the definition. Count it as `alreadyPresent` only once confirmed, otherwise fail as above. |
+| Retry after failure | Existing definitions and successful creates stay usable. A retry creates only the remaining missing entries. |
+
+Apply [operating philosophy rules 2 and 3](../../docs/operating-philosophy.md#three-rules-of-thumb).
 
 ### Interpret issue labels and history
 
-**Inputs** include current GitHub labels and issue state, the title/body hash, observed changes, and original verdict provenance when available.
+```text
+interpretTriageLabels(issueSnapshot, observedChanges, verdictProvenance?) -> TriageInterpretation
+```
 
-**Result** provides current triage state, protected label groups, whether the observation qualifies for re-entry, and whether explicit acceptance can authorize intake. A stale Herald mirror yields to GitHub. Compare original verdict provenance and observed label changes to preserve operator edits on the same content. Since operator and writer may share a GitHub identity, attribute known writer changes using the recorded verdict and change history, never author identity alone. If attribution is uncertain, preserve observed same-content differences.
+| Input | Source | Constraint |
+|---|---|---|
+| `issueSnapshot` | Current GitHub labels, open/closed state, and title/body hash | GitHub is authoritative. A stale Herald mirror yields to it. |
+| `observedChanges` | Herald's observation history of label, state, and content-hash changes | Each distinct change is consumed once. |
+| `verdictProvenance` | The sticky note's original verdict and content hash, when available | Optional. When absent, attribution is treated as uncertain. |
 
-**Invalid or incomplete input** leaves the affected decision unresolved. Conflicting labels or an unverified acceptance association grant no intake authority. Incomplete history cannot invent a re-entry edge. A valid acceptance requires an observed addition of `triage:accepted` for the current unambiguous triaged build recommendation on an open issue, and the signal must still be present. Confidence alone grants no authority.
+| Result field | Meaning |
+|---|---|
+| `state` | `untriaged`, `triaged`, `errored`, or `unresolved`. An issue with no state label is untriaged. |
+| `protectedGroups` | Managed label groups holding a same-content operator override, which a later verdict write must preserve. |
+| `reentry` | Whether this observation qualifies for re-entry and which [trigger](#re-entry-triggers) qualified it. Co-occurring triggers qualify once. |
+| `intakeAuthorized` | `true` only for an observed addition of `triage:accepted` for the current, unambiguous triaged build recommendation on an open issue, with the signal still present. |
+
+Preserve operator edits on the same content by comparing verdict provenance with observed label changes. Operator and writer may share a GitHub identity, so attribute known writer changes using the recorded verdict and change history, never author identity alone. If attribution is uncertain, preserve observed same-content differences.
+
+| Error condition | Behavior |
+|---|---|
+| Conflicting managed labels (for example two outcomes) | Leave them visible as an operator edit. `state` is `unresolved` and `intakeAuthorized` is `false`. |
+| Acceptance association unverified, stale, or removed | `intakeAuthorized` is `false`. |
+| Non-build outcome accepted, or confidence alone | `intakeAuthorized` is `false`. |
+| Incomplete history | Leave the affected decision unresolved. Incomplete history cannot invent a re-entry edge. |
 
 ## Re-entry Triggers
 
