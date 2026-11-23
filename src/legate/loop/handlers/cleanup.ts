@@ -75,7 +75,9 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
     // 404 not-tracked: Brood has no record of this session. Distinguish a
     // live-but-untracked steward from one that's genuinely gone (#225) — a
     // missing registry record must not block cleanup forever.
-    if (!teardown.ok && teardown.notTracked && !pending) {
+    // A pending (Brood-confirmed) entry that is absent from Castra keeps
+    // deferring until Brood confirms; a live session still reconciles.
+    if (!teardown.ok && teardown.notTracked && (!pending || liveSession(state, d.sessionId))) {
       attemptedTracked = false;
       const live = liveSession(state, d.sessionId);
       if (live) {

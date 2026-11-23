@@ -296,7 +296,12 @@ export function assess(state: LoopState): RelaunchDecision[] {
   // Operator relaunch requests (#593) come first and own their slices this tick:
   // they bypass the liveness skip, the backoff and the AIMD rate, and replace a
   // still-live steward. Requests already settled this incarnation are skipped.
-  const operator = operatorDecisions(state, worktreesParent);
+  // A slice whose cleanup teardown is still pending must not be relaunched: the
+  // retry targets the old session's tracked worktree and would reclaim the new
+  // steward's checkout. Excluded from every path (operator, ladder, auto) until
+  // cleanup confirms; an operator request stays unsettled and runs afterwards.
+  const pendingCleanup = new Set(pendingTeardowns(state, "cleanup").map(({ traceKey }) => traceKey));
+  const operator = operatorDecisions(state, worktreesParent).filter((d) => !pendingCleanup.has(d.sliceId));
   const operatorOwned = new Set(operator.map((d) => d.sliceId));
 
   const ladder: RelaunchDecision[] = [];
@@ -314,6 +319,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
     if (!slice || typeof slice !== "object") continue;
     if (requested.has(sliceId)) continue; // the recovery ladder owns it this tick
     if (operatorOwned.has(sliceId)) continue; // an operator relaunch owns it this tick
+    if (pendingCleanup.has(sliceId)) continue; // cleanup teardown still pending
     const pr = slice.pr || {};
     if (!pr.number) continue; // relaunch re-attaches to an EXISTING PR
     const rawBranch = typeof slice.branch === "string" ? slice.branch : "";

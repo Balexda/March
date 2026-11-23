@@ -207,6 +207,10 @@ export async function teardownSession(
     );
   }
 
+  // Pre-teardown snapshot of the primary row (a standalone legate has no spawn
+  // or steward row, so without this its record would be missing from the archive).
+  const sessionSnapshot: SessionRecord = { ...primary };
+
   // Mark the group as tearing-down so a concurrent reader sees the transition.
   store.update(primary.id, {
     status: "tearing-down",
@@ -224,7 +228,7 @@ export async function teardownSession(
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "record.json"),
-      JSON.stringify({ spawn, steward, torndownAt: d.now() }, null, 2) + "\n",
+      JSON.stringify({ session: sessionSnapshot, spawn, steward, torndownAt: d.now() }, null, 2) + "\n",
     );
     if (primary.containerId) {
       let logs: string | undefined;

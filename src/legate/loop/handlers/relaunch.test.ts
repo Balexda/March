@@ -172,6 +172,17 @@ describe("relaunch handler", () => {
     expect(slice.worker_session_id).toBe("new");
   });
 
+  it("does not relaunch a slice whose cleanup teardown is still pending", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({
+      slices: { gone: slice },
+      raw: { slices: { gone: slice }, transient_retry_counts: { "pending-teardown:cleanup:old:gone": 1 } },
+    });
+    expect(assess(state)).toEqual([]);
+    state.raw.transient_retry_counts["pending-teardown:cleanup:old:gone"] = 0;
+    expect(assess(state).map((d) => d.sliceId)).toEqual(["gone"]);
+  });
+
   it("retries deferred prior-steward teardown without relaunching again", async () => {
     const slice = eligibleSlice({ worker_session_id: "old", worktree_path: "/wt/feature-feat-a-oldhash" });
     const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });

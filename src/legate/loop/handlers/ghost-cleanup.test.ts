@@ -68,6 +68,39 @@ describe("ghost-cleanup handler", () => {
     expect(state.sessionsById.has("ghost")).toBe(false);
   });
 
+  it("does not retry a pending ghost whose worktree a live slice now owns", () => {
+    const pendingKey = "pending-teardown:ghost-cleanup:ghost:ghost";
+    const session = { id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-adopted", created_at: OLD };
+    const state = loopState({
+      raw: { slices: {}, transient_retry_counts: { [pendingKey]: 1 } },
+      sessions: [session],
+      sessionsById: new Map([["ghost", session]]),
+    });
+    expect(assess(state).map((d) => d.sessionId)).toEqual(["ghost"]);
+    state.slices = { s: { branch: "adopted", worker_session_id: "other" } };
+    expect(assess(state)).toEqual([]);
+    state.slices = { s: { branch: "x", worker_session_id: "ghost" } };
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("an authoritative 404 after a confirmed deferral retires the pending entry and tombstones", async () => {
+    const state = loopState({
+      sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
+    });
+    let notTracked = false;
+    const c = ctx(() => notTracked
+      ? { ok: false, notTracked: true, detail: "not tracked" }
+      : { ok: false, notTracked: false, deferred: true, detail: "tearing-down" });
+
+    await apply(assess(state), c, state);
+    notTracked = true;
+    state.sessions = [];
+    await apply(assess(state), c, state);
+    expect(c.broodTeardown).toHaveBeenCalledTimes(2);
+    expect(assess(state)).toEqual([]);
+    expect(state.raw.transient_retry_counts["ghost-cleanup:ghost"]).toBe(1);
+  });
+
   it("retries a deferred ghost after the observation disappears", async () => {
     const state = loopState({
       sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],

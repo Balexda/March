@@ -365,7 +365,8 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
 
   it("uses the Legate session identity for cleanup and the recorded ID for logs", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
-    const rec = recordingDeps(makeHome());
+    const home = makeHome();
+    const rec = recordingDeps(home);
     const removeCompute = vi.fn(async () => {});
     rec.deps.substrate = { ...rec.deps.substrate!, removeCompute };
     store.register({ id: "ephemeral", kind: "legate", containerId: "march-legate" });
@@ -378,6 +379,12 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       sessionId: "ephemeral", kind: "legate", containerName: "march-legate-ephemeral",
     });
     expect(result.status).toBe("torndown");
+    // The standalone legate row itself is archived, captured before tearing-down.
+    const snapshot = JSON.parse(
+      fs.readFileSync(path.join(broodArchiveDir("ephemeral", home), "record.json"), "utf-8"),
+    );
+    expect(snapshot.session).toMatchObject({ id: "ephemeral", kind: "legate", containerId: "march-legate" });
+    expect(snapshot.session.status).not.toBe("tearing-down");
     store.close();
   });
 
