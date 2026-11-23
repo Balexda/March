@@ -1,4 +1,4 @@
-import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
+import { pendingTeardowns, recordTeardownOutcome } from "../state/pending-teardown.js";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { sessionMatchesSlice } from "../pure/session.js";
@@ -123,7 +123,10 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
       }
     }
 
-    if (attemptedTracked) setTeardownPending(state, ctx, "cleanup", teardownId, d.sliceId, !teardown.ok);
+    // Only a confirmed Brood deferral marks the identity pending (a transport
+    // failure proves nothing about tracking, so it must not disable the
+    // not-tracked reconciliation path above on a later tick).
+    if (attemptedTracked) recordTeardownOutcome(state, ctx, "cleanup", teardownId, d.sliceId, teardown);
     if (!teardown.ok) {
       // A genuine teardown failure (Castra unreachable, worktree removal failed,
       // or reconcile/retry failed). DEFER + retry — never archive over an orphan

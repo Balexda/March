@@ -1,4 +1,4 @@
-import { pendingTeardowns, setTeardownPending } from "../state/pending-teardown.js";
+import { pendingTeardowns, recordTeardownOutcome } from "../state/pending-teardown.js";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
@@ -86,7 +86,7 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
     const teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward", traceKey: d.sessionId });
     const pending = pendingTeardowns(state, "ghost-cleanup").some(({ sessionId }) => sessionId === d.sessionId);
     if (teardown.ok) {
-      setTeardownPending(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, false);
+      recordTeardownOutcome(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, teardown);
       dropSession(state, d.sessionId);
       res.mutated = true;
       res.actions.push({
@@ -111,7 +111,9 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
         detail: `brood does not track ghost steward (worktree ${d.dirName}); deferred to Brood reconciliation, not retrying: ${teardown.detail}`,
       });
     } else {
-      setTeardownPending(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, true);
+      // Confirmed deferral → pending; a transport failure retries off the
+      // Castra observation without suppressing the not-tracked tombstone path.
+      recordTeardownOutcome(state, ctx, "ghost-cleanup", d.sessionId, d.sessionId, teardown);
       res.mutated = true;
       res.actions.push({
         action: "ghost-cleanup-failed",

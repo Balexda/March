@@ -559,6 +559,11 @@ export async function apply(
         setTeardownPending(state, ctx, "relaunch", sessionId, traceKey, false);
         dropSession(state, sessionId);
         res.mutated = true;
+      } else if (teardown.notTracked) {
+        // Brood has no record — same terminal outcome as the first attempt's
+        // not-tracked branch; stop re-requesting a deterministic 404.
+        setTeardownPending(state, ctx, "relaunch", sessionId, traceKey, false);
+        res.mutated = true;
       }
     } catch (err) {
       ctx.log(`relaunch ${traceKey}: retrying prior teardown of ${sessionId} failed: ${errMsg(err)}`);
