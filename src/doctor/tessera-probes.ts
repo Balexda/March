@@ -32,6 +32,16 @@ async function docker(args: string[]): Promise<string | null> {
 // checks in tessera/config.ts.
 const KEY_PROBE = String.raw`
 const fs = require("node:fs");
+// Mirrors plaintextHostAllowed in tessera/config.ts.
+function plaintextHostAllowed(host) {
+  if (host === "localhost" || host === "[::1]") return true;
+  const ip = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (ip) {
+    const a = Number(ip[1]), b = Number(ip[2]);
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  return !host.includes(".") && !host.includes(":");
+}
 async function probe() {
   const env = process.env;
   const file = env.MARCH_TESSERA_CLIENT_KEY_FILE?.trim();
@@ -57,8 +67,7 @@ async function probe() {
   if (!key) return "missing";
   const url = new URL(env.MARCH_TESSERA_URL?.trim());
   if (url.username || url.password || url.search || url.hash) return "unverifiable";
-  if (url.protocol !== "https:" &&
-      (url.protocol !== "http:" || !/^(?:[a-z0-9-]+|127\.[\d.]+|10\.[\d.]+|192\.168\.[\d.]+|172\.(?:1[6-9]|2\d|3[01])\.[\d.]+|\[::1\])$/i.test(url.hostname))) {
+  if (url.protocol !== "https:" && (url.protocol !== "http:" || !plaintextHostAllowed(url.hostname))) {
     return "unverifiable";
   }
   const response = await fetch(url.href.replace(/\/+$/, "") + "/v1/client", {

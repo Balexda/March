@@ -72,3 +72,25 @@ it("bounds liveness and treats unavailable HTTP as unreachable", async () => {
   expect(await probes.reachable()).toBe(false);
   expect(await probes.key("hatchery")).toBe("unverifiable");
 });
+
+it("accepts the same plaintext hosts as the production client", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "march-doctor-"));
+  const keyFile = join(dir, "key");
+  await writeFile(keyFile, "k", { mode: 0o600 });
+  const verdicts: string[] = [];
+  try {
+    for (const url of ["http://march_tessera:1", "http://tessera.example.com:1"]) {
+      const env = { MARCH_TESSERA_URL: url, MARCH_TESSERA_CLIENT_KEY_FILE: keyFile };
+      const probes = createTesseraProbes(env, async ([, , , ...nodeArgs]) => {
+        // Stub fetch so only the host check decides: allowed hosts reach the server and get accepted.
+        const script = `globalThis.fetch = async () => new Response(JSON.stringify({ client: "hatchery", grants: [] }));` + nodeArgs[1];
+        const { stdout } = await exec(process.execPath, ["-e", script, ...nodeArgs.slice(2)], { env, timeout: 3_000 });
+        return stdout.trim();
+      });
+      verdicts.push(await probes.key("hatchery"));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  expect(verdicts).toEqual(["accepted", "unverifiable"]);
+});
