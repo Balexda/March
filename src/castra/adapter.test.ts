@@ -1186,6 +1186,50 @@ describe("castra adapter — review fixes (#702)", () => {
     expect(calls.slice(0, 2)).toEqual(["list", "launch"]);
   });
 
+  it("a fallback launch waits for an id-path launch still running in its group", async () => {
+    let reportIds = true;
+    const events: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const gates = new Map<string, () => void>();
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "list") {
+        events.push("list");
+        return JSON.stringify(sessions);
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        const title = args[args.indexOf("-t") + 1] ?? args[args.indexOf("--title") + 1] ?? "";
+        events.push(`launch:${title}`);
+        if (title === "slow") await new Promise<void>((r) => gates.set("slow", r));
+        const id = `s${sessions.length}`;
+        sessions.push(deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:${String(10 + sessions.length)}Z`));
+        events.push(`created:${title}`);
+        return reportIds ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+
+    reportIds = false;
+    events.length = 0;
+    const fast = adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e);
+    const slow = adapter.launch({ ...launchInput, title: "slow" }).catch((e: unknown) => e);
+    expect(await fast).toBeInstanceOf(CastraAgentDeckError);
+    // The fallback starts after the first failure, while "slow" is still launching.
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).not.toContain("list");
+    gates.get("slow")!();
+    expect(await slow).toBeInstanceOf(CastraAgentDeckError);
+    const picked = await fallback;
+    // Its before-list came after "slow" made its session, so it picks only its own.
+    expect(events.indexOf("created:slow")).toBeLessThan(events.indexOf("list"));
+    expect(picked.sessionId).toBe(`s${sessions.length - 1}`);
+  });
+
   it("finds the launch object after chatter that holds braces", () => {
     expect(parseLaunchOutput('note: worktree {created}\n{"session_id":"s","worktree_path":"/w"}')).toEqual({ sessionId: "s", worktreePath: "/w" });
     expect(parseLaunchOutput('{"note":1} then\n{\n  "session_id": "t"\n}\n')).toEqual({ sessionId: "t" });

@@ -102,7 +102,9 @@ repository, or one that cannot be confirmed, is `409` `conflict`. If an
 agent-deck that has reported ids launches without one (a downgrade), that
 launch ran unserialized with no before-list, so Castra fails it closed with
 `502` `agent_deck_error` rather than guess; later launches take the serialized
-path. After a launch, Castra enables session `auto-mode` only when that
+path. A serialized launch first waits for unserialized launches still running
+in its profile and group, and fails closed the same way if one started while
+it ran and it reported no id. After a launch, Castra enables session `auto-mode` only when that
 command's full timeout still fits in the launch budget; otherwise it skips it
 and logs a warning, and the launch still succeeds.
 
@@ -208,7 +210,11 @@ answers `502` `agent_deck_error` ("… budget ran out before …, so it was not
 started") without starting it. A caller that stops waiting cancels nothing: a
 step already started runs to completion or its own timeout. A client timeout
 means the outcome is unknown. For a launch or a remove, the caller can
-re-read `GET /v1/sessions` to see whether the session exists before retrying.
+re-read `GET /v1/sessions` to see whether the session exists before retrying,
+but only once the operation's budget (240s for launch, 120s for remove) has
+passed since it sent the request: before that the step may still be running,
+and a list without the session does not show it is absent. `CastraClient`
+already waits past each budget.
 A timed-out send stays unknown: the session list looks the same whether or not
 the prompt was typed, so it cannot decide whether to resend; only a separate
 sign of delivery (such as the steward acting on the prompt) can.

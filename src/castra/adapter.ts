@@ -743,6 +743,11 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
   // reports ids, every launch takes that path; after, launches run concurrently.
   const launchQueue = new KeyedSerializer();
   let launchReportsId = false;
+  // Launches on the id path skip launchQueue. A list-diff launch must never
+  // overlap one in its profile+group: it waits for those in flight before its
+  // before-list, and fails closed if another started during its window.
+  const idPathInFlight = new Map<string, Set<Promise<unknown>>>();
+  const idPathStarted = new Map<string, number>();
 
   // Castra-owned session metadata + last-known branch, keyed by session id (#214).
   // agent-deck cannot store arbitrary metadata, so Castra populates this at launch
@@ -1061,7 +1066,17 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       };
       const { launched, fromDiff } = launchReportsId
         ? await (async () => {
-            const reported = await runLaunch();
+            idPathStarted.set(key, (idPathStarted.get(key) ?? 0) + 1);
+            const running = runLaunch();
+            const inFlight = idPathInFlight.get(key) ?? new Set<Promise<unknown>>();
+            idPathInFlight.set(key, inFlight.add(running));
+            let reported: Awaited<typeof running>;
+            try {
+              reported = await running;
+            } finally {
+              inFlight.delete(running);
+              if (inFlight.size === 0) idPathInFlight.delete(key);
+            }
             if (!reported.sessionId) {
               // An agent-deck that stopped reporting ids (a downgrade). This launch
               // ran unserialized with no before-list, so a list diff could hand it
@@ -1077,9 +1092,20 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
             return identified(reported);
           })()
         : await launchQueue.run(key, async () => {
+            // An id-path launch still creating a session here would land in this
+            // launch's before/after diff: let those finish first.
+            await Promise.allSettled([...(idPathInFlight.get(key) ?? [])]);
+            const startedBefore = idPathStarted.get(key) ?? 0;
             const before = await listSnapshot(exec, input.profile, dl.cap(AGENT_DECK_TIMEOUT_MS, "listing sessions before the launch"));
             const beforeIds = new Set(before.filter((s) => s.group === input.group).map((s) => s.sessionId));
-            return identified(await runLaunch(), beforeIds);
+            const reported = await runLaunch();
+            if (!reported.sessionId && (idPathStarted.get(key) ?? 0) !== startedBefore) {
+              throw new CastraAgentDeckError(
+                "agent-deck launch reported no session id, and another launch into this profile and group ran " +
+                  "while it did, so the new session cannot be told apart; Castra will not guess. Retry the launch.",
+              );
+            }
+            return identified(reported, beforeIds);
           });
       if (!launched) {
         throw new CastraAgentDeckError(
