@@ -14,6 +14,7 @@ const GLYPH: Record<Severity, string> = {
 
 const CHECK_TITLE: Record<CheckId, string> = {
   "token-wiring": "Token wiring",
+  "tessera-wiring": "Tessera wiring",
   "session-consistency": "Session consistency",
   "dispatch-health": "Dispatch health",
   "worktree-hygiene": "Worktree/branch hygiene",
