@@ -1,6 +1,7 @@
 import type { DoctorContext } from "./context.js";
 import type { CheckId, CheckResult, DoctorReport, Finding, SeverityCounts } from "./types.js";
 import { checkTokenWiring } from "./checks/token-wiring.js";
+import { checkTesseraWiring } from "./checks/tessera-wiring.js";
 import { checkSessionConsistency } from "./checks/session-consistency.js";
 import { checkDispatchHealth } from "./checks/dispatch-health.js";
 import { checkWorktreeHygiene } from "./checks/worktree-hygiene.js";
@@ -17,6 +18,7 @@ const CHECKS: ReadonlyArray<{
   readonly run: (ctx: DoctorContext) => Promise<CheckResult>;
 }> = [
   { id: "token-wiring", run: checkTokenWiring },
+  { id: "tessera-wiring", run: checkTesseraWiring },
   { id: "session-consistency", run: checkSessionConsistency },
   { id: "dispatch-health", run: checkDispatchHealth },
   { id: "worktree-hygiene", run: checkWorktreeHygiene },

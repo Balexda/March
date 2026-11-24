@@ -2,6 +2,7 @@ import type { ProfileRecord } from "../herald/profiles/types.js";
 import type { SessionRecord } from "../brood/service/types.js";
 import type { SystemState } from "../herald/events.js";
 import type { CastraSession } from "../castra/types.js";
+import type { TesseraProbes } from "./tessera-probes.js";
 import type {
   ContainerEnvReader,
   ContainerStateReader,
@@ -48,6 +49,7 @@ export interface DoctorContext {
   readonly castra: CastraView;
   readonly brood: BroodView;
   readonly herald: HeraldView;
+  readonly tessera: TesseraProbes;
   /**
    * Probe Castra's token gate with a specific token (the one read from the
    * service containers), independent of the client's own bearer. Status-aware

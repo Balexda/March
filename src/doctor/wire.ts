@@ -10,6 +10,7 @@ import { ProfileClient } from "../herald/profiles/client.js";
 import type { ProfileRecord } from "../herald/profiles/types.js";
 import type { CastraAuthVerdict, DoctorContext } from "./context.js";
 import type { Finding } from "./types.js";
+import { createTesseraProbes } from "./tessera-probes.js";
 import {
   dockerContainerEnv,
   dockerContainerState,
@@ -80,6 +81,7 @@ export async function wireDoctorContext(
     castra: new CastraClient({ env, token: resolveSharedToken(env) }),
     brood: new BroodClient({ env }),
     herald: new HeraldClient({ env }),
+    tessera: createTesseraProbes(env),
     containerEnv: dockerContainerEnv,
     containerState: dockerContainerState,
     castraAuthProbe: (token) => probeCastraAuthHttp(baseUrl, token),

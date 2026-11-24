@@ -54,15 +54,14 @@ export async function checkTokenWiring(ctx: DoctorContext): Promise<CheckResult>
   const distinct = new Set(present.values());
   const drifted = distinct.size > 1;
   if (drifted) {
-    // Drift: at least two containers hold different tokens. Name the partition.
+    // Name the groups of services that share a token.
     const groups = new Map<string, string[]>();
     for (const [svc, token] of present) {
-      const key = fingerprint(token);
-      groups.set(key, [...(groups.get(key) ?? []), svc]);
+      const group = groups.get(token) ?? [];
+      group.push(svc);
+      groups.set(token, group);
     }
-    const partition = [...groups.entries()]
-      .map(([fp, svcs]) => `${svcs.join("+")}=${fp}`)
-      .join(", ");
+    const partition = [...groups.values()].map(services => services.join("+")).join(", ");
     findings.push({
       check: "token-wiring",
       title: CASTRA_TOKEN_ENV,
@@ -113,11 +112,4 @@ export async function checkTokenWiring(ctx: DoctorContext): Promise<CheckResult>
   }
 
   return { check: "token-wiring", findings };
-}
-
-/** A short, non-secret fingerprint so drift is visible without leaking tokens. */
-function fingerprint(token: string): string {
-  let h = 0;
-  for (let i = 0; i < token.length; i++) h = (h * 31 + token.charCodeAt(i)) | 0;
-  return `#${(h >>> 0).toString(16).padStart(8, "0").slice(0, 6)}`;
 }

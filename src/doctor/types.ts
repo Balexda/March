@@ -14,6 +14,7 @@ export type Severity = "pass" | "warn" | "fail";
 /** The diagnostic check categories the battery runs. */
 export type CheckId =
   | "token-wiring"
+  | "tessera-wiring"
   | "session-consistency"
   | "dispatch-health"
   | "worktree-hygiene"
