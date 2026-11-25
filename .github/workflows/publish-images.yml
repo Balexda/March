@@ -1,0 +1,167 @@
+name: Publish images
+
+# Builds the March service images for a release tag, pushes them to GHCR and
+# attaches `march-stack.json` to the tag's GitHub Release (issue #438).
+#
+# - Called by the Release workflow (publish.yml) once the tag and GitHub Release
+#   exist. A separate `release: published` trigger would never fire: events
+#   from a release created with GITHUB_TOKEN don't start other workflows.
+# - Run by hand (workflow_dispatch) to publish an existing tag, e.g. to
+#   backfill v0.2.0. Re-running replaces the tag's images and its asset.
+#
+# Two checkouts: `tools/` is the workflow's own commit (it supplies
+# scripts/stack-manifest.mjs, so a tag older than that script can still be
+# published), `target/` is the tag being published. The images and their build
+# stamps come only from `target/`, through the same `npm run build:<svc>-image`
+# scripts a developer runs, so a pulled image matches a locally built one.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.2.0)'
+        required: true
+        type: string
+      latest:
+        description: 'Also push the :latest tags'
+        required: false
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish (e.g. v0.2.0)'
+        required: true
+        type: string
+      latest:
+        description: 'Also move the :latest tags to this release'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-images-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # upload the release asset
+      packages: write   # push to ghcr.io
+
+    env:
+      TAG: ${{ inputs.tag }}
+      PUSH_LATEST: ${{ inputs.latest }}
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+      SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+
+    steps:
+    - name: Validate tag
+      run: |
+        if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::Invalid tag: '$TAG' (expected vX.Y.Z)"
+          exit 1
+        fi
+        # GHCR requires a lowercase owner.
+        echo "REGISTRY=${REGISTRY,,}" >> "$GITHUB_ENV"
+
+    - name: Check out tooling
+      uses: actions/checkout@v7
+      with:
+        path: tools
+
+    - name: Check out the tag
+      uses: actions/checkout@v7
+      with:
+        ref: refs/tags/${{ inputs.tag }}
+        path: target
+        # Full history + tags so scripts/build-args.sh stamps describe=vX.Y.Z-0-g<sha>.
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+        cache-dependency-path: tools/package-lock.json
+
+    - name: Install tooling dependencies
+      working-directory: tools
+      run: npm ci
+
+    - name: Verify the build stamp matches the tag
+      working-directory: target
+      run: |
+        commit=$(git rev-parse HEAD)
+        tag_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+        describe=$(git describe --tags --long --dirty --always)
+        echo "commit=$commit describe=$describe"
+        if [[ "$commit" != "$tag_commit" ]]; then
+          echo "::error::HEAD $commit is not the commit of $TAG ($tag_commit)"
+          exit 1
+        fi
+        if [[ "$describe" != "$TAG-0-g"* || "$describe" == *-dirty ]]; then
+          echo "::error::git describe '$describe' is not '$TAG-0-g<sha>'; the build stamp would not match the tag"
+          exit 1
+        fi
+        echo "COMMIT=$commit" >> "$GITHUB_ENV"
+
+    - name: Plan images
+      run: |
+        node tools/scripts/stack-manifest.mjs plan --root target --registry "$REGISTRY" > plan.json
+        cat plan.json
+
+    - name: Log in to GHCR
+      env:
+        GHCR_TOKEN: ${{ github.token }}
+      run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+    - name: Build and push images
+      run: |
+        set -euo pipefail
+        echo '{}' > digests.json
+        n=$(jq length plan.json)
+        for i in $(seq 0 $((n - 1))); do
+          name=$(jq -r ".[$i].name" plan.json)
+          script=$(jq -r ".[$i].script" plan.json)
+          local_image=$(jq -r ".[$i].localImage" plan.json)
+          repo=$(jq -r ".[$i].repo" plan.json)
+          echo "::group::$name → $repo:$TAG"
+          # The tag's own build script (same Dockerfile, context and
+          # build-args.sh stamp as a local build). Extra flags go after the
+          # script's own; the source label links the package to this repo.
+          (cd target && npm run "$script" -- \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.source=$SOURCE_URL" \
+            --label "org.opencontainers.image.version=$TAG" \
+            --label "org.opencontainers.image.revision=$COMMIT")
+          docker tag "$local_image" "$repo:$TAG"
+          docker push "$repo:$TAG"
+          if [[ "$PUSH_LATEST" == "true" ]]; then
+            docker tag "$local_image" "$repo:latest"
+            docker push "$repo:latest"
+          fi
+          # The digest of what the registry now serves for the tag.
+          digest=$(docker buildx imagetools inspect "$repo:$TAG" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "$name $digest"
+          jq --arg k "$name" --arg v "$digest" '. + {($k): $v}' digests.json > digests.tmp
+          mv digests.tmp digests.json
+          echo "::endgroup::"
+        done
+        cat digests.json
+
+    - name: Generate march-stack.json
+      run: |
+        node tools/scripts/stack-manifest.mjs manifest \
+          --root target --registry "$REGISTRY" \
+          --version "$TAG" --commit "$COMMIT" \
+          --digests digests.json > march-stack.json
+        cat march-stack.json
+
+    - name: Attach march-stack.json to the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "$TAG" march-stack.json --clobber --repo "${{ github.repository }}"

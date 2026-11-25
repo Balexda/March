@@ -43,13 +43,16 @@ requires [`agent-deck`](https://github.com/asheshgoplani/agent-deck) and Python
 the first-run CLI bootstrap (manifest + base skills); pass a `<profile>` to also
 bring the stack up and onboard a repo.
 
-The service images (`march-castra`, `march-hatchery`, `march-brood`,
-`march-herald`, `march-legate`) are **not yet published to a registry**, so
-`march up` / `march init <profile>` currently require them to be built locally
-from a source checkout first (`npm run build:images`). `march up` preflights the
-images and reports the missing ones rather than starting a partial stack. Making
-the stack pullable from a plain `npm i -g` is tracked in
-[issue #438](https://github.com/Balexda/March/issues/438).
+The service images (`march-castra`, `march-tessera`, `march-hatchery`,
+`march-brood`, `march-herald`, `march-legate`) are published to GHCR on
+each release as `ghcr.io/balexda/march-<svc>:<tag>` (and `:latest`). `march up` /
+`march init <profile>` still only use **local** `march-*:latest` images: either
+build them from a source checkout (`npm run build:images`), or pull and retag a
+release image, e.g. `docker pull ghcr.io/balexda/march-castra:v0.2.0 && docker
+tag ghcr.io/balexda/march-castra:v0.2.0 march-castra:latest`. `march up`
+preflights the images and reports the missing ones rather than starting a
+partial stack. Having `march up` / `march upgrade` pull them automatically is
+still tracked in [issue #438](https://github.com/Balexda/March/issues/438).
 
 ## Supported AI Assistants
 
