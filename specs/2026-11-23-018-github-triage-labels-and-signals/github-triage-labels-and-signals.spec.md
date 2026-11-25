@@ -48,7 +48,7 @@ As an operator, I want my edits, acceptance, and resubmission to have predictabl
 
 | ID | Title | Depends On | Artifact |
 |---|---|---|---|
-| US1 | See the same triage labels across repositories | — | — |
+| US1 | See the same triage labels across repositories | — | specs/2026-11-23-018-github-triage-labels-and-signals/01-see-the-same-triage-labels-across-repositories.tasks.md |
 | US2 | Control triage through issue labels | — | — |
 
 Both stories share the catalog and can be verified independently.
