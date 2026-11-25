@@ -4,16 +4,16 @@ export const TRIAGE_SCHEMA_VERSION = 1;
 export const TRIAGE_RUBRIC_REVISION = "baseline-1";
 
 const BUILD_OUTCOMES = ["spark", "ignite", "render", "mark", "strike"] as const;
-const OUTCOMES = [...BUILD_OUTCOMES, "needs-definition", "controversial", "close"] as const;
-const CONFIDENCES = ["high", "medium", "low"] as const;
+export const TRIAGE_OUTCOMES = [...BUILD_OUTCOMES, "needs-definition", "controversial", "close"] as const;
+export const TRIAGE_CONFIDENCES = ["high", "medium", "low"] as const;
 const GRADES = ["minor-gaps", "major-gaps", "insufficient"] as const;
 
-type BuildOutcome = typeof BUILD_OUTCOMES[number];
-type Outcome = typeof OUTCOMES[number];
+export type BuildOutcome = typeof BUILD_OUTCOMES[number];
+type Outcome = typeof TRIAGE_OUTCOMES[number];
 
 export type TriageVerdictV1 = {
   readonly schemaVersion: typeof TRIAGE_SCHEMA_VERSION;
-  readonly confidence: typeof CONFIDENCES[number];
+  readonly confidence: typeof TRIAGE_CONFIDENCES[number];
   readonly rationale: string;
 } & (
   | {
@@ -115,8 +115,8 @@ function readVerdict(raw: string): TriageVerdictV1 {
   exactFields(candidate, fields, "$");
 
   if (schemaVersion !== TRIAGE_SCHEMA_VERSION) reject("$.schemaVersion", "unsupported-version");
-  if (!isMember(OUTCOMES, outcome)) reject("$.outcome", "invalid-value");
-  if (!isMember(CONFIDENCES, confidence)) reject("$.confidence", "invalid-value");
+  if (!isMember(TRIAGE_OUTCOMES, outcome)) reject("$.outcome", "invalid-value");
+  if (!isMember(TRIAGE_CONFIDENCES, confidence)) reject("$.confidence", "invalid-value");
   const rationale = nonblank(candidate.rationale, "$.rationale");
   const base = { schemaVersion, confidence, rationale } as const;
 
@@ -143,7 +143,11 @@ export function validateTriageVerdict(raw: string): VerdictValidation {
   }
 }
 
+export function isBuildOutcome(outcome: TriageVerdictV1["outcome"]): outcome is BuildOutcome {
+  return isMember(BUILD_OUTCOMES, outcome);
+}
+
 /** Resolve the recommended Smithy entry point for a validated verdict. */
 export function resolveTriageDestination(verdict: TriageVerdictV1): `smithy.${BuildOutcome}` | undefined {
-  return isMember(BUILD_OUTCOMES, verdict.outcome) ? `smithy.${verdict.outcome}` : undefined;
+  return isBuildOutcome(verdict.outcome) ? `smithy.${verdict.outcome}` : undefined;
 }

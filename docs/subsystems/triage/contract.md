@@ -27,6 +27,41 @@ Recommender execution and calibration belong to the recommender milestone.
   `smithy.strike` for the matching build outcome, and `undefined` otherwise.
 - `TRIAGE_SCHEMA_VERSION` (`1`) and `TRIAGE_RUBRIC_REVISION` (`baseline-1`)
   name the wire schema and the rubric revision.
+- `TRIAGE_OUTCOMES` and `TRIAGE_CONFIDENCES` expose the verdict vocabulary.
+  `isBuildOutcome(outcome)` applies the same build classification as
+  `resolveTriageDestination`.
+- `TRIAGE_LABELS` exposes the shared vocabulary by group.
+  `TRIAGE_LABEL_CATALOG` lists every label name. Triage manages the state,
+  outcome, and confidence groups subject to operator override. Operators own
+  the `triage:accepted` and `triage:resubmit` signals.
+- `hashTriageContent(title, body?)` hashes the ordered title/body pair as a
+  JSON array with SHA-256. A missing body is equivalent to an empty body.
+- `interpretTriageLabels(issue, history, provenance?)` evaluates the live
+  issue snapshot against baseline and subsequent snapshots for the same issue.
+  Supply distinct change IDs in chronological order and declare whether all
+  relevant transitions are covered. Supply handled change IDs to suppress
+  replays.
+- The interpretation returns the live state and the managed groups a writer
+  must preserve in full. With baseline verdict provenance, the interpreter
+  can compare the baseline assignments against the original verdict. A
+  verdict linked to a known write ID explains only the groups matching that
+  recorded verdict. Same-content differences of uncertain attribution are
+  protected. Content transitions retire earlier protections. An unresolved
+  override result indicates insufficient evidence to settle every group.
+- A qualified re-entry reports the newest unhandled qualifying observation in
+  the current open interval. Within one observation, content change takes
+  precedence over reopen, then resubmit addition. Consumers record one
+  handled change ID for the observation. Incomplete history or a mirror
+  behind the live managed labels, signals, open status, or hash yields
+  unresolved re-entry.
+- Intake authorization includes the build outcome, content hash, and
+  observed acceptance addition ID. The history must establish that the
+  addition occurred with the same unambiguous triaged recommendation on
+  both sides of that observation. Changes to the content or recommendation
+  and signal removal invalidate the association. Intake must recheck the live
+  issue and verify the same addition before acting. It owns intake
+  deduplication.
+  [Label and history contract](../../../specs/2026-11-23-018-github-triage-labels-and-signals/github-triage-labels-and-signals.contracts.md#interpret-issue-labels-and-history)
 
 The issue and its triage note are the intended freeform inputs to the
 recommended verb. Intake requires explicit operator acceptance. Before intake
