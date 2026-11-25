@@ -96,4 +96,6 @@ Specs and feature maps that explicitly invoke this philosophy:
 
 - `specs/2026-11-21-015-versioned-triage-verdicts/versioned-triage-verdicts.spec.md` — FR-003. Applies rule 3 (clean exits): invalid triage verdicts are rejected before any GitHub write and surface as a diagnostic plus an errored span.
 
+- `specs/2026-11-23-018-github-triage-labels-and-signals/github-triage-labels-and-signals.spec.md` — FR-002 applies rules 2 and 3 to repository-scoped label provisioning and bounded failure reporting.
+
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
