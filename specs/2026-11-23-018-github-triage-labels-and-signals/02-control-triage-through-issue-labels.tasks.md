@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Interpret live labels and protect operator edits**
+- [x] **Interpret live labels and protect operator edits**
 
   Share the exact contract catalog across triage consumers and keep its outcomes and confidence values aligned with `src/triage/verdict.ts`. Interpret the live GitHub snapshot, observed changes, and optional verdict provenance for AS 2.1.
 
@@ -29,7 +29,7 @@
   - Hash the ordered title and body with unambiguous field boundaries and treat a missing body as empty. A content transition retires the override even if the issue later returns to the original text.
   - Verify catalog mapping, state decoding, mirror lag, same-content overrides, uncertain attribution, and override retirement with fixtures.
 
-- [ ] **Recognize fresh re-entry transitions**
+- [x] **Recognize fresh re-entry transitions**
 
   Evaluate AS 2.2 from ordered observations and distinct change identities. Use caller-provided evidence of previously handled changes to recognize replay.
 
@@ -38,7 +38,7 @@
   - Replay, persistent resubmit, comments, timestamps alone, March's triage writes, and rubric-only revisions produce no new eligibility. Removal and re-addition of resubmit can qualify again.
   - Incomplete history yields unresolved re-entry so consumers can defer and re-evaluate. Fixtures cover each trigger, each exclusion, co-occurrence and its replay, closed issues, and incomplete history.
 
-- [ ] **Verify explicit acceptance of the current recommendation**
+- [x] **Verify explicit acceptance of the current recommendation**
 
   Evaluate AS 2.3 from the live labels, content hash, and acceptance history. Reuse the F1 build-outcome classification in `src/triage/verdict.ts` and document the mapped interface in `docs/subsystems/triage/contract.md`.
 
