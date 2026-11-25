@@ -6,8 +6,11 @@ name: Publish images
 # - Called by the Release workflow (publish.yml) once the tag and GitHub Release
 #   exist. A separate `release: published` trigger would never fire: events
 #   from a release created with GITHUB_TOKEN don't start other workflows.
-# - Run by hand (workflow_dispatch) to publish an existing tag, e.g. to
-#   backfill v0.2.0. Re-running replaces the tag's images and its asset.
+# - Run by hand (workflow_dispatch) to publish an existing tag whose GitHub
+#   Release is still a **draft** (e.g. after a failed release run). Re-running
+#   replaces the tag's images and its asset. A published release is immutable
+#   (repo setting), so its assets can't change: the workflow refuses such a tag
+#   before pushing anything.
 #
 # Two checkouts: `tools/` is the workflow's own commit (it supplies
 # scripts/stack-manifest.mjs, so a tag older than that script can still be
@@ -66,6 +69,23 @@ jobs:
         fi
         # GHCR requires a lowercase owner.
         echo "REGISTRY=${REGISTRY,,}" >> "$GITHUB_ENV"
+
+    - name: Check the release can take the asset
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # The tags endpoint hides drafts; list releases to find one by tag.
+        release=$(gh api --paginate "repos/${{ github.repository }}/releases" \
+          --jq ".[] | select(.tag_name == \"$TAG\") | {draft, immutable}")
+        echo "release: ${release:-none}"
+        if [[ -z "$release" ]]; then
+          echo "::error::No GitHub Release for $TAG"
+          exit 1
+        fi
+        if [[ "$(jq -r .draft <<<"$release")" != "true" && "$(jq -r .immutable <<<"$release")" == "true" ]]; then
+          echo "::error::The $TAG release is published and immutable, so march-stack.json can't be attached. Only draft releases can be (re)published."
+          exit 1
+        fi
 
     - name: Check out tooling
       uses: actions/checkout@v7

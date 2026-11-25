@@ -122,13 +122,17 @@ jobs:
         git push origin "HEAD:refs/heads/${{ inputs.branch }}"
         git push origin "v${{ steps.version.outputs.version }}"
 
-    - name: Create GitHub Release with auto-generated notes
+    # A draft: the repo has immutable releases, so once published nothing can
+    # be attached. The `images` job adds march-stack.json to the draft and
+    # `release` publishes it last.
+    - name: Create draft GitHub Release with auto-generated notes
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         gh release create "v${{ steps.version.outputs.version }}" \
           --title "v${{ steps.version.outputs.version }}" \
-          --generate-notes
+          --generate-notes \
+          --draft
 
     - name: Publish to npm
       if: ${{ inputs.publish_npm }}
@@ -136,8 +140,9 @@ jobs:
 
   # Prebuilt service images on GHCR + the `march-stack.json` release asset, so a
   # host can install the release by pulling instead of building (issue #438).
-  # Runs after the tag and GitHub Release exist; it adds images and one release
-  # asset and changes nothing the npm package or the release notes contain.
+  # Runs after the tag and the draft GitHub Release exist; it adds images and
+  # one release asset and changes nothing the npm package or the release notes
+  # contain.
   images:
     needs: publish
     permissions:
@@ -147,3 +152,19 @@ jobs:
     with:
       tag: ${{ needs.publish.outputs.tag }}
       latest: true
+
+  # Publish the draft only once its march-stack.json is attached: a published
+  # release is immutable. If `images` fails the release stays a draft; fix and
+  # "Re-run failed jobs" (or run publish-images for the tag, then publish the
+  # draft by hand).
+  release:
+    needs: [publish, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Publish the GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ needs.publish.outputs.tag }}
+      run: gh release edit "$TAG" --draft=false --latest --repo "${{ github.repository }}"
