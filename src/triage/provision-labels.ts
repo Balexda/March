@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { resolveHeraldUrl } from "../herald/service/client.js";
 import { startTriageProvisionSpan } from "../observability/triage-trace.js";
@@ -65,7 +66,7 @@ export async function provisionTriageLabels(options: ProvisionLabelOptions): Pro
       const body = await response.json();
       if (!Array.isArray(body?.profiles) || !body.profiles.every(
         (row: { profile?: unknown; repoPath?: unknown } | null) =>
-          typeof row?.profile === "string" && typeof row.repoPath === "string" && row.repoPath.length > 0,
+          typeof row?.profile === "string" && typeof row.repoPath === "string" && isAbsolute(row.repoPath),
       )) throw new ProvisionError("Invalid Herald profile response");
       return body.profiles as Array<{ profile: string; repoPath: string }>;
     });

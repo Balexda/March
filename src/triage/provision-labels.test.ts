@@ -158,3 +158,11 @@ it("reports malformed registry coverage instead of treating it as empty", async 
   scenario.registry = async () => Response.json({});
   expect(await run()).toMatchObject({ ok: false, operation: "registry.list" });
 });
+
+it("rejects a relative checkout path before resolving any repository", async () => {
+  const { scenario, run, writes, tokenForRepository } = fixture();
+  scenario.registry = async () => Response.json({ profiles: [{ profile: "relative", repoPath: "." }] });
+  expect(await run()).toMatchObject({ ok: false, operation: "registry.list", reason: "Invalid Herald profile response" });
+  expect(tokenForRepository).not.toHaveBeenCalled();
+  expect(writes).toEqual([]);
+});

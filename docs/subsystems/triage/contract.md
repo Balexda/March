@@ -33,7 +33,7 @@ Recommender execution and calibration belong to the recommender milestone.
   and resubmit are operator-owned signals.
 - `provisionTriageLabels(options)` in `src/triage/provision-labels.ts` reads
   Herald's active profiles and resolves GitHub identity from each registered
-  checkout's origin. The caller supplies `tokenForRepository(repository, signal)`,
+  checkout's origin. A relative `repoPath` fails as `registry.list`. The caller supplies `tokenForRepository(repository, signal)`,
   which returns a credential restricted to that repository with GitHub Issues
   write access. Provisioning uses it to list and create repository label definitions.
   The caller may set `heraldUrl` and the per-operation `timeoutMs` (15 seconds by
