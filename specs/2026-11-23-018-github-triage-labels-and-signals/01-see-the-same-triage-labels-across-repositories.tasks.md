@@ -15,7 +15,7 @@
 
 ### Tasks
 
-- [ ] **Define the shared label catalog**
+- [x] **Define the shared label catalog**
 
   Define the GitHub label names and groups in the triage domain using the feature contracts for AS 1.1.
 
@@ -23,7 +23,7 @@
   - The catalog includes one exact contract name for each state, outcome, confidence, acceptance, and resubmit value. Tests check complete, unique coverage and the one-to-one mapping to the v1 verdict outcomes and confidence levels.
   - Acceptance and resubmit are identified as operator-owned signals.
 
-- [ ] **Provision missing label definitions across registered repositories**
+- [x] **Provision missing label definitions across registered repositories**
 
   Expose provisioning over the Herald profile registry and a repository-scoped GitHub access boundary for AS 1.1–1.3. Document the public surface in the owning subsystem contract. Follow the [March vision](../../docs/vision.md) and [operating philosophy rules 2 and 3](../../docs/operating-philosophy.md#three-rules-of-thumb).
 

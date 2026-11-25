@@ -27,6 +27,19 @@ Recommender execution and calibration belong to the recommender milestone.
   `smithy.strike` for the matching build outcome, and `undefined` otherwise.
 - `TRIAGE_SCHEMA_VERSION` (`1`) and `TRIAGE_RUBRIC_REVISION` (`baseline-1`)
   name the wire schema and the rubric revision.
+- `TRIAGE_LABEL_CATALOG` in `src/triage/labels.ts` defines the shared GitHub
+  [label names and groups](../../../specs/2026-11-23-018-github-triage-labels-and-signals/github-triage-labels-and-signals.contracts.md#label-catalog).
+  Outcome and confidence values come from the v1 verdict vocabulary. Acceptance
+  and resubmit are operator-owned signals.
+- `provisionTriageLabels(options)` in `src/triage/provision-labels.ts` reads
+  Herald's active profiles and resolves GitHub identity from each registered
+  checkout's origin. A relative `repoPath` fails as `registry.list`. The caller supplies `tokenForRepository(repository, signal)`,
+  which returns a credential restricted to that repository with GitHub Issues
+  write access. Provisioning uses it to list and create repository label definitions.
+  The caller may set `heraldUrl` and the per-operation `timeoutMs` (15 seconds by
+  default). Local Git lookup uses the shared five-second bound.
+  [March vision](../../vision.md) ·
+  [Operating philosophy](../../operating-philosophy.md#three-rules-of-thumb)
 
 The issue and its triage note are the intended freeform inputs to the
 recommended verb. Intake requires explicit operator acceptance. Before intake
@@ -48,6 +61,11 @@ upstream mapping or seed-only handoff.
   `needs-definition`, `controversial`, and `close` at any confidence. A verdict
   conveys a recommendation only. Dispatch, closure, and other issue mutations
   require separate authorization.
+- Provisioning deduplicates GitHub repositories by case-insensitive identity.
+  A successful result reports `created` and `alreadyPresent` names for each
+  repository. It creates only missing definitions and preserves existing colors,
+  descriptions, unrelated labels, and issue assignments. A concurrent create
+  counts as already present after a read confirms the name.
 
 ## Error Modes
 
@@ -67,3 +85,8 @@ When telemetry is enabled, every rejection also emits an errored
 `triage.verdict.validate` span. The span records `triage.validation.code` and
 no candidate content. This follows
 [operating philosophy rule 3](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs).
+
+Provisioning returns `{ ok: false, operation, reason }` if it cannot confirm
+full coverage. It includes the repository, profile, or label when available.
+It also marks the `triage.labels.provision` span as errored when tracing is
+enabled. A retry reads the current catalog and fills the remaining gaps.
