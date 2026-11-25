@@ -121,8 +121,9 @@ Quick pointers:
   register` (registration only) — both still work for one release but warn and
   forward. `march profile list|remove|merge-policy|priority` manage
   already-registered profiles directly. (Onboarding still needs the `march-*`
-  images built locally; making the stack pullable from a registry so a bare `npm
-  i -g` → `march init` works with no source/builds is tracked in issue #438.)
+  images present locally: built, or pulled from GHCR — releases publish them via
+  `.github/workflows/publish-images.yml` with a `march-stack.json` asset — and
+  retagged; `march init`/`up` pulling them itself is what remains of issue #438.)
   Herald's observer iterates the same registry. The old per-profile
   hatchery-launched container + `legate-loop-meta.json` are retired (the meta
   survives only as a legacy registry seed via `MARCH_HERALD_META`). Set

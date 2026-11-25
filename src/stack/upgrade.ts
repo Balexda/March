@@ -17,9 +17,11 @@ import { resolveCastraToken, type ResolvedToken } from "./up.js";
  * - Developers with the source rebuild them with the npm `build:*-image`
  *   scripts (`npm run build:images`), then run `march upgrade` to roll the
  *   containers onto them — `npm run deploy:local` chains both.
- * - Pulling prebuilt images from a *hosted* registry (so an npm/brew install
- *   with no source can fetch fresh images) is tracked in issue #438; until that
- *   lands, `upgrade` rolls whatever images are already present locally.
+ * - Releases publish the service images to GHCR (`ghcr.io/balexda/march-<svc>`)
+ *   plus a `march-stack.json` release asset. `upgrade` pulling them itself (so
+ *   an npm/brew install with no source needs no manual `docker pull`/`docker
+ *   tag`) is what remains of issue #438; until that lands, `upgrade` rolls
+ *   whatever images are already present locally.
  *
  * Each service is recreated with `docker compose up -d --force-recreate
  * --no-build`. `--force-recreate` replaces the container even when the compose

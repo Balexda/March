@@ -73,6 +73,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
 
+    outputs:
+      tag: v${{ steps.version.outputs.version }}
+
     permissions:
       contents: write
       id-token: write
@@ -130,3 +133,17 @@ jobs:
     - name: Publish to npm
       if: ${{ inputs.publish_npm }}
       run: npm publish
+
+  # Prebuilt service images on GHCR + the `march-stack.json` release asset, so a
+  # host can install the release by pulling instead of building (issue #438).
+  # Runs after the tag and GitHub Release exist; it adds images and one release
+  # asset and changes nothing the npm package or the release notes contain.
+  images:
+    needs: publish
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/publish-images.yml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}
+      latest: true
