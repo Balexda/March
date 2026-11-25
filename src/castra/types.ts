@@ -76,9 +76,31 @@ export interface SessionRecoveryResult {
   readonly error?: string;
 }
 
+/**
+ * What happened to one live session's Claude directory-trust dialog during a
+ * recovery sweep. `resolved`: Castra answered "Yes, add it" for its own steward
+ * directory. `not_owned`: the dialog names another directory and was left for
+ * the operator. `failed`: Castra's dialog could not be answered safely.
+ */
+export interface TrustDialogResult {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly group: string;
+  readonly outcome: "resolved" | "not_owned" | "failed";
+  /** The directory the dialog asked to trust. */
+  readonly dir: string;
+  /** Present on `failed`: why it stopped. */
+  readonly detail?: string;
+}
+
 /** The result of a recovery sweep over a profile's errored sessions. */
 export interface RecoverReport {
   readonly recovered: readonly SessionRecoveryResult[];
+  /**
+   * Directory-trust dialogs found on live in-scope sessions. Sessions with no
+   * dialog are omitted, so this is usually empty.
+   */
+  readonly trustDialogs?: readonly TrustDialogResult[];
 }
 
 /** Stable error codes returned in the API error envelope. */
@@ -89,6 +111,7 @@ export type CastraErrorCode =
   | "conflict"
   | "agent_deck_error"
   | "tmux_error"
+  | "composer_refused"
   | "internal";
 
 /** Live tmux inventory could not be read. Maps to HTTP 502. */
@@ -115,6 +138,22 @@ export class CastraAgentDeckError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CastraAgentDeckError";
+  }
+}
+
+/**
+ * agent-deck refused a send because the session's Claude composer was occupied
+ * or unreadable (for example a dialog sits in it). The message carries the pane
+ * tail. Castra fast-fails further sends to the session with this error during
+ * its refusal cooldown. Maps to HTTP 502 with code `composer_refused`.
+ */
+export class CastraComposerRefusedError extends CastraAgentDeckError {
+  /** True when Castra failed fast from the cooldown without running agent-deck. */
+  readonly cached: boolean;
+  constructor(message: string, cached = false) {
+    super(message);
+    this.name = "CastraComposerRefusedError";
+    this.cached = cached;
   }
 }
 

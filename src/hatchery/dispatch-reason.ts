@@ -5,8 +5,9 @@
  * `/readyz` `spawns.last_error`, and what the legate surfaces in its judgement
  * log line — so it must stay a small, bounded vocabulary. Never echo raw error
  * text: a {@link HatcheryGitHubError} code (`tessera:unconfigured`, …) is passed
- * through (its codes are already a closed protocol set), a handful of known
- * failure classes map to fixed codes, and everything else is `"other"`.
+ * through only when it is one of the known codes below (an unknown one is
+ * `"other"`), a handful of known failure classes map to fixed codes, and
+ * everything else is `"other"`.
  *
  * Spawns run in a worker thread, so the error the service sees is a plain
  * `Error` carrying only the message — the GitHub code is recovered from the
@@ -17,6 +18,26 @@
 export const DISPATCH_REASON_NONE = "none";
 
 const GITHUB_CODE = /Hatchery GitHub read failed \(([a-z0-9_:-]{1,64})\)/i;
+
+/** Hatchery's own GitHub-read failure codes (`HatcheryGitHubError`). */
+const LOCAL_GITHUB_CODES = new Set([
+  "branch_lookup_failed", "remote_check_failed", "invalid_pr_lookup", "invalid_repo_lookup", "origin_lookup_failed",
+  "unsupported_origin", "incomplete_lookup", "lookup_failed", "fetch_failed",
+]);
+
+/** The Tessera client's local codes, plus Tessera's wire protocol codes; carried as `tessera:<code>`. */
+const TESSERA_CODES = new Set([
+  "unconfigured", "unreachable", "invalid_request", "invalid_response",
+  "unauthorized", "policy_denied", "repo_not_installed", "provider_unconfigured", "credential_invalid", "provider_unavailable", "mint_failed",
+]);
+
+/** A known GitHub code, lowercased, or undefined: an unknown suffix must not become a new metric label. */
+function knownGitHubCode(code: string): string | undefined {
+  const lower = code.toLowerCase();
+  if (LOCAL_GITHUB_CODES.has(lower)) return lower;
+  if (lower.startsWith("tessera:") && TESSERA_CODES.has(lower.slice("tessera:".length))) return lower;
+  return undefined;
+}
 
 const FIXED: ReadonlyArray<readonly [RegExp, string]> = [
   [/spawn worker exited/i, "worker_exit"],
@@ -31,7 +52,7 @@ const FIXED: ReadonlyArray<readonly [RegExp, string]> = [
 export function hatcheryGitHubCode(text: string | undefined | null): string | undefined {
   if (!text) return undefined;
   const match = GITHUB_CODE.exec(text);
-  return match ? match[1].toLowerCase() : undefined;
+  return match ? knownGitHubCode(match[1]) : undefined;
 }
 
 /** Map a dispatch error (Error, string, or anything) to its bounded reason code. */
@@ -40,10 +61,9 @@ export function dispatchReasonCode(err: unknown): string {
     && typeof (err as { code?: unknown }).code === "string"
     ? ((err as { code: string }).code)
     : undefined;
-  if (code && /^[a-z0-9_:-]{1,64}$/i.test(code)) return code.toLowerCase();
+  if (code !== undefined) return knownGitHubCode(code) ?? "other";
   const text = err instanceof Error ? err.message : typeof err === "string" ? err : "";
-  const fromText = hatcheryGitHubCode(text);
-  if (fromText) return fromText;
+  if (GITHUB_CODE.test(text)) return hatcheryGitHubCode(text) ?? "other";
   for (const [pattern, reason] of FIXED) if (pattern.test(text)) return reason;
   return "other";
 }

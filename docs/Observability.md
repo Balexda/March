@@ -292,6 +292,21 @@ and prompt bodies stay out of metrics (they belong in spans/logs).
 | `march.castra.request.duration` (histogram, `s`) | `march_castra_request_duration_seconds_{bucket,count,sum}` | API request wall-clock duration |
 | `march.castra.heartbeat` (counter) | `march_castra_heartbeat_total` | Liveness ticks (one every 15s while serving) |
 | `march.castra.uptime` (observable gauge, `s`) | `march_castra_uptime_seconds` | Process uptime of the Castra service |
+| `march.castra.sends` (counter, no unit) | `march_castra_sends_total` | Session sends by `{profile, outcome}`; `outcome` = `delivered`/`refused` (agent-deck ran and refused: composer occupied)/`refused_cached` (failed fast in the refusal cooldown, agent-deck not run)/`not_found`/`failed` |
+| `march.castra.refused_sessions` (observable gauge, no unit) | `march_castra_refused_sessions` | Sessions currently in their composer-refusal cooldown (5 min, or until the pane changes) |
+| `march.castra.event_loop_lag_ms` (observable gauge, no unit) | `march_castra_event_loop_lag_ms` | The worst 5-second event-loop lag p99 in the last minute (`perf_hooks.monitorEventLoopDelay`), in ms; a peak, not a whole-minute p99. Over 2000 makes `/readyz` `down` |
+| `march.castra.trust_dialogs` (counter, no unit) | `march_castra_trust_dialogs_total` | Claude directory-trust dialogs Castra found, by `{profile, outcome, trigger}`; `outcome` = `resolved`/`not_owned`/`failed`, `trigger` = `send_refusal`/`recover` |
+
+**Readiness, not liveness.** On 2026-11-22 two stewards sat on Claude Code's
+"Adding a new directory … trust?" dialog. Each send to them took ~15s in a
+synchronous `agent-deck` call that froze Castra's event loop, so `/healthz` took
+14s and every Hatchery spawn failed "Could not reach Castra", while heartbeat
+and uptime stayed green. Castra now runs every child process async with a
+timeout, and `GET /readyz` reports `degraded` (sessions in refusal cooldown, or
+3+ failed sends in 5 minutes) or `down` (event-loop lag p99 over 2s). The
+"Event-loop lag p99" and "Refused sessions / sends" tiles on the Castra
+dashboard's Service-health row read these gauges. Contract:
+`docs/subsystems/castra/contract.md`.
 
 `outcome` is `success` (status < 500) or `failure`. Mutating requests
 (`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span carrying
@@ -304,6 +319,16 @@ span keys off that dispatch slice id so it nests under the existing per-dispatch
 trace; without it the span is a standalone root (the legate populating the slice
 header on **all** sends — not just dispatch — and emitting the parent loop-action
 span is a separate legate-side change).
+
+When Castra finds Claude's directory-trust dialog on a steward's pane (after a
+composer refusal, or during `POST /v1/sessions/recover`), it emits one
+`castra.trust_dialog` span plus one log line carrying `castra.session_id`,
+`castra.trust_dir`, `castra.trust_trigger` (`send_refusal`/`recover`) and
+`castra.trust_outcome`. Castra answers "Yes, add it" only for its own steward
+directory (`resolved`). A dialog for any other directory is left alone
+(`not_owned`), and one Castra could not answer safely is `failed`; both are
+errored spans. On a send, the span keys off the `x-march-slice-id` slice trace
+when the caller set it.
 
 `castra serve` also ships request logs through the OTLP pino logger
 (`createCastraLogger`, `service.name=march-castra`) and starts a periodic
@@ -494,7 +519,8 @@ forwarded loop logs (Loki, with trace links). It is filtered by `profile` /
 A third dashboard,
 [`docker/grafana/dashboards/march-castra.json`](../docker/grafana/dashboards/march-castra.json)
 ("**March — Castra sessions host**"), opens with a Service-health row
-(heartbeat / uptime) and then shows the Castra API's RED metrics:
+(heartbeat / uptime / event-loop lag p99 / refused sessions and sends) and then
+shows the Castra API's RED metrics:
 request rate, 5xx error ratio, rate by status class, duration percentiles
 (p50/p95/p99), a route × status-class table, and p95 by route — with `profile`
 and `route` template variables.

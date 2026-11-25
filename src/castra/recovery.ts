@@ -1,5 +1,11 @@
 import type { RecoveryRuntime, RecoverySessionView } from "./adapter.js";
-import type { RecoverReport, SessionRecoveryResult } from "./types.js";
+import type { RecoverReport, SessionRecoveryResult, TrustDialogResult } from "./types.js";
+import {
+  parseTrustDialog,
+  resolveTrustDialog,
+  type ResolveTrustDialogOptions,
+  type TrustDialogIo,
+} from "./trust-dialog.js";
 
 /**
  * Castra session recovery (#castra-recover).
@@ -25,6 +31,13 @@ import type { RecoverReport, SessionRecoveryResult } from "./types.js";
  * only recovered when the caller names it explicitly (`sessionIds`) — the legate
  * does exactly that for stopped stewards still backing a live slice. A group-wide
  * sweep keeps recovering `error` sessions only.
+ *
+ * Directory-trust dialogs: stewards launched before #608 pass `--add-dir
+ * ~/.march/steward`, so Claude Code opens with an "Adding a new directory …
+ * Yes, add it" dialog that blocks every send. The sweep answers that dialog when
+ * it names Castra's own steward directory — after a restart, and on live
+ * in-scope sessions — and reports any other directory's dialog untouched (see
+ * trust-dialog.ts).
  *
  * The runtime, clock, and sleeper are injected so the orchestration is unit
  * testable without a live agent-deck/tmux; production wires {@link
@@ -99,6 +112,8 @@ export interface RecoverDeps {
   readonly statusTimeoutMs?: number;
   /** Status poll cadence. Default 500ms. */
   readonly statusPollMs?: number;
+  /** Trust-dialog answering options (owned dirs, key settle time). */
+  readonly trustDialog?: ResolveTrustDialogOptions;
 }
 
 const DEFAULTS = {
@@ -155,14 +170,71 @@ export async function recoverErrorSessions(
     statusPollMs: deps.statusPollMs ?? DEFAULTS.statusPollMs,
   };
 
-  const targets = selectRecoverable(deps.runtime.listSessions(options.profile), options);
+  const sessions = await deps.runtime.listSessions(options.profile);
+  const targets = selectRecoverable(sessions, options);
   const recovered: SessionRecoveryResult[] = [];
+  const trustDialogs: TrustDialogResult[] = [];
 
   for (const target of targets) {
-    recovered.push(await recoverOne(deps, options.profile, target, now, cfg));
+    recovered.push(await recoverOne(deps, options.profile, target, now, cfg, trustDialogs));
   }
 
-  return { recovered };
+  // Live sessions are not restarted, but one may sit on a trust dialog.
+  for (const target of selectTrustScan(sessions, options)) {
+    const result = await answerTrustDialog(deps, target, target.tmuxSession);
+    if (result) trustDialogs.push(result);
+  }
+
+  return { recovered, trustDialogs };
+}
+
+/**
+ * Live in-scope sessions to check for a trust dialog: the same scoping as
+ * {@link selectRecoverable}, but only sessions that are NOT `error`/`stopped`
+ * (those are restarted, and checked after the restart) and have a pane.
+ */
+export function selectTrustScan(
+  sessions: readonly RecoverySessionView[],
+  options: RecoverOptions,
+): RecoverySessionView[] {
+  const ids =
+    options.sessionIds && options.sessionIds.length ? new Set(options.sessionIds) : null;
+  const excluded = new Set(options.excludeGroups ?? RECOVERY_DEFAULT_EXCLUDED_GROUPS);
+  return sessions.filter((s) => {
+    if (NOT_LIVE_STATUSES.has(s.status) || !s.tmuxSession) return false;
+    if (ids) return ids.has(s.sessionId) && (!options.group || inGroup(s.group, options.group));
+    if (options.group) return s.group === options.group;
+    return !excluded.has(s.group);
+  });
+}
+
+function trustIo(deps: RecoverDeps, tmuxSession: string): TrustDialogIo {
+  const { runtime } = deps;
+  // The strict reads/keys keep "pane unreadable" and "key failed" distinct from
+  // "no dialog", so an unanswered dialog is never reported resolved.
+  return {
+    capture: () => (runtime.readPane ? runtime.readPane(tmuxSession) : runtime.capturePane(tmuxSession)),
+    sendKey: (key) => (runtime.pressKey ? runtime.pressKey(tmuxSession, key) : runtime.sendKey(tmuxSession, key)),
+    sleep: deps.sleep,
+  };
+}
+
+/** Answer the session's trust dialog if one is shown; null when none is. */
+async function answerTrustDialog(
+  deps: RecoverDeps,
+  target: RecoverySessionView,
+  tmuxSession: string,
+): Promise<TrustDialogResult | null> {
+  const resolution = await resolveTrustDialog(trustIo(deps, tmuxSession), deps.trustDialog);
+  if (resolution.outcome === "not_shown") return null;
+  return {
+    sessionId: target.sessionId,
+    title: target.title,
+    group: target.group,
+    outcome: resolution.outcome,
+    dir: resolution.dir ?? "",
+    ...(resolution.detail ? { detail: resolution.detail } : {}),
+  };
 }
 
 async function recoverOne(
@@ -176,11 +248,12 @@ async function recoverOne(
     statusTimeoutMs: number;
     statusPollMs: number;
   },
+  trustDialogs: TrustDialogResult[],
 ): Promise<SessionRecoveryResult> {
   const base = { sessionId: target.sessionId, title: target.title, group: target.group };
 
   try {
-    deps.runtime.restart(profile, target.sessionId);
+    await deps.runtime.restart(profile, target.sessionId);
   } catch (err) {
     return {
       ...base,
@@ -198,7 +271,14 @@ async function recoverOne(
   let pickerResolved = false;
   let finalStatus: string;
   try {
-    pickerResolved = await resolvePickerIfShown(deps, profile, target.sessionId, now, cfg);
+    pickerResolved = await resolvePickerIfShown(
+      deps,
+      profile,
+      target,
+      now,
+      cfg,
+      trustDialogs,
+    );
     finalStatus = await waitForLive(deps, profile, target.sessionId, target.status, now, cfg);
   } catch (err) {
     return {
@@ -221,23 +301,35 @@ async function recoverOne(
   };
 }
 
-/** Poll the live pane for the resume picker; press Enter once if it appears. */
+/**
+ * Poll the live pane for the resume picker; press Enter once if it appears. A
+ * directory-trust dialog seen meanwhile is answered once (Castra's own steward
+ * directory only) and polling continues, since the picker may follow it.
+ */
 async function resolvePickerIfShown(
   deps: RecoverDeps,
   profile: string,
-  sessionId: string,
+  target: RecoverySessionView,
   now: () => number,
   cfg: { pickerTimeoutMs: number; pickerPollMs: number },
+  trustDialogs: TrustDialogResult[],
 ): Promise<boolean> {
   const deadline = now() + cfg.pickerTimeoutMs;
+  let trustHandled = false;
   for (;;) {
-    const view = deps.runtime.readSession(profile, sessionId);
+    const view = await deps.runtime.readSession(profile, target.sessionId);
     const tmuxSession = view?.tmuxSession ?? "";
     if (tmuxSession) {
-      const pane = deps.runtime.capturePane(tmuxSession);
+      const pane = await deps.runtime.capturePane(tmuxSession);
       if (looksLikeResumePicker(pane)) {
-        deps.runtime.sendEnter(tmuxSession);
+        await deps.runtime.sendEnter(tmuxSession);
         return true;
+      }
+      if (!trustHandled && parseTrustDialog(pane)) {
+        trustHandled = true;
+        const result = await answerTrustDialog(deps, target, tmuxSession);
+        if (result) trustDialogs.push(result);
+        continue;
       }
     }
     if (now() >= deadline) return false;
@@ -257,7 +349,7 @@ async function waitForLive(
   const deadline = now() + cfg.statusTimeoutMs;
   let last = initialStatus;
   for (;;) {
-    const view = deps.runtime.readSession(profile, sessionId);
+    const view = await deps.runtime.readSession(profile, sessionId);
     last = view?.status ?? last;
     if (!NOT_LIVE_STATUSES.has(last)) return last;
     if (now() >= deadline) return last;

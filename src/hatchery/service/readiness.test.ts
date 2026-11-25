@@ -240,4 +240,12 @@ describe("dispatchReasonCode", () => {
     expect(dispatchReasonCode(new Error("some brand-new failure with id 1234"))).toBe("other");
     expect(dispatchReasonCode(undefined)).toBe("other");
   });
+
+  it("an unknown GitHub code is other, so the reason label stays bounded", () => {
+    expect(dispatchReasonCode(new HatcheryGitHubError("lookup_failed"))).toBe("lookup_failed");
+    expect(dispatchReasonCode(new HatcheryGitHubError("tessera:policy_denied"))).toBe("tessera:policy_denied");
+    expect(dispatchReasonCode(new HatcheryGitHubError("tessera:brand_new_1234"))).toBe("other");
+    expect(dispatchReasonCode(new HatcheryGitHubError("whatever"))).toBe("other");
+    expect(dispatchReasonCode(new Error("Hatchery GitHub read failed (tessera:x_9f3a)"))).toBe("other");
+  });
 });

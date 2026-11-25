@@ -6,18 +6,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const childProcessMock = vi.hoisted(() => ({
+// A sync-style fake for every child process the adapter runs. `fakeExec` wraps
+// it in the async ExecFn the adapter takes, so a thrown error becomes a rejection.
+const childProcessMock = {
   execFileSync: vi.fn(),
-  execTextInGroup: vi.fn(),
-}));
+};
 
-vi.mock("node:child_process", () => ({
-  execFileSync: childProcessMock.execFileSync,
-}));
+// The repository each directory's git reports (`rev-parse --git-common-dir`),
+// for the launch path that checks a list-diff pick belongs to the requested
+// repo. Unlisted directories are worktrees of /repo.
+const gitCommonDirs = new Map<string, string>();
 
-vi.mock("../shared/exec-group.js", () => ({
-  execTextInGroup: childProcessMock.execTextInGroup,
-}));
+const fakeExec: ExecFn = async (cmd, args, opts) => {
+  if (cmd === "git" && args.includes("--git-common-dir")) {
+    return `${gitCommonDirs.get(args[1]!) ?? "/repo/.git"}\n`;
+  }
+  return (childProcessMock.execFileSync(cmd, args, opts) as string | undefined) ?? "";
+};
+
+const noSleep = async () => {};
+
+function makeAdapter(options: Omit<AgentDeckAdapterOptions, "exec"> = {}) {
+  return createAgentDeckAdapter({ exec: fakeExec, sleep: noSleep, ...options });
+}
 
 import {
   buildLaunchArgs,
@@ -34,12 +45,17 @@ import {
   looksLikeComposerRefusal,
   paneTail,
   parseAgentDeckSession,
+  parseLaunchOutput,
   pickLaunchedSession,
   resolveAgentDeckEnv,
+  type AgentDeckAdapterOptions,
 } from "./adapter.js";
+import { ExecError, type ExecFn } from "./exec.js";
+import { SendTracker } from "./send-health.js";
 import { stewardSessionFilePath } from "./steward-skills.js";
 import {
   CastraAgentDeckError,
+  CastraComposerRefusedError,
   CastraConflictError,
   CastraNotFoundError,
   type CastraSession,
@@ -64,41 +80,41 @@ function session(overrides: Partial<CastraSession> = {}): Record<string, unknown
 }
 
 describe("live interactive inventory", () => {
-  it("reads only live march/ names from Castra's tmux server with a timeout", () => {
+  it("reads only live march/ names from Castra's tmux server with a timeout", async () => {
     childProcessMock.execFileSync.mockReturnValueOnce("other\nmarch/\nmarch/conductor\nmarch/second name\n");
-    expect(listInteractiveSessions()).toEqual(["conductor", "second name"]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual(["conductor", "second name"]);
     expect(childProcessMock.execFileSync).toHaveBeenLastCalledWith(
       "tmux",
       ["list-sessions", "-F", "#{session_name}"],
-      expect.objectContaining({ timeout: 3_000, killSignal: "SIGKILL" }),
+      expect.objectContaining({ capture: true, timeoutMs: 3_000 }),
     );
   });
 
-  it("returns empty when the live server has no eligible sessions", () => {
+  it("returns empty when the live server has no eligible sessions", async () => {
     childProcessMock.execFileSync.mockReturnValueOnce("unrelated\n");
-    expect(listInteractiveSessions()).toEqual([]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual([]);
   });
 
   it.each([
     "no server running on /tmp/tmux/default",
     "error connecting to /tmp/tmux/default (No such file or directory)",
-  ])("returns empty for %s", (stderr) => {
+  ])("returns empty for %s", async (stderr) => {
     childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw Object.assign(new Error("exit 1"), { status: 1, stderr });
+      throw new ExecError("exit 1", { exitCode: 1, stderr });
     });
-    expect(listInteractiveSessions()).toEqual([]);
+    await expect(listInteractiveSessions(fakeExec)).resolves.toEqual([]);
   });
 
   it.each([
     [{ code: "ENOENT" }, "tmux executable was not found"],
-    [{ code: "ETIMEDOUT" }, "timed out"],
-    [{ status: 1, stderr: "error connecting to /tmp/tmux/default (Permission denied)" }, "Permission denied"],
-    [{ status: 1, stderr: "server exited unexpectedly" }, "server exited unexpectedly"],
-  ])("reports tmux failure %j", (failure, message) => {
+    [{ timedOut: true }, "timed out"],
+    [{ exitCode: 1, stderr: "error connecting to /tmp/tmux/default (Permission denied)" }, "Permission denied"],
+    [{ exitCode: 1, stderr: "server exited unexpectedly" }, "server exited unexpectedly"],
+  ])("reports tmux failure %j", async (failure, message) => {
     childProcessMock.execFileSync.mockImplementationOnce(() => {
-      throw Object.assign(new Error("tmux failed"), failure);
+      throw new ExecError("tmux failed", failure);
     });
-    expect(() => listInteractiveSessions()).toThrow(message);
+    await expect(listInteractiveSessions(fakeExec)).rejects.toThrow(message);
   });
 });
 
@@ -156,6 +172,7 @@ describe("castra adapter — argv builders", () => {
         "--settings",
         "--extra-arg",
         path.join("/steward-skills", "settings.json"),
+        "--json",
       ]);
     } finally {
       if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
@@ -310,13 +327,13 @@ describe("castra adapter — agent-deck tmux env (issue #174)", () => {
     expect(resolveAgentDeckEnv(env, undefined)).toBe(env);
   });
 
-  it("hands the resolved env (with $TMUX) to the spawned agent-deck", () => {
+  it("hands the resolved env (with $TMUX) to the spawned agent-deck", async () => {
     vi.stubEnv("TMUX", "");
     vi.stubEnv("TMUX_TMPDIR", "");
     childProcessMock.execFileSync.mockReset();
     childProcessMock.execFileSync.mockReturnValue("[]");
     try {
-      createAgentDeckAdapter().list({ profile: "march" });
+      await makeAdapter().list({ profile: "march" });
       const opts = childProcessMock.execFileSync.mock.calls[0]?.[2] as {
         env?: NodeJS.ProcessEnv;
       };
@@ -336,7 +353,7 @@ describe("castra adapter — operations", () => {
 
   beforeEach(() => {
     childProcessMock.execFileSync.mockReset();
-    childProcessMock.execTextInGroup.mockReset().mockResolvedValue("");
+    gitCommonDirs.clear();
     process.env.MARCH_STEWARD_SKILLS_DIR = sidecarRoot;
     // Start each test with a clean sessions dir so a prior launch's sidecar
     // can't make a later "should not write" assertion pass spuriously.
@@ -352,35 +369,35 @@ describe("castra adapter — operations", () => {
     fs.rmSync(sidecarRoot, { recursive: true, force: true });
   });
 
-  it("lists sessions, filtering by group when given", () => {
+  it("lists sessions, filtering by group when given", async () => {
     childProcessMock.execFileSync.mockReturnValue(
       JSON.stringify([
         session({ sessionId: "a", group: "g1" }),
         session({ sessionId: "b", group: "g2" }),
       ]),
     );
-    const adapter = createAgentDeckAdapter();
-    expect(adapter.list({ profile: "march" })).toHaveLength(2);
-    expect(adapter.list({ profile: "march", group: "g1" }).map((s) => s.sessionId)).toEqual(["a"]);
+    const adapter = makeAdapter();
+    expect(await adapter.list({ profile: "march" })).toHaveLength(2);
+    expect((await adapter.list({ profile: "march", group: "g1" })).map((s) => s.sessionId)).toEqual(["a"]);
   });
 
-  it("treats an empty profile as [] (agent-deck prints 'No sessions found', not [])", () => {
-    const adapter = createAgentDeckAdapter();
+  it("treats an empty profile as [] (agent-deck prints 'No sessions found', not [])", async () => {
+    const adapter = makeAdapter();
     // The exact human line agent-deck prints to stdout for an empty profile.
     childProcessMock.execFileSync.mockReturnValue("No sessions found in profile 'gatecli'.\n");
-    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+    expect(await adapter.list({ profile: "gatecli" })).toEqual([]);
     // Empty stdout is also a normal empty listing, not malformed output.
     childProcessMock.execFileSync.mockReturnValue("");
-    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+    expect(await adapter.list({ profile: "gatecli" })).toEqual([]);
   });
 
-  it("still throws on genuinely malformed (non-empty, non-JSON) list output", () => {
-    const adapter = createAgentDeckAdapter();
+  it("still throws on genuinely malformed (non-empty, non-JSON) list output", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValue("garbled <not json> output");
-    expect(() => adapter.list({ profile: "march" })).toThrow(/unexpected output/);
+    await expect(adapter.list({ profile: "march" })).rejects.toThrow(/unexpected output/);
   });
 
-  it("launches and returns the identified session", () => {
+  it("launches and returns the identified session", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -391,8 +408,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const result = adapter.launch({
+    const adapter = makeAdapter();
+    const result = await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -409,7 +426,7 @@ describe("castra adapter — operations", () => {
     ).toBe(true);
   });
 
-  it("stamps launch metadata, returns it on launch, and re-attaches it on list/show (#214)", () => {
+  it("stamps launch metadata, returns it on launch, and re-attaches it on list/show (#214)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -425,8 +442,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const launched = adapter.launch({
+    const adapter = makeAdapter();
+    const launched = await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -437,16 +454,16 @@ describe("castra adapter — operations", () => {
     expect(launched.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
 
     // list re-attaches the Castra-owned metadata even though agent-deck omits it.
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
     // show does too.
-    expect(adapter.show({ profile: "march", sessionId: "sess-new" }).metadata).toEqual({
+    expect((await adapter.show({ profile: "march", sessionId: "sess-new" })).metadata).toEqual({
       sliceId: "slice-7",
       spawnId: "sp-1",
     });
   });
 
-  it("writes the steward-report sidecar keyed by the worktree dir on launch (#371)", () => {
+  it("writes the steward-report sidecar keyed by the worktree dir on launch (#371)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -459,7 +476,7 @@ describe("castra adapter — operations", () => {
     });
     process.env.MARCH_HERALD_URL = "http://herald.example:1234";
     try {
-      createAgentDeckAdapter().launch({
+      await makeAdapter().launch({
         profile: "march",
         repoPath: "/repo",
         branch: "march/spawn/x",
@@ -481,7 +498,7 @@ describe("castra adapter — operations", () => {
     }
   });
 
-  it("skips the steward-report sidecar when no sliceId is supplied (#371)", () => {
+  it("skips the steward-report sidecar when no sliceId is supplied (#371)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -492,7 +509,7 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    createAgentDeckAdapter().launch({
+    await makeAdapter().launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -503,7 +520,7 @@ describe("castra adapter — operations", () => {
     expect(fs.existsSync(sidecar)).toBe(false);
   });
 
-  it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", () => {
+  it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -515,19 +532,19 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.launch({
+    const adapter = makeAdapter();
+    await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
       title: "Steward",
       group: "g",
     });
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.branch).toBe("march/spawn/x");
   });
 
-  it("derives an empty session branch from the working directory's git head (#264)", () => {
+  it("derives an empty session branch from the working directory's git head (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -538,12 +555,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/smithy/cut/01\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "legacy");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "legacy");
     expect(listed?.branch).toBe("feature/smithy/cut/01");
   });
 
-  it("returns an empty branch for a non-git working directory (#264)", () => {
+  it("returns an empty branch for a non-git working directory (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -553,12 +570,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git") throw execError("not a git repository");
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "nogit");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "nogit");
     expect(listed?.branch).toBe("");
   });
 
-  it("returns an empty branch for a detached HEAD checkout (#264)", () => {
+  it("returns an empty branch for a detached HEAD checkout (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -570,12 +587,12 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "detached");
+    const adapter = makeAdapter();
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "detached");
     expect(listed?.branch).toBe("");
   });
 
-  it("caches the derived branch for the session lifetime — git runs once across calls (#264)", () => {
+  it("caches the derived branch for the session lifetime — git runs once across calls (#264)", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("list")) {
         return JSON.stringify([
@@ -586,9 +603,9 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
-    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
+    const adapter = makeAdapter();
+    expect((await adapter.list({ profile: "march" }))[0]?.branch).toBe("feature/x");
+    expect((await adapter.list({ profile: "march" }))[0]?.branch).toBe("feature/x");
     const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
       (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
     );
@@ -606,10 +623,10 @@ describe("castra adapter — operations", () => {
       if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.list({ profile: "march" });
+    const adapter = makeAdapter();
+    await adapter.list({ profile: "march" });
     await adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
-    adapter.list({ profile: "march" });
+    await adapter.list({ profile: "march" });
     const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
       (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
     );
@@ -628,8 +645,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    adapter.launch({
+    const adapter = makeAdapter();
+    await adapter.launch({
       profile: "march",
       repoPath: "/repo",
       branch: "march/spawn/x",
@@ -637,14 +654,14 @@ describe("castra adapter — operations", () => {
       group: "g",
       metadata: { sliceId: "slice-7" },
     });
-    await expect(adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).resolves.toEqual({
+    expect(await adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).toEqual({
       removed: true,
     });
-    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    const listed = (await adapter.list({ profile: "march" })).find((s) => s.sessionId === "sess-new");
     expect(listed?.metadata).toBeUndefined();
   });
 
-  it("raises a conflict when the launched worktree dir does not match the branch", () => {
+  it("raises a conflict when the launched worktree dir does not match the branch", async () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("list")) {
@@ -657,8 +674,8 @@ describe("castra adapter — operations", () => {
       }
       return "";
     });
-    const adapter = createAgentDeckAdapter();
-    expect(() =>
+    const adapter = makeAdapter();
+    await expect(
       adapter.launch({
         profile: "march",
         repoPath: "/repo",
@@ -666,68 +683,67 @@ describe("castra adapter — operations", () => {
         title: "t",
         group: "g",
       }),
-    ).toThrow(CastraConflictError);
+    ).rejects.toThrow(CastraConflictError);
   });
 
   it("reports removed:true on success and removed:false when the session is already gone", async () => {
-    const adapter = createAgentDeckAdapter();
-    const input = { profile: "p", sessionId: "s", pruneWorktree: true };
-    await expect(adapter.remove(input)).resolves.toEqual({ removed: true });
-    expect(childProcessMock.execTextInGroup).toHaveBeenCalledWith(
-      "agent-deck",
-      ["-p", "p", "session", "remove", "s", "--prune-worktree", "--force"],
-      expect.objectContaining({ timeout: 10_000 }),
-    );
-    childProcessMock.execTextInGroup.mockRejectedValueOnce(
-      Object.assign(execError("session not found"), { code: 1 }),
-    );
-    await expect(adapter.remove(input)).resolves.toEqual({ removed: false });
+    const adapter = makeAdapter();
+    childProcessMock.execFileSync.mockReturnValueOnce("");
+    expect(await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
+      removed: true,
+    });
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw execError("session not found");
+    });
+    expect(await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({
+      removed: false,
+    });
   });
 
   it("maps an unexpected remove failure to a 502-class error", async () => {
-    const adapter = createAgentDeckAdapter();
-    childProcessMock.execTextInGroup.mockRejectedValueOnce(
-      Object.assign(execError("tmux server connection refused"), { code: 1 }),
+    const adapter = makeAdapter();
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw execError("tmux server connection refused");
+    });
+    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).rejects.toThrow(
+      CastraAgentDeckError,
     );
-    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true }))
-      .rejects.toBeInstanceOf(CastraAgentDeckError);
   });
 
   it("reports a timeout even when partial stderr contains a not-found message", async () => {
-    const adapter = createAgentDeckAdapter();
-    childProcessMock.execTextInGroup.mockRejectedValueOnce(Object.assign(
-      new Error("timed out after 10000ms"),
-      { killed: true, signal: "SIGKILL", stderr: "session not found" },
-    ));
+    const adapter = makeAdapter();
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw new ExecError("agent-deck timed out after 10000ms and was killed", { stderr: "session not found", timedOut: true });
+    });
     await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: false }))
-      .rejects.toThrow("timed out after 10000ms");
+      .rejects.toThrow(/timed out after 10000ms/);
   });
 
-  it("throws not-found when showing a missing session", () => {
-    const adapter = createAgentDeckAdapter();
+  it("throws not-found when showing a missing session", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw execError("no such session");
     });
-    expect(() => adapter.show({ profile: "p", sessionId: "missing" })).toThrow(CastraNotFoundError);
+    await expect(adapter.show({ profile: "p", sessionId: "missing" })).rejects.toThrow(CastraNotFoundError);
   });
 
-  it("truncates output to the last N lines", () => {
-    const adapter = createAgentDeckAdapter();
+  it("truncates output to the last N lines", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValueOnce("l1\nl2\nl3\nl4\nl5");
-    expect(adapter.output({ profile: "p", sessionId: "s", lines: 2 })).toEqual({
+    expect(await adapter.output({ profile: "p", sessionId: "s", lines: 2 })).toEqual({
       output: "l4\nl5",
       truncated: true,
     });
   });
 
-  it("reports reachability from agent-deck --version", () => {
-    const adapter = createAgentDeckAdapter();
+  it("reports reachability from agent-deck --version", async () => {
+    const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValueOnce("agent-deck 1.9.17");
-    expect(adapter.reachable()).toBe(true);
+    expect(await adapter.reachable()).toBe(true);
     childProcessMock.execFileSync.mockImplementationOnce(() => {
       throw new Error("not installed");
     });
-    expect(adapter.reachable()).toBe(false);
+    expect(await adapter.reachable()).toBe(false);
   });
 });
 
@@ -763,7 +779,7 @@ describe("castra adapter — refused send diagnostics (#608)", () => {
     expect(paneTail(DIALOG_PANE, 50)).not.toContain("\u2500");
   });
 
-  it("appends the steward's pane tail to a refused send", () => {
+  it("appends the steward's pane tail to a refused send", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "agent-deck" && args.includes("send")) {
         throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
@@ -777,18 +793,746 @@ describe("castra adapter — refused send diagnostics (#608)", () => {
       }
       throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
     });
-    expect(() =>
-      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
-    ).toThrow(/composer is occupied[\s\S]*Steward pane at refusal[\s\S]*Adding a new directory/);
+    await expect(
+      makeAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).rejects.toThrow(/composer is occupied[\s\S]*Steward pane at refusal[\s\S]*Adding a new directory/);
   });
 
-  it("leaves other send failures unchanged and never captures the pane", () => {
+  it("leaves other send failures unchanged and never captures the pane", async () => {
     childProcessMock.execFileSync.mockImplementation((cmd: string) => {
       if (cmd === "tmux") throw new Error("must not capture");
       throw Object.assign(new Error("exit 1"), { stderr: "tmux: server exited" });
     });
-    expect(() =>
-      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
-    ).toThrow(/^agent-deck session send failed: tmux: server exited$/);
+    await expect(
+      makeAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).rejects.toThrow(/^agent-deck session send failed: tmux: server exited$/);
+  });
+});
+
+describe("castra adapter — async sends (stuck-steward unbrick)", () => {
+  const REFUSAL =
+    "Error: message not delivered to 't': message not sent: composer is occupied or " +
+    "unreadable; existing draft preserved, nothing was typed";
+  const BUSY_PANE = "❯ half-typed draft the operator left\n  ? for shortcuts";
+  const prevSkillsDir = process.env.MARCH_STEWARD_SKILLS_DIR;
+
+  beforeEach(() => {
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/home/u/.march/steward";
+  });
+
+  afterEach(() => {
+    if (prevSkillsDir === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+    else process.env.MARCH_STEWARD_SKILLS_DIR = prevSkillsDir;
+  });
+
+  function deferred() {
+    let resolve!: (v: string) => void;
+    const promise = new Promise<string>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  function sendCalls(calls: { args: readonly string[] }[]): string[] {
+    return calls.filter((c) => c.args.includes("send")).map((c) => c.args[4]!);
+  }
+
+  it("serializes sends to one session and runs other sessions concurrently", async () => {
+    const calls: { args: readonly string[] }[] = [];
+    const pending = new Map<string, ReturnType<typeof deferred>[]>();
+    const exec: ExecFn = (cmd, args) => {
+      calls.push({ args });
+      const d = deferred();
+      const id = args[4]!;
+      pending.set(id, [...(pending.get(id) ?? []), d]);
+      return d.promise;
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const a1 = adapter.send({ profile: "march", sessionId: "s1", prompt: "one" });
+    const a2 = adapter.send({ profile: "march", sessionId: "s1", prompt: "two" });
+    const b1 = adapter.send({ profile: "march", sessionId: "s2", prompt: "other" });
+    await new Promise((r) => setTimeout(r, 0));
+    // s1's second prompt waits for its first; s2 is not held up by s1.
+    expect(calls.map((c) => `${c.args[4]}:${c.args[5]}`)).toEqual(["s1:one", "s2:other"]);
+
+    pending.get("s2")![0]!.resolve("");
+    await b1;
+    pending.get("s1")![0]!.resolve("");
+    await a1;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.map((c) => `${c.args[4]}:${c.args[5]}`)).toEqual(["s1:one", "s2:other", "s1:two"]);
+    pending.get("s1")![1]!.resolve("");
+    await a2;
+  });
+
+  it("fails fast with composer_refused during the cooldown, until the pane changes", async () => {
+    let pane = BUSY_PANE;
+    const calls: { args: readonly string[] }[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      calls.push({ args });
+      if (cmd === "agent-deck" && args.includes("send")) {
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      if (cmd === "agent-deck" && args.includes("show")) {
+        return JSON.stringify({ id: "s1", tmux_session: "agentdeck_t_1" });
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") return pane;
+      throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    const send = () => adapter.send({ profile: "march", sessionId: "s1", prompt: "go" });
+
+    const first = await send().catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(CastraComposerRefusedError);
+    expect((first as CastraComposerRefusedError).cached).toBe(false);
+    expect((first as Error).message).toMatch(/composer is occupied[\s\S]*half-typed draft/);
+    expect(tracker.refusedSessionIds()).toEqual(["s1"]);
+
+    // Same pane: no agent-deck send at all, the same refusal comes straight back.
+    const second = await send().catch((e: unknown) => e);
+    expect(second).toBeInstanceOf(CastraComposerRefusedError);
+    expect((second as CastraComposerRefusedError).cached).toBe(true);
+    expect((second as Error).message).toMatch(/composer_refused cooldown[\s\S]*Last refusal: agent-deck session send failed/);
+    expect(sendCalls(calls)).toHaveLength(1);
+
+    // The pane changed (the operator cleared the draft): agent-deck runs again.
+    pane = "❯ \n  ? for shortcuts";
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    expect(sendCalls(calls)).toHaveLength(2);
+  });
+
+  it("retries agent-deck once the cooldown has expired", async () => {
+    let now = 0;
+    let sends = 0;
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends++;
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      return "";
+    };
+    const tracker = new SendTracker({ cooldownMs: 1_000, now: () => now });
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    const send = () => adapter.send({ profile: "march", sessionId: "s1", prompt: "go" });
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    await expect(send()).rejects.toThrow(/cooldown/);
+    expect(sends).toBe(1);
+    now = 1_000;
+    await expect(send()).rejects.toBeInstanceOf(CastraComposerRefusedError);
+    expect(sends).toBe(2);
+  });
+
+  it("starts no cooldown for a send failure that is not a composer refusal", async () => {
+    const exec: ExecFn = async () => {
+      throw Object.assign(new Error("exit 1"), { stderr: "tmux: server exited" });
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).rejects.not.toBeInstanceOf(
+      CastraComposerRefusedError,
+    );
+    expect(tracker.refusedSessionIds()).toEqual([]);
+  });
+
+  function trustDialogHost(dir: string) {
+    let open = true;
+    let cursorOnYes = false;
+    const keys: string[] = [];
+    let sends = 0;
+    const pane = () =>
+      open
+        ? [
+            " Adding a new directory:",
+            ` ${dir}`,
+            "",
+            ` ${cursorOnYes ? " " : "❯"} No, exit`,
+            ` ${cursorOnYes ? "❯" : " "} Yes, add it`,
+            " Enter to confirm · Esc to cancel",
+          ].join("\n")
+        : "❯ \n  ? for shortcuts";
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends++;
+        if (open) throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+        return "";
+      }
+      if (cmd === "agent-deck" && args.includes("show")) {
+        return JSON.stringify({ id: "s1", tmux_session: "agentdeck_t_1" });
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") return pane();
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        expect(args.slice(0, 3)).toEqual(["send-keys", "-t", "agentdeck_t_1"]);
+        const key = args[3]!;
+        keys.push(key);
+        if (key === "Down") cursorOnYes = true;
+        if (key === "Enter" && cursorOnYes) open = false;
+        return "";
+      }
+      throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
+    };
+    return { exec, keys, sends: () => sends, isOpen: () => open };
+  }
+
+  it("answers 'Yes, add it' on Castra's own steward-dir trust dialog and redelivers the send", async () => {
+    const host = trustDialogHost("/home/u/.march/steward");
+    const tracker = new SendTracker();
+    const logs: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec: host.exec,
+      sendTracker: tracker,
+      sleep: noSleep,
+      logger: { info: (_o, msg) => logs.push(msg), warn: (_o, msg) => logs.push(msg) },
+    });
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).resolves.toBeUndefined();
+    expect(host.keys).toEqual(["Down", "Enter"]);
+    expect(host.isOpen()).toBe(false);
+    expect(host.sends()).toBe(2);
+    expect(tracker.refusedSessionIds()).toEqual([]);
+    expect(logs).toEqual(["castra answered the steward directory-trust dialog"]);
+  });
+
+  it("leaves another directory's trust dialog alone and reports it", async () => {
+    const host = trustDialogHost("/home/u/src/someone-elses-repo");
+    const logs: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec: host.exec,
+      sleep: noSleep,
+      logger: { info: (_o, msg) => logs.push(msg), warn: (_o, msg) => logs.push(msg) },
+    });
+    const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraComposerRefusedError);
+    expect((err as Error).message).toMatch(
+      /left the directory-trust dialog for \/home\/u\/src\/someone-elses-repo unanswered/,
+    );
+    expect(host.keys).toEqual([]);
+    expect(host.sends()).toBe(1);
+    expect(logs).toEqual(["castra left a directory-trust dialog unanswered"]);
+  });
+
+  it("answers the dialog but, with too little budget left to resend, says so and starts no cooldown", async () => {
+    const host = trustDialogHost("/home/u/.march/steward");
+    let now = 0;
+    const exec: ExecFn = async (cmd, args, opts) => {
+      const out = await host.exec(cmd, args, opts);
+      // Answering the dialog took most of the send budget.
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "Enter") now = 60_000;
+      return out;
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep, now: () => now, budgets: { sendMs: 100_000 } });
+    const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraComposerRefusedError);
+    expect((err as Error).message).toMatch(/answered the directory-trust dialog .* so it was not delivered\. No cooldown was started/s);
+    expect(host.isOpen()).toBe(false);
+    expect(host.sends()).toBe(1);
+    expect(tracker.refusedSessionIds()).toEqual([]);
+    // The next send reaches agent-deck and goes through.
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).resolves.toBeUndefined();
+    expect(host.sends()).toBe(2);
+  });
+
+  it("never treats a send Castra killed as a refusal, whatever it printed first", async () => {
+    for (const killed of [
+      new ExecError("agent-deck timed out after 45000ms and was killed", { stderr: REFUSAL, timedOut: true }),
+      Object.assign(new Error("agent-deck output exceeded 1048576 bytes and was killed"), { stderr: REFUSAL }),
+    ]) {
+      const calls: string[] = [];
+      const exec: ExecFn = async (cmd, args) => {
+        calls.push(`${cmd} ${args.includes("send") ? "send" : args.join(" ")}`);
+        if (cmd === "agent-deck" && args.includes("send")) throw killed;
+        return "";
+      };
+      const tracker = new SendTracker();
+      const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+      const err = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CastraAgentDeckError);
+      expect(err).not.toBeInstanceOf(CastraComposerRefusedError);
+      // No pane inspection, no trust-dialog retry, no cooldown.
+      expect(calls).toEqual(["agent-deck send"]);
+      expect(tracker.refusedSessionIds()).toEqual([]);
+    }
+  });
+});
+
+describe("castra adapter — review fixes (#702)", () => {
+  const REFUSAL = "agent-deck: composer is occupied or unreadable";
+  const sidecarRoot = fs.mkdtempSync(path.join(os.tmpdir(), "castra-adapter-702-"));
+  const prevSkillsDir = process.env.MARCH_STEWARD_SKILLS_DIR;
+  beforeEach(() => {
+    process.env.MARCH_STEWARD_SKILLS_DIR = sidecarRoot;
+  });
+  afterEach(() => {
+    if (prevSkillsDir === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+    else process.env.MARCH_STEWARD_SKILLS_DIR = prevSkillsDir;
+  });
+  afterAll(() => {
+    fs.rmSync(sidecarRoot, { recursive: true, force: true });
+  });
+
+  const launchInput = { profile: "march", repoPath: "/repo", branch: "march/spawn/x", title: "Steward", group: "g" };
+  const deckRecord = (id: string, worktreePath: string, createdAt = "2026-05-20T00:00:00Z") =>
+    ({ id, title: "Steward", group: "g", worktree_branch: "", worktree_path: worktreePath, created_at: createdAt, status: "idle" });
+  const subcommand = (args: readonly string[]) => args.find((a) => ["list", "launch", "show", "set"].includes(a));
+
+  it("parses the session id and worktree agent-deck launch --json reports", () => {
+    expect(parseLaunchOutput('{"success":true,"id":"a","session_id":"b","worktree_path":"/w"}')).toEqual({ sessionId: "b", worktreePath: "/w" });
+    expect(parseLaunchOutput('note: something\n{"id":"a"}')).toEqual({ sessionId: "a" });
+    expect(parseLaunchOutput("✓ Launched session: Steward")).toEqual({});
+    expect(parseLaunchOutput("")).toEqual({});
+  });
+
+  it("takes the launched session from agent-deck's reported id, even when another launch made a same-named one", async () => {
+    let listed = 0;
+    const calls: string[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      calls.push(`${cmd} ${subcommand(args) ?? args.join(" ")}`);
+      if (cmd === "agent-deck" && args.includes("list")) {
+        listed++;
+        // After the launch: ours (older) and a concurrent same-branch launch in another repo (newer).
+        return listed === 1 ? "[]" : JSON.stringify([
+          deckRecord("ours", "/repo/feature-march-spawn-x", "2026-05-20T00:00:00Z"),
+          deckRecord("theirs", "/other/feature-march-spawn-x", "2026-05-20T00:00:05Z"),
+        ]);
+      }
+      if (cmd === "agent-deck" && args.includes("launch")) return '{"success":true,"session_id":"ours"}';
+      if (cmd === "agent-deck" && args.includes("show")) return JSON.stringify(deckRecord("ours", "/repo/feature-march-spawn-x"));
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const result = await adapter.launch(launchInput);
+    expect(result.sessionId).toBe("ours");
+    expect(result.worktreePath).toBe("/repo/feature-march-spawn-x");
+    // An exact id needs no repo check.
+    expect(calls.some((c) => c.includes("--git-common-dir"))).toBe(false);
+
+    // Having seen ids reported, the next launch skips the before/after lists.
+    calls.length = 0;
+    await adapter.launch(launchInput);
+    expect(calls.filter((c) => c === "agent-deck list")).toEqual([]);
+  });
+
+  it("refuses a list-diff pick whose worktree belongs to another repository", async () => {
+    let listed = 0;
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) {
+        return args[1] === "/repo" ? "/repo/.git\n" : "/other/.git\n";
+      }
+      if (cmd === "agent-deck" && args.includes("list")) {
+        listed++;
+        return listed === 1 ? "[]" : JSON.stringify([deckRecord("theirs", "/other/feature-march-spawn-x")]);
+      }
+      return ""; // an agent-deck that reports no id
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const err = await adapter.launch(launchInput).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraConflictError);
+    expect((err as Error).message).toMatch(/belongs to the repository at "\/other\/.git", not "\/repo"/);
+  });
+
+  it("serializes list-diff launches into one profile+group", async () => {
+    const order: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && (sub === "list" || sub === "launch")) order.push(sub);
+      if (cmd === "agent-deck" && sub === "list") return JSON.stringify(sessions);
+      if (cmd === "agent-deck" && sub === "launch") {
+        await new Promise((r) => setTimeout(r, 5));
+        const branch = args[args.indexOf("--worktree") + 1]!;
+        sessions.push(deckRecord(`s-${branch}`, `/repo/${expectedWorktreeDirName(branch)}`, `2026-05-20T00:00:0${sessions.length}Z`));
+        return "";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const [a, b] = await Promise.all([
+      adapter.launch({ ...launchInput, branch: "march/spawn/a" }),
+      adapter.launch({ ...launchInput, branch: "march/spawn/b" }),
+    ]);
+    expect([a.sessionId, b.sessionId]).toEqual(["s-march/spawn/a", "s-march/spawn/b"]);
+    expect(order).toEqual(["list", "launch", "list", "list", "launch", "list"]);
+  });
+
+  it("fails closed when an agent-deck that reported ids launches without one, then serializes again", async () => {
+    let reportIds = true;
+    const calls: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck") calls.push(sub ?? "");
+      if (cmd === "agent-deck" && sub === "list") return JSON.stringify(sessions);
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2) || r.id === args.at(-1)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        await new Promise((r) => setTimeout(r, 5));
+        const id = `s${sessions.length}`;
+        // Same repository and branch: only an id can tell these launches apart.
+        sessions.push(deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:0${sessions.length}Z`));
+        return reportIds ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    expect((await adapter.launch(launchInput)).sessionId).toBe("s0");
+
+    // A downgrade: two concurrent launches come back without ids. Neither can
+    // be told apart from the other, so both fail rather than guess.
+    reportIds = false;
+    calls.length = 0;
+    const results = await Promise.all([
+      adapter.launch(launchInput).catch((e: unknown) => e),
+      adapter.launch(launchInput).catch((e: unknown) => e),
+    ]);
+    for (const r of results) {
+      expect(r).toBeInstanceOf(CastraAgentDeckError);
+      expect((r as Error).message).toMatch(/reported no session id.*will not guess/s);
+    }
+    expect(calls).toEqual(["launch", "launch"]);
+
+    // The next launch takes the serialized before/after list path.
+    calls.length = 0;
+    await adapter.launch({ ...launchInput, branch: "march/spawn/y" }).catch(() => undefined);
+    expect(calls.slice(0, 2)).toEqual(["list", "launch"]);
+  });
+
+  it("a fallback launch waits for an id-path launch still running in its group", async () => {
+    let reportIds = true;
+    const events: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const gates = new Map<string, () => void>();
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "list") {
+        events.push("list");
+        return JSON.stringify(sessions);
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        const title = args[args.indexOf("-t") + 1] ?? args[args.indexOf("--title") + 1] ?? "";
+        events.push(`launch:${title}`);
+        if (title === "slow") await new Promise<void>((r) => gates.set("slow", r));
+        const id = `s${sessions.length}`;
+        sessions.push(deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:${String(10 + sessions.length)}Z`));
+        events.push(`created:${title}`);
+        return reportIds ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+
+    reportIds = false;
+    events.length = 0;
+    const fast = adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e);
+    const slow = adapter.launch({ ...launchInput, title: "slow" }).catch((e: unknown) => e);
+    expect(await fast).toBeInstanceOf(CastraAgentDeckError);
+    // The fallback starts after the first failure, while "slow" is still launching.
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).not.toContain("list");
+    gates.get("slow")!();
+    expect(await slow).toBeInstanceOf(CastraAgentDeckError);
+    const picked = await fallback;
+    // Its before-list came after "slow" made its session, so it picks only its own.
+    expect(events.indexOf("created:slow")).toBeLessThan(events.indexOf("list"));
+    expect(picked.sessionId).toBe(`s${sessions.length - 1}`);
+  });
+
+  // A host whose launches report an id or not per title, with optional gates on
+  // a title's launch and on the list read right after a title's session exists.
+  function launchHost(withId: Record<string, boolean>) {
+    const events: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const gates = new Map<string, Promise<void>>();
+    const releases = new Map<string, () => void>();
+    const gate = (name: string) => gates.set(name, new Promise<void>((r) => releases.set(name, r)));
+    let lastCreated = "";
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "list") {
+        const after = lastCreated;
+        events.push(`list:${after}`);
+        const g = gates.get(`list-after:${after}`);
+        gates.delete(`list-after:${after}`); // one-shot: only the first list after it
+        await g;
+        return JSON.stringify(sessions);
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        const title = args[args.indexOf("-t") + 1]!;
+        events.push(`launch:${title}`);
+        await gates.get(`launch:${title}`);
+        const id = `s-${title}`;
+        const group = args[args.indexOf("-g") + 1]!;
+        sessions.push({ ...deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:${String(10 + sessions.length)}Z`), group });
+        lastCreated = title;
+        events.push(`created:${title}`);
+        return withId[title] ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    return { exec, events, gate, release: (name: string) => releases.get(name)!() };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+
+  it("an id-path launch that arrives while a fallback waits does not start until the fallback is done", async () => {
+    const host = launchHost({ first: true, fast: false, slow: true, fallback: false, other: true, late: true });
+    const adapter = createAgentDeckAdapter({ exec: host.exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+    host.gate("launch:slow");
+    const fast = adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e);
+    const slow = adapter.launch({ ...launchInput, title: "slow" });
+    expect(await fast).toBeInstanceOf(CastraAgentDeckError); // ids stop: fallback mode
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await tick(); // the fallback is waiting for "slow"
+    expect(host.events).not.toContain("list:fast");
+    // A launch in another group reports an id and turns the id path back on.
+    expect((await adapter.launch({ ...launchInput, group: "other-group", title: "other" })).sessionId).toBe("s-other");
+    const late = adapter.launch({ ...launchInput, title: "late" }); // arrives during the fallback's wait
+    await tick();
+    expect(host.events).not.toContain("launch:late");
+    host.release("launch:slow");
+    expect((await slow).sessionId).toBe("s-slow");
+    expect((await fallback).sessionId).toBe("s-fallback");
+    expect((await late).sessionId).toBe("s-late");
+    // "late" made its session only after the fallback's after-list.
+    expect(host.events.indexOf("list:fallback")).toBeLessThan(host.events.indexOf("launch:late"));
+  });
+
+  it("an id-path launch cannot start while a fallback reads its after-list", async () => {
+    const host = launchHost({ first: true, fast: false, fallback: false, other: true, late: true });
+    const adapter = createAgentDeckAdapter({ exec: host.exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+    expect(await adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e)).toBeInstanceOf(CastraAgentDeckError);
+    host.gate("list-after:fallback");
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await tick(); // the fallback has launched and is reading its after-list
+    expect(host.events.at(-1)).toBe("list:fallback");
+    // A launch in another group reports an id and turns the id path back on.
+    expect((await adapter.launch({ ...launchInput, group: "other-group", title: "other" })).sessionId).toBe("s-other");
+    const late = adapter.launch({ ...launchInput, title: "late" });
+    await tick();
+    expect(host.events).not.toContain("launch:late");
+    host.release("list-after:fallback");
+    expect((await fallback).sessionId).toBe("s-fallback");
+    expect((await late).sessionId).toBe("s-late");
+  });
+
+  it("finds the launch object after chatter that holds braces", () => {
+    expect(parseLaunchOutput('note: worktree {created}\n{"session_id":"s","worktree_path":"/w"}')).toEqual({ sessionId: "s", worktreePath: "/w" });
+    expect(parseLaunchOutput('{"note":1} then\n{\n  "session_id": "t"\n}\n')).toEqual({ sessionId: "t" });
+    expect(parseLaunchOutput("braces {but} no object")).toEqual({});
+  });
+
+  it("enables auto-mode only when its full timeout fits, and never with a cut one", async () => {
+    let now = 0;
+    const sets: number[] = [];
+    const exec: ExecFn = async (cmd, args, opts) => {
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "launch") {
+        now = 225_000; // the launch left 15s of the 240s budget
+        return '{"session_id":"ours"}';
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(deckRecord("ours", "/repo/feature-march-spawn-x"));
+      if (cmd === "agent-deck" && sub === "set") sets.push(opts?.timeoutMs ?? -1);
+      return "";
+    };
+    const warns: string[] = [];
+    const adapter = createAgentDeckAdapter({
+      exec,
+      sleep: noSleep,
+      now: () => now,
+      logger: { info: () => undefined, warn: (_o, msg) => warns.push(msg) },
+    });
+    const launched = await adapter.launch(launchInput);
+    expect(launched.sessionId).toBe("ours");
+    expect(sets).toEqual([]);
+    expect(warns.some((w) => /auto-mode .*skipped/.test(w))).toBe(true);
+
+    // With room left it runs with its whole timeout.
+    now = 0;
+    const roomy: ExecFn = async (cmd, args, opts) => {
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "launch") return '{"session_id":"ours"}';
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(deckRecord("ours", "/repo/feature-march-spawn-x"));
+      if (cmd === "agent-deck" && sub === "set") sets.push(opts?.timeoutMs ?? -1);
+      return "";
+    };
+    await createAgentDeckAdapter({ exec: roomy, sleep: noSleep, now: () => 0 }).launch(launchInput);
+    expect(sets).toEqual([60_000]);
+  });
+
+  it("a remove killed at its timeout is an error, even if it printed 'not found' first", async () => {
+    const exec: ExecFn = async () => {
+      throw new ExecError("agent-deck timed out after 120000ms and was killed", {
+        stderr: "worktree not found, skipping\n",
+        timedOut: true,
+      });
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const err = await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CastraAgentDeckError);
+    expect((err as Error).message).toMatch(/timed out[\s\S]*stderr before it stopped: worktree not found/);
+  });
+
+  it("a completed remove that reports the session missing is still removed:false", async () => {
+    const exec: ExecFn = async () => {
+      throw new ExecError("Command failed: agent-deck (exit code 1)", { stderr: "session not found", exitCode: 1 });
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    expect(await adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: true })).toEqual({ removed: false });
+  });
+
+  it("does not cache an empty branch after a git timeout", async () => {
+    let gitTimesOut = true;
+    let showCurrent = 0;
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck") return JSON.stringify([deckRecord("legacy", "/wt/legacy")]);
+      if (args.includes("--is-inside-work-tree")) return "true\n";
+      if (args.includes("--show-current")) {
+        showCurrent++;
+        if (gitTimesOut) throw new ExecError("git timed out", { timedOut: true });
+        return "feature/x\n";
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    expect((await adapter.list({ profile: "march" }))[0]!.branch).toBe("");
+    gitTimesOut = false;
+    expect((await adapter.list({ profile: "march" }))[0]!.branch).toBe("feature/x");
+    // Settled now: served from the cache.
+    expect((await adapter.list({ profile: "march" }))[0]!.branch).toBe("feature/x");
+    expect(showCurrent).toBe(2);
+  });
+
+  it("looks up branches only for the requested group", async () => {
+    const looked: string[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck") {
+        return JSON.stringify([
+          { ...deckRecord("a", "/wt/a"), group: "g1" },
+          { ...deckRecord("b", "/wt/b"), group: "g2" },
+          { ...deckRecord("c", "/wt/c"), group: "g1" },
+        ]);
+      }
+      if (args.includes("--is-inside-work-tree")) {
+        looked.push(args[1]!);
+        return "true\n";
+      }
+      return "main\n";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    expect((await adapter.list({ profile: "march", group: "g1" })).map((s) => s.sessionId)).toEqual(["a", "c"]);
+    expect(looked).toEqual(["/wt/a", "/wt/c"]);
+  });
+
+  it("sends when the cooldown ran out while the pane was being read", async () => {
+    let now = 999;
+    let sends = 0;
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        now = 1_000; // the cooldown ends during this read
+        return "same pane";
+      }
+      if (cmd === "agent-deck" && args.includes("send")) sends++;
+      return "";
+    };
+    const tracker = new SendTracker({ cooldownMs: 1_000, now: () => now });
+    tracker.recordRefusal({ profile: "march", sessionId: "s1", message: "refused", tmuxSession: "t1", paneTail: "same pane", at: 0 });
+    const adapter = createAgentDeckAdapter({ exec, sendTracker: tracker, sleep: noSleep });
+    await expect(adapter.send({ profile: "march", sessionId: "s1", prompt: "go" })).resolves.toBeUndefined();
+    expect(sends).toBe(1);
+  });
+
+  it("after a failed trust-dialog answer, the resolver's own keys do not end the cooldown", async () => {
+    // Castra's dialog, where Enter on "Yes" does not close it: the resolver moves
+    // the cursor (the pane changes) and then fails.
+    let cursorOnYes = false;
+    let sends = 0;
+    const pane = () => [
+      " Adding a new directory:",
+      " /home/u/.march/steward",
+      "",
+      ` ${cursorOnYes ? " " : "❯"} No, exit`,
+      ` ${cursorOnYes ? "❯" : " "} Yes, add it`,
+    ].join("\n");
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends++;
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      if (cmd === "agent-deck" && args.includes("show")) return JSON.stringify({ id: "s1", tmux_session: "t1" });
+      if (cmd === "tmux" && args[0] === "capture-pane") return pane();
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        if (args[3] === "Down") cursorOnYes = true;
+        return "";
+      }
+      return "";
+    };
+    const tracker = new SendTracker();
+    const adapter = createAgentDeckAdapter({
+      exec,
+      sendTracker: tracker,
+      sleep: noSleep,
+      trustDialog: { ownedDirs: ["/home/u/.march/steward"] },
+    });
+    const first = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect((first as Error).message).toMatch(/could not answer the directory-trust dialog/);
+    // The message keeps the pane as it was at refusal (cursor on No).
+    expect((first as Error).message).toMatch(/❯ No, exit/);
+    const second = await adapter.send({ profile: "march", sessionId: "s1", prompt: "go" }).catch((e: unknown) => e);
+    expect((second as CastraComposerRefusedError).cached).toBe(true);
+    expect(sends).toBe(1);
+  });
+
+  it("a send whose budget ran out while queued is not started", async () => {
+    let now = 0;
+    let release!: () => void;
+    const sends: string[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        sends.push(args.at(-1)!);
+        if (sends.length === 1) {
+          await new Promise<void>((r) => (release = r));
+          now = 60_000; // the first send held the queue for a minute
+        }
+      }
+      return "";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep, now: () => now, budgets: { sendMs: 100_000 } });
+    const first = adapter.send({ profile: "march", sessionId: "s1", prompt: "one" });
+    const second = adapter.send({ profile: "march", sessionId: "s1", prompt: "two" }).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 0));
+    release();
+    await first;
+    const err = await second;
+    // 100s budget, 60s spent queued: a whole 45s send no longer fits.
+    expect(err).toBeInstanceOf(CastraAgentDeckError);
+    expect((err as Error).message).toMatch(/send budget ran out before the send, so it was not started/);
+    expect(sends).toEqual(["one"]);
+  });
+
+  it("a launch that cannot fit its 180s subprocess in the budget is not started", async () => {
+    const calls: string[] = [];
+    const exec: ExecFn = async (cmd, args) => {
+      calls.push(subcommand(args) ?? "");
+      return "[]";
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep, budgets: { launchMs: 100_000 } });
+    await expect(adapter.launch(launchInput)).rejects.toThrow(/launch budget ran out before agent-deck launch/);
+    expect(calls).not.toContain("launch");
+  });
+});
+
+describe("castra adapter — budgets agree with the step timeouts", () => {
+  it("each mutating step fits its operation's budget", async () => {
+    const { AGENT_DECK_LAUNCH_TIMEOUT_MS, AGENT_DECK_SEND_TIMEOUT_MS, AGENT_DECK_REMOVE_TIMEOUT_MS } = await import("./adapter.js");
+    const budgets = await import("./budgets.js");
+    expect(AGENT_DECK_LAUNCH_TIMEOUT_MS).toBeLessThan(budgets.CASTRA_LAUNCH_BUDGET_MS);
+    // The send and its one retry.
+    expect(2 * AGENT_DECK_SEND_TIMEOUT_MS).toBeLessThan(budgets.CASTRA_SEND_BUDGET_MS);
+    expect(AGENT_DECK_REMOVE_TIMEOUT_MS).toBeLessThanOrEqual(budgets.CASTRA_REMOVE_BUDGET_MS);
   });
 });

@@ -3,8 +3,15 @@ import {
   type CastraSession,
   type RecoverReport,
   type SessionRecoveryResult,
+  type TrustDialogResult,
 } from "./types.js";
 import { CASTRA_TOKEN_ENV, CASTRA_URL_ENV, resolveCastraPort } from "./config.js";
+import {
+  CASTRA_CLIENT_MARGIN_MS,
+  CASTRA_LAUNCH_BUDGET_MS,
+  CASTRA_REMOVE_BUDGET_MS,
+  CASTRA_SEND_BUDGET_MS,
+} from "./budgets.js";
 
 /**
  * HTTP client for the Castra API — the consumer-side counterpart to
@@ -18,8 +25,17 @@ import { CASTRA_TOKEN_ENV, CASTRA_URL_ENV, resolveCastraPort } from "./config.js
 /** Header consumers set to thread a dispatch slice id into Castra's traces. */
 const SLICE_ID_HEADER = "x-march-slice-id";
 
-/** Default per-request timeout. Launches can take a few seconds (agent-deck). */
+/** Default per-request timeout for reads (list, show, output). */
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * Launch, send and remove wait out Castra's whole budget for the operation plus
+ * a margin (budgets.ts), so the caller gets Castra's answer rather than its own
+ * timeout. If the client does time out, the operation may still complete on the
+ * server: treat it as unknown and re-list before retrying.
+ */
+export const CASTRA_LAUNCH_TIMEOUT_MS = CASTRA_LAUNCH_BUDGET_MS + CASTRA_CLIENT_MARGIN_MS;
+export const CASTRA_SEND_TIMEOUT_MS = CASTRA_SEND_BUDGET_MS + CASTRA_CLIENT_MARGIN_MS;
+export const CASTRA_REMOVE_TIMEOUT_MS = CASTRA_REMOVE_BUDGET_MS + CASTRA_CLIENT_MARGIN_MS;
 /** Reachability probe timeout — kept short so `/readyz` stays snappy. */
 const REACHABLE_TIMEOUT_MS = 3_000;
 /**
@@ -127,7 +143,11 @@ interface RequestOptions {
 /** Normalize a `/v1/sessions/recover` response body into a {@link RecoverReport}. */
 function coerceRecoverReport(body: unknown): RecoverReport {
   const recovered = (body as { recovered?: unknown }).recovered;
-  return { recovered: Array.isArray(recovered) ? (recovered as SessionRecoveryResult[]) : [] };
+  const trustDialogs = (body as { trustDialogs?: unknown }).trustDialogs;
+  return {
+    recovered: Array.isArray(recovered) ? (recovered as SessionRecoveryResult[]) : [],
+    ...(Array.isArray(trustDialogs) ? { trustDialogs: trustDialogs as TrustDialogResult[] } : {}),
+  };
 }
 
 async function parseJsonBody(res: Response): Promise<unknown> {
@@ -210,11 +230,12 @@ export class CastraClient {
         ...(req.metadata ? { metadata: req.metadata } : {}),
       },
       expectStatus: 201,
+      timeoutMs: CASTRA_LAUNCH_TIMEOUT_MS,
     });
     return (body as { session: CastraSession }).session;
   }
 
-  /** Send a prompt to a session (fire-and-forget on the server; 202 Accepted). */
+  /** Send a prompt to a session. Castra answers 202 once agent-deck has delivered it. */
   async sendPrompt(req: SendPromptRequest): Promise<void> {
     await this.request(
       "POST",
@@ -223,6 +244,7 @@ export class CastraClient {
         traceKey: req.traceKey,
         json: { profile: req.profile, prompt: req.prompt },
         expectStatus: 202,
+        timeoutMs: CASTRA_SEND_TIMEOUT_MS,
       },
     );
   }
@@ -236,7 +258,7 @@ export class CastraClient {
     const body = await this.request(
       "DELETE",
       `/v1/sessions/${encodeURIComponent(req.sessionId)}?${qs.toString()}`,
-      { traceKey: req.traceKey, expectStatus: 200, signal: req.signal },
+      { traceKey: req.traceKey, expectStatus: 200, timeoutMs: CASTRA_REMOVE_TIMEOUT_MS, signal: req.signal },
     );
     return { removed: Boolean((body as { removed?: boolean }).removed) };
   }

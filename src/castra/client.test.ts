@@ -380,3 +380,33 @@ describe("castra client — stale keep-alive sockets (spawn worker blocked in do
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("castra client — operation deadlines", () => {
+  it("launch, send and remove wait out Castra's whole budget plus a margin", async () => {
+    const budgets = await import("./budgets.js");
+    const waits: number[] = [];
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      waits.push(ms);
+      return new AbortController().signal;
+    });
+    try {
+      const responses = [
+        jsonResponse(201, { session: { sessionId: "s" } }),
+        jsonResponse(202, { ok: true }),
+        jsonResponse(200, { removed: true }),
+      ];
+      const fetchImpl = vi.fn(async () => responses.shift()!);
+      const client = new CastraClient({ baseUrl: "http://castra:9264", token: "t", fetchImpl: fetchImpl as unknown as typeof fetch });
+      await client.launchSession({ profile: "p", repoPath: "/r", branch: "b", title: "t" });
+      await client.sendPrompt({ profile: "p", sessionId: "s", prompt: "go" });
+      await client.removeSession({ profile: "p", sessionId: "s", pruneWorktree: true });
+      expect(waits).toEqual([
+        budgets.CASTRA_LAUNCH_BUDGET_MS + budgets.CASTRA_CLIENT_MARGIN_MS,
+        budgets.CASTRA_SEND_BUDGET_MS + budgets.CASTRA_CLIENT_MARGIN_MS,
+        budgets.CASTRA_REMOVE_BUDGET_MS + budgets.CASTRA_CLIENT_MARGIN_MS,
+      ]);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+});
