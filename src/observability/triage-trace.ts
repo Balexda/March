@@ -11,3 +11,8 @@ export function emitTriageValidationFailure(code: string): void {
   span.setStatus({ code: SpanStatusCode.ERROR });
   span.end();
 }
+
+export function startTriageProvisionSpan() {
+  const otel = getActiveOtel();
+  return otel.enabled ? otel.getTracer().startSpan("triage.labels.provision") : undefined;
+}
