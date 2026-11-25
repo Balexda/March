@@ -1230,6 +1230,87 @@ describe("castra adapter — review fixes (#702)", () => {
     expect(picked.sessionId).toBe(`s${sessions.length - 1}`);
   });
 
+  // A host whose launches report an id or not per title, with optional gates on
+  // a title's launch and on the list read right after a title's session exists.
+  function launchHost(withId: Record<string, boolean>) {
+    const events: string[] = [];
+    const sessions: Record<string, unknown>[] = [];
+    const gates = new Map<string, Promise<void>>();
+    const releases = new Map<string, () => void>();
+    const gate = (name: string) => gates.set(name, new Promise<void>((r) => releases.set(name, r)));
+    let lastCreated = "";
+    const exec: ExecFn = async (cmd, args) => {
+      if (cmd === "git" && args.includes("--git-common-dir")) return "/repo/.git\n";
+      const sub = subcommand(args);
+      if (cmd === "agent-deck" && sub === "list") {
+        const after = lastCreated;
+        events.push(`list:${after}`);
+        const g = gates.get(`list-after:${after}`);
+        gates.delete(`list-after:${after}`); // one-shot: only the first list after it
+        await g;
+        return JSON.stringify(sessions);
+      }
+      if (cmd === "agent-deck" && sub === "show") return JSON.stringify(sessions.find((r) => r.id === args.at(-2)) ?? {});
+      if (cmd === "agent-deck" && sub === "launch") {
+        const title = args[args.indexOf("-t") + 1]!;
+        events.push(`launch:${title}`);
+        await gates.get(`launch:${title}`);
+        const id = `s-${title}`;
+        const group = args[args.indexOf("-g") + 1]!;
+        sessions.push({ ...deckRecord(id, "/repo/feature-march-spawn-x", `2026-05-20T00:00:${String(10 + sessions.length)}Z`), group });
+        lastCreated = title;
+        events.push(`created:${title}`);
+        return withId[title] ? JSON.stringify({ session_id: id }) : "";
+      }
+      return "";
+    };
+    return { exec, events, gate, release: (name: string) => releases.get(name)!() };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+
+  it("an id-path launch that arrives while a fallback waits does not start until the fallback is done", async () => {
+    const host = launchHost({ first: true, fast: false, slow: true, fallback: false, other: true, late: true });
+    const adapter = createAgentDeckAdapter({ exec: host.exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+    host.gate("launch:slow");
+    const fast = adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e);
+    const slow = adapter.launch({ ...launchInput, title: "slow" });
+    expect(await fast).toBeInstanceOf(CastraAgentDeckError); // ids stop: fallback mode
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await tick(); // the fallback is waiting for "slow"
+    expect(host.events).not.toContain("list:fast");
+    // A launch in another group reports an id and turns the id path back on.
+    expect((await adapter.launch({ ...launchInput, group: "other-group", title: "other" })).sessionId).toBe("s-other");
+    const late = adapter.launch({ ...launchInput, title: "late" }); // arrives during the fallback's wait
+    await tick();
+    expect(host.events).not.toContain("launch:late");
+    host.release("launch:slow");
+    expect((await slow).sessionId).toBe("s-slow");
+    expect((await fallback).sessionId).toBe("s-fallback");
+    expect((await late).sessionId).toBe("s-late");
+    // "late" made its session only after the fallback's after-list.
+    expect(host.events.indexOf("list:fallback")).toBeLessThan(host.events.indexOf("launch:late"));
+  });
+
+  it("an id-path launch cannot start while a fallback reads its after-list", async () => {
+    const host = launchHost({ first: true, fast: false, fallback: false, other: true, late: true });
+    const adapter = createAgentDeckAdapter({ exec: host.exec, sleep: noSleep });
+    await adapter.launch({ ...launchInput, title: "first" });
+    expect(await adapter.launch({ ...launchInput, title: "fast" }).catch((e: unknown) => e)).toBeInstanceOf(CastraAgentDeckError);
+    host.gate("list-after:fallback");
+    const fallback = adapter.launch({ ...launchInput, title: "fallback" });
+    await tick(); // the fallback has launched and is reading its after-list
+    expect(host.events.at(-1)).toBe("list:fallback");
+    // A launch in another group reports an id and turns the id path back on.
+    expect((await adapter.launch({ ...launchInput, group: "other-group", title: "other" })).sessionId).toBe("s-other");
+    const late = adapter.launch({ ...launchInput, title: "late" });
+    await tick();
+    expect(host.events).not.toContain("launch:late");
+    host.release("list-after:fallback");
+    expect((await fallback).sessionId).toBe("s-fallback");
+    expect((await late).sessionId).toBe("s-late");
+  });
+
   it("finds the launch object after chatter that holds braces", () => {
     expect(parseLaunchOutput('note: worktree {created}\n{"session_id":"s","worktree_path":"/w"}')).toEqual({ sessionId: "s", worktreePath: "/w" });
     expect(parseLaunchOutput('{"note":1} then\n{\n  "session_id": "t"\n}\n')).toEqual({ sessionId: "t" });

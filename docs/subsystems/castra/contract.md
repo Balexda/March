@@ -102,9 +102,10 @@ repository, or one that cannot be confirmed, is `409` `conflict`. If an
 agent-deck that has reported ids launches without one (a downgrade), that
 launch ran unserialized with no before-list, so Castra fails it closed with
 `502` `agent_deck_error` rather than guess; later launches take the serialized
-path. A serialized launch first waits for unserialized launches still running
-in its profile and group, and fails closed the same way if one started while
-it ran and it reported no id. After a launch, Castra enables session `auto-mode` only when that
+path. A serialized launch excludes unserialized launches in its profile and
+group for its whole window, from before its before-list until its after-list
+is read: it first waits for those already running, and any that arrive meanwhile
+wait for it to finish. After a launch, Castra enables session `auto-mode` only when that
 command's full timeout still fits in the launch budget; otherwise it skips it
 and logs a warning, and the launch still succeeds.
 

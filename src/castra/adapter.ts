@@ -743,11 +743,13 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
   // reports ids, every launch takes that path; after, launches run concurrently.
   const launchQueue = new KeyedSerializer();
   let launchReportsId = false;
-  // Launches on the id path skip launchQueue. A list-diff launch must never
-  // overlap one in its profile+group: it waits for those in flight before its
-  // before-list, and fails closed if another started during its window.
+  // Launches on the id path skip launchQueue, so a list-diff launch must
+  // exclude them from its whole window, before-list through after-list, in its
+  // profile+group. It marks the window open (diffWindow) before anything else,
+  // so an id-path launch arriving later waits for it to close, then waits for
+  // the id-path launches already creating sessions (idPathInFlight).
   const idPathInFlight = new Map<string, Set<Promise<unknown>>>();
-  const idPathStarted = new Map<string, number>();
+  const diffWindow = new Map<string, Promise<void>>();
 
   // Castra-owned session metadata + last-known branch, keyed by session id (#214).
   // agent-deck cannot store arbitrary metadata, so Castra populates this at launch
@@ -1066,7 +1068,9 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
       };
       const { launched, fromDiff } = launchReportsId
         ? await (async () => {
-            idPathStarted.set(key, (idPathStarted.get(key) ?? 0) + 1);
+            // Never create a session while a list-diff launch's window is open here.
+            for (let open = diffWindow.get(key); open; open = diffWindow.get(key)) await open;
+            // Registered synchronously after the loop: no window can open in between.
             const running = runLaunch();
             const inFlight = idPathInFlight.get(key) ?? new Set<Promise<unknown>>();
             idPathInFlight.set(key, inFlight.add(running));
@@ -1092,20 +1096,23 @@ export function createAgentDeckAdapter(options: AgentDeckAdapterOptions = {}): A
             return identified(reported);
           })()
         : await launchQueue.run(key, async () => {
-            // An id-path launch still creating a session here would land in this
-            // launch's before/after diff: let those finish first.
-            await Promise.allSettled([...(idPathInFlight.get(key) ?? [])]);
-            const startedBefore = idPathStarted.get(key) ?? 0;
-            const before = await listSnapshot(exec, input.profile, dl.cap(AGENT_DECK_TIMEOUT_MS, "listing sessions before the launch"));
-            const beforeIds = new Set(before.filter((s) => s.group === input.group).map((s) => s.sessionId));
-            const reported = await runLaunch();
-            if (!reported.sessionId && (idPathStarted.get(key) ?? 0) !== startedBefore) {
-              throw new CastraAgentDeckError(
-                "agent-deck launch reported no session id, and another launch into this profile and group ran " +
-                  "while it did, so the new session cannot be told apart; Castra will not guess. Retry the launch.",
-              );
+            // launchQueue admits one list-diff launch per key, so this window is
+            // the only one open here. Open it before any await: from now on no
+            // id-path launch in this group starts until it closes.
+            let close!: () => void;
+            diffWindow.set(key, new Promise<void>((r) => (close = r)));
+            try {
+              // Id-path launches already creating a session would land in the
+              // diff: let them finish. None can join the set while the window is open.
+              await Promise.allSettled([...(idPathInFlight.get(key) ?? [])]);
+              const before = await listSnapshot(exec, input.profile, dl.cap(AGENT_DECK_TIMEOUT_MS, "listing sessions before the launch"));
+              const beforeIds = new Set(before.filter((s) => s.group === input.group).map((s) => s.sessionId));
+              // Held through the after-list in identified(): the diff is this launch's alone.
+              return await identified(await runLaunch(), beforeIds);
+            } finally {
+              diffWindow.delete(key);
+              close();
             }
-            return identified(reported, beforeIds);
           });
       if (!launched) {
         throw new CastraAgentDeckError(
