@@ -160,6 +160,25 @@ describe("castra client — requests", () => {
     expect(JSON.parse(createInit.body as string)).not.toHaveProperty("createBranch");
   });
 
+  it("aborts in-flight list and remove requests on the caller's deadline signal", async () => {
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const reason = new Error("teardown deadline exceeded");
+    const listing = new AbortController();
+    const removal = new AbortController();
+
+    const list = client.listSessions("march", undefined, listing.signal);
+    const remove = client.removeSession({ profile: "march", sessionId: "s1", pruneWorktree: false, signal: removal.signal });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    listing.abort(reason);
+    removal.abort(reason);
+
+    await expect(list).rejects.toBe(reason);
+    await expect(remove).rejects.toBe(reason);
+  });
+
   it("lists sessions via GET with the profile + group query", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [{ sessionId: "s1", group: "g" }] }));
     const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });

@@ -47,8 +47,9 @@ export const AGENT_DECK_LAUNCH_TIMEOUT_MS = 180_000;
 /** `agent-deck session send`. Two of them (the send and its one retry) fit in
  *  {@link CASTRA_SEND_BUDGET_MS}, which the client waits out. */
 export const AGENT_DECK_SEND_TIMEOUT_MS = 45_000;
-/** `agent-deck session remove --prune-worktree` removes a git worktree. */
-export const AGENT_DECK_REMOVE_TIMEOUT_MS = 120_000;
+/** `agent-deck session remove`. Short (#717): Brood's teardown gives steward
+ *  cleanup 8s of its 25s budget and retries, so a long remove has no caller. */
+export const AGENT_DECK_REMOVE_TIMEOUT_MS = 10_000;
 /** The `/status` reachability probe (`agent-deck --version`). */
 export const AGENT_DECK_PROBE_TIMEOUT_MS = 10_000;
 /** git branch derivation and tmux pane capture/keys are local and fast. */

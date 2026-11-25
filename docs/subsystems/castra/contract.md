@@ -173,7 +173,7 @@ Send behavior:
 | Request envelope | Header `Authorization: Bearer <token>`. Path param `id` is the session id. Query requires `profile`; optional `pruneWorktree` is a boolean and defaults to false. |
 | Response envelope | `200` with `{ "ok": true, "removed": boolean }`. |
 | Authentication behavior | Bearer-token protected. Missing or invalid bearer tokens return `401` with `unauthorized`. |
-| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false` only when agent-deck finished and reported the session missing; a remove killed at its timeout is `502` `agent_deck_error`, whatever it printed first; agent-deck remove failures return `502`; unexpected failures return `500`. |
+| Visible status or error behavior | Invalid ids or query values return `400`; missing sessions are treated as the desired cleanup state and return `removed: false` only when agent-deck finished and reported the session missing; agent-deck remove failures return `502`; unexpected failures return `500`. Castra gives the remove command 10 seconds and kills its process group on timeout; a remove killed at its timeout is `502` `agent_deck_error`, whatever it printed first, and marks the `castra.remove` span errored. |
 
 `CastraSession` response shape:
 
@@ -204,15 +204,15 @@ Send behavior:
 
 Mutating operations have end-to-end budgets that include queueing,
 inspections and the one trust-dialog retry: launch 240s, send 100s, remove
-120s (`src/castra/budgets.ts`). `CastraClient` waits each budget plus 15s. A
+10s (`src/castra/budgets.ts`). `CastraClient` waits each budget plus 15s. A
 mutating step (agent-deck launch, send, remove) starts only when its full
-timeout (180s / 45s / 120s) still fits in what is left; otherwise Castra
+timeout (180s / 45s / 10s) still fits in what is left; otherwise Castra
 answers `502` `agent_deck_error` ("… budget ran out before …, so it was not
 started") without starting it. A caller that stops waiting cancels nothing: a
 step already started runs to completion or its own timeout. A client timeout
 means the outcome is unknown. For a launch or a remove, the caller can
 re-read `GET /v1/sessions` to see whether the session exists before retrying,
-but only once the operation's budget (240s for launch, 120s for remove) has
+but only once the operation's budget (240s for launch, 10s for remove) has
 passed since it sent the request: before that the step may still be running,
 and a list without the session does not show it is absent. `CastraClient`
 already waits past each budget.

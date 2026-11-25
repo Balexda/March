@@ -710,6 +710,15 @@ describe("castra adapter — operations", () => {
     );
   });
 
+  it("reports a timeout even when partial stderr contains a not-found message", async () => {
+    const adapter = makeAdapter();
+    childProcessMock.execFileSync.mockImplementationOnce(() => {
+      throw new ExecError("agent-deck timed out after 10000ms and was killed", { stderr: "session not found", timedOut: true });
+    });
+    await expect(adapter.remove({ profile: "p", sessionId: "s", pruneWorktree: false }))
+      .rejects.toThrow(/timed out after 10000ms/);
+  });
+
   it("throws not-found when showing a missing session", async () => {
     const adapter = makeAdapter();
     childProcessMock.execFileSync.mockImplementationOnce(() => {

@@ -247,9 +247,14 @@ describe("march CLI", () => {
     // Permit loading the CLI and its dependencies while denying access to
     // local archive, registry and worktree files or child processes such as Docker and git.
     const packageRoot = path.resolve(path.dirname(CLI_PATH), "..");
+    // Node 22.13+/23.5+ stabilised the permission model as `--permission`, and
+    // Node 24 removed `--experimental-permission`; Node 20 only knows the old flag.
+    const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
+      ? "--permission"
+      : "--experimental-permission";
     const readLogs = (url: string, id: string) =>
       execFileAsync(process.execPath, [
-        "--experimental-permission",
+        permissionFlag,
         "--disable-warning=ExperimentalWarning",
         `--allow-fs-read=${path.dirname(CLI_PATH)}`,
         `--allow-fs-read=${path.join(packageRoot, "node_modules")}`,
@@ -379,6 +384,7 @@ describe("march CLI", () => {
           homeDir, traceparent,
           pathExists: () => true,
           substrate: {
+            stopCompute: async ({ sessionId }) => ({ outcome: "stopped", containerId: sessionId }),
             removeCompute: async ({ sessionId }) => { calls.push(sessionId); },
             removeWorkspace: () => ({ worktreeRemoved: true, branchDeleted: true }),
           },
@@ -392,7 +398,7 @@ describe("march CLI", () => {
       const before = store.list();
       for (const [id, payload, statusCode] of [
         ["pending", {}, 409], ["live", {}, 409], ["live-steward", {}, 409],
-        ["live", { force: true, kill: true, reason: "rejected" }, 400],
+        ["live", { kill: true, reason: "rejected" }, 409],
         ["missing", {}, 404],
       ] as const) {
         const rejected = await app.inject({
@@ -403,7 +409,7 @@ describe("march CLI", () => {
       for (const [id, flags, diagnostic] of [
         ["pending", [], "Pass force"],
         ["live-steward", [], "Pass force"],
-        ["live", ["--force", "--kill"], "kill mode is unsupported"],
+        ["live", ["--kill"], "Pass force"],
         ["missing", [], "is not tracked by Brood"],
       ] as const) {
         await expect(runTeardown(url, id, ...flags)).rejects.toMatchObject({
@@ -422,17 +428,21 @@ describe("march CLI", () => {
       expect(calls).toEqual([]);
       expect(fs.existsSync(broodArchiveDir("live", homeDir))).toBe(false);
 
+      const missingEvidence = [
+        "container logs unavailable: no tracked container ID",
+        "registry extraction result unavailable or malformed",
+      ];
       const completed = await runTeardown(url, "stopped");
       expect(completed.stdout.trim().split("\n")).toEqual([
         "stopped: torndown", "archive: ok", "container: ok (absence verified)",
         "steward: ok", "worktree: ok", "branch: ok",
       ]);
-      expect(completed.stderr).toBe("");
+      expect(completed.stderr.trim().split("\n")).toEqual(missingEvidence.map((warning) => `warning: ${warning}`));
 
       const forced = await runTeardown(url, "live-steward", "--force", "--json", "--reason", "operator cleanup");
       expect(JSON.parse(forced.stdout)).toEqual({
-        id: "live", status: "torndown", warnings: [],
-        steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
+        id: "live", status: "torndown", warnings: missingEvidence,
+        steps: ["stop", "archive", "container", "steward", "worktree", "branch"].map((step) =>
           expect.objectContaining({ step, outcome: "ok" })),
       });
       expect(store.get("live")?.teardownReason).toBe("operator cleanup");
@@ -449,7 +459,7 @@ describe("march CLI", () => {
         id: "deferred", status: "tearing-down",
         steps: ["archive", "container", "steward", "worktree", "branch"].map((step) =>
           expect.objectContaining({ step })),
-        warnings: ["steward removal failed: Castra unavailable"],
+        warnings: [...missingEvidence, "steward removal failed: Castra unavailable"],
       });
       expect(store.get("deferred")).toMatchObject({
         failureReason: "spawn failed", teardownReason: "reclaim failed spawn",

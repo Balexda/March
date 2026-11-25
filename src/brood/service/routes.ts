@@ -15,6 +15,8 @@ import {
   type ContainerObserver,
 } from "./container-observer.js";
 import { parseExtractionResult } from "./extraction.js";
+import { workspaceReclaimActive } from "./teardown-deadline.js";
+import { WORKSPACE_RECLAIMING_CODE } from "./types.js";
 import { extractionReadiness } from "./extraction-readiness.js";
 import {
   BroodLogUnavailableError,
@@ -31,7 +33,8 @@ import {
 import {
   BroodConflictError,
   BroodNotFoundError,
-  BroodUnsupportedModeError,
+  isDeferredTeardownStep,
+  TEARDOWN_DETAIL_LIMIT,
   teardownSession,
 } from "./teardown.js";
 import type {
@@ -371,6 +374,17 @@ export async function registerRoutes(
     // BroodClient sends so the Hatchery's client-side `brood.register` and this
     // handler land in one trace (#233).
     const { input } = validation;
+    if (reclaimBlocks(store, input.id, input.parentId)) {
+      reply.code(409);
+      return {
+        error: `Session "${input.id}" joins a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
+    }
+    if (input.extractionResult !== undefined && extractionClosed(store, input.id)) {
+      reply.code(409);
+      return { error: `Session "${input.id}" is being torn down; extractionResult is closed.` };
+    }
     const span = startBroodSpan({
       name: "brood.register",
       key: input.id,
@@ -530,6 +544,16 @@ export async function registerRoutes(
       reply.code(400);
       return { error: `invalid branch "${String(body.branch)}".` };
     }
+    // `torndownAt` is the durable completed-teardown marker: a PATCH may set it
+    // (status-only retire, #308) but never clear it — `null` would erase the
+    // evidence `extractionClosed` relies on after the snapshot row is gone.
+    if (
+      body.torndownAt !== undefined &&
+      (typeof body.torndownAt !== "string" || body.torndownAt.length === 0)
+    ) {
+      reply.code(400);
+      return { error: "torndownAt must be a non-empty timestamp string and cannot be cleared." };
+    }
     let parsedExtraction: UpdateSessionInput["extractionResult"];
     if (body.extractionResult !== undefined) {
       parsedExtraction = parseExtractionResult(body.extractionResult);
@@ -545,8 +569,27 @@ export async function registerRoutes(
         (changes as Record<string, unknown>)[field] = body[field];
       }
     }
+    // Write-once: keep the first completed-teardown timestamp (idempotent retire).
+    if (changes.torndownAt !== undefined && store.get(id)?.torndownAt !== undefined) {
+      delete changes.torndownAt;
+    }
     // Persist the validated/normalized extraction, not the raw request shape.
-    if (parsedExtraction) changes.extractionResult = parsedExtraction;
+    if (parsedExtraction) {
+      // Teardown archives the result it reads after admission; a later write
+      // could land after compute removal without ever reaching the archive.
+      if (extractionClosed(store, id)) {
+        reply.code(409);
+        return { error: `Session "${id}" is being torn down; extractionResult is closed.` };
+      }
+      changes.extractionResult = parsedExtraction;
+    }
+    if (reclaimBlocks(store, id)) {
+      reply.code(409);
+      return {
+        error: `Session "${id}" belongs to a group whose workspace is being reclaimed; retry after teardown.`,
+        code: WORKSPACE_RECLAIMING_CODE,
+      };
+    }
     const record = store.update(id, changes);
     if (!record) {
       reply.code(404);
@@ -584,7 +627,7 @@ export async function registerRoutes(
     const body = (request.body ?? {}) as TeardownRequest;
     const traceparent = inboundTraceparent(request.headers);
     try {
-      return await teardown(
+      const result = await teardown(
         id,
         {
           force: body.force === true,
@@ -593,6 +636,29 @@ export async function registerRoutes(
         },
         traceparent,
       );
+      const affectedSteps = result.steps
+        .filter((step) => step.outcome === "failed" || isDeferredTeardownStep(step))
+        .map(({ step, outcome, detail }) => ({
+          step,
+          outcome,
+          ...(detail ? { detail: detail.slice(0, TEARDOWN_DETAIL_LIMIT) } : {}),
+        }));
+      // A nonterminal result is incomplete even when every cleanup step
+      // succeeded (e.g. journal finalization failed); the warnings carry why.
+      if (affectedSteps.length > 0 || result.status !== "torndown") {
+        request.log.warn({
+          route: request.routeOptions.url,
+          method: request.method,
+          status_code: reply.statusCode,
+          session_id: result.id,
+          teardown_status: result.status,
+          teardown_steps: affectedSteps,
+          ...(result.status !== "torndown"
+            ? { teardown_warnings: result.warnings.map((warning) => warning.slice(0, TEARDOWN_DETAIL_LIMIT)) }
+            : {}),
+        }, "brood teardown cleanup incomplete");
+      }
+      return result;
     } catch (err) {
       if (err instanceof BroodNotFoundError) {
         reply.code(404);
@@ -602,12 +668,29 @@ export async function registerRoutes(
         reply.code(409);
         return { error: err.message };
       }
-      if (err instanceof BroodUnsupportedModeError) {
-        reply.code(400);
-        return { error: err.message };
-      }
       reply.code(500);
       return { error: (err as Error).message };
     }
   });
+}
+
+// Teardown holds a reclaim lease from its steward-membership check through each
+// Git mutation. Registration into that group, or a change to one of its rows,
+// would otherwise land after the check and lose its checkout (#717 review).
+// The check and the store write run in one synchronous step.
+function reclaimBlocks(store: SessionRepository, id: string, parentId?: string): boolean {
+  const existing = store.get(id);
+  return workspaceReclaimActive(id) ||
+    workspaceReclaimActive(parentId) ||
+    workspaceReclaimActive(existing?.parentId);
+}
+
+// Durable teardown evidence closes extraction writes: a later lifecycle PATCH
+// can move `status`, but not `torndownAt` or an admitted teardown's snapshot.
+function extractionClosed(store: SessionRepository, id: string): boolean {
+  const record = store.get(id);
+  return record?.status === "tearing-down" ||
+    record?.status === "torndown" ||
+    record?.torndownAt !== undefined ||
+    store.teardownAdmitted(id);
 }

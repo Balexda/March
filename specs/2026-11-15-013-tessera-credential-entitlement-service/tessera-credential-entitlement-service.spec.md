@@ -361,8 +361,15 @@ Recommended implementation sequence:
 | SD-005 | How should v1 handle steward pushes that touch `.github/workflows/*`? GitHub rejects those without `workflows:write`. Options: (a) leave it out of write, so such pushes fail closed and the steward escalates; (b) add an opt-in `write+workflows` access level that the policy grants per client or per repo; (c) include it in the default write profile. | Integration | Medium | Medium | open | — |
 | SD-006 | SD-001 is open between a named volume filled by `march tessera secrets import` and a host directory outside `$HOME` wired through compose `secrets:`, but FR-020, User Story 3 scenario 4 and the CLI contract make the CLI import mandatory — option 1's mechanism — so the artifacts effectively commit to it. | plan-review:Internal contradiction | Important | Low | open | — |
 | SD-007 | SD-002 is open, but User Story 3 scenario 3 and FR-019 ("each service receives its own client key and no other service's key") quietly exclude option (a) if "receives" means "can obtain", and the data model calls the client-keys file "operator-owned" although option (b) has `march up` write it. | plan-review:Internal contradiction | Important | Low | open | — |
-| SD-008 | `march doctor` must check that each service's client key is accepted (FR-040, User Story 8 scenario 6), but the only authenticated route is `POST /v1/github/token`; checking a key would mean minting a real token or sending a deliberately invalid body, and doctor's access to every plaintext key depends on SD-002. | plan-review:Logical gap | Important | Low | open | — |
 | SD-009 | The Copilot review request must happen exactly once per PR (FR-032, User Story 7 scenario 3, SC-008), but no idempotency mechanism is given: Legate's working state is rebuilt from the Herald fold, so after a restart it would request again unless a transition event in the fold or a check of GitHub's requested reviewers prevents it. | plan-review:Logical gap | Important | Low | resolved | Resolved 2026-11-16 — spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` records each request as a durable `review.requested` Herald event keyed by (PR, reviewer, head commit), rebuilt from the fold on restart. |
+
+### Resolved
+
+#### SD-008 — Non-issuing key verification
+
+**Question:** `march doctor` must check that each service's client key is accepted (FR-040, User Story 8 scenario 6), but the only authenticated route is `POST /v1/github/token`; checking a key would mean minting a real token or sending a deliberately invalid body, and doctor's access to every plaintext key depends on SD-002.
+
+**Answer:** Doctor uses the existing authenticated `GET /v1/client` from each consumer container and compares the returned identity to that service. The key stays in the container and the probe issues no GitHub credential. See the [Tessera contract](../../docs/subsystems/tessera/contract.md).
 
 ## Out of Scope
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->

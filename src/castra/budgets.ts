@@ -23,7 +23,7 @@ export const CASTRA_LAUNCH_BUDGET_MS = 240_000;
  * inspection and trust-dialog answer, and one 45s retry.
  */
 export const CASTRA_SEND_BUDGET_MS = 100_000;
-/** `DELETE /v1/sessions/:id`: the 120s `session remove --prune-worktree`. */
-export const CASTRA_REMOVE_BUDGET_MS = 120_000;
+/** `DELETE /v1/sessions/:id`: the 10s `session remove` (#717). */
+export const CASTRA_REMOVE_BUDGET_MS = 10_000;
 /** How much longer than the server's budget the client waits. */
 export const CASTRA_CLIENT_MARGIN_MS = 15_000;

@@ -248,6 +248,15 @@ Brood, Statio) read their key through `MARCH_TESSERA_CLIENT_KEY_FILE`, which
 compose points at `~/.march/tessera/keys/<client>.key`. No consumer compose file
 forwards `GH_TOKEN`/`GITHUB_TOKEN` or enables the token fallback.
 
+`march doctor` checks the published loopback `/healthz` with a timeout and
+checks `GET /v1/client` from each consumer container using its configured key
+and URL. It compares the returned client identity to the expected service and
+reports accepted, rejected, missing or unverifiable wiring. Only the verdict
+returns to Doctor. Stack container inspection reports the names of ambient
+`GH_TOKEN` and `GITHUB_TOKEN` variables that are present. Diagnostic output
+contains no credential values, fingerprints or raw environment output. See
+[March vision](../../vision.md) and [operating philosophy](../../operating-philosophy.md).
+
 ## Invariants
 
 - `/healthz` and `/status` answer without provider credentials; the service listens while every provider is unconfigured.

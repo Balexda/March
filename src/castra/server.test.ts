@@ -370,6 +370,16 @@ describe("castra server", () => {
       expect(res.json().error.code).toBe("agent_deck_error");
     });
 
+    it("reports an asynchronous agent-deck removal timeout as 502", async () => {
+      adapter = fakeAdapter({
+        remove: vi.fn().mockRejectedValue(new CastraAgentDeckError("timed out after 10000ms")),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({ method: "DELETE", url: "/v1/sessions/sess-1?profile=march" });
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error).toEqual({ code: "agent_deck_error", message: "timed out after 10000ms" });
+    });
+
     it("returns a generic message for an unexpected 500 (no internal detail leak)", async () => {
       adapter = fakeAdapter({
         list: vi.fn(() => {

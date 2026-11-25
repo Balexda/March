@@ -34,12 +34,13 @@ import type { SessionRecord } from "./types.js";
  * structurally.
  */
 export interface CastraStewardGateway {
-  listSessions(profile: string, group?: string): Promise<CastraSession[]>;
+  listSessions(profile: string, group?: string, signal?: AbortSignal): Promise<CastraSession[]>;
   removeSession(req: {
     profile: string;
     sessionId: string;
     pruneWorktree: boolean;
     traceKey?: string;
+    signal?: AbortSignal;
   }): Promise<{ removed: boolean }>;
 }
 
@@ -104,20 +105,27 @@ function sessionMatchesSteward(
  * the verified-gone signal teardown needs before marking `torndown`. Any
  * unreachable-Castra / failed-removal path returns `failed` so teardown defers
  * rather than leaking.
+ * The teardown deadline signal aborts in-flight Castra requests and stops
+ * later ones. Castra removal is idempotent and a retry re-lists sessions, so an
+ * abandoned request cannot leave a retry with a stale verdict.
  */
 export async function removeStewardViaCastra(
   gateway: CastraStewardGateway,
   steward: StewardIdentity,
+  signal?: AbortSignal,
 ): Promise<StewardRemovalResult> {
   const profile = steward.profile ?? "";
 
+  signal?.throwIfAborted();
   let sessions: CastraSession[];
   try {
-    sessions = await gateway.listSessions(profile);
+    sessions = await gateway.listSessions(profile, undefined, signal);
   } catch (err) {
+    signal?.throwIfAborted();
     // Cannot verify the steward's absence — DEFER rather than mark torndown.
     return { outcome: "failed", detail: `castra list failed: ${message(err)}`, removedIds: [] };
   }
+  signal?.throwIfAborted();
 
   const targets = sessions.filter((s) => sessionMatchesSteward(s, steward));
   if (targets.length === 0) {
@@ -127,16 +135,19 @@ export async function removeStewardViaCastra(
 
   const removedIds: string[] = [];
   for (const target of targets) {
+    signal?.throwIfAborted();
     try {
       const res = await gateway.removeSession({
         profile,
         sessionId: target.sessionId,
         pruneWorktree: false,
+        ...(signal ? { signal } : {}),
       });
       // `removed:false` here means the session vanished between list and remove
       // (a benign race) — still verified gone for that id.
       if (res.removed) removedIds.push(target.sessionId);
     } catch (err) {
+      signal?.throwIfAborted();
       // A real removal failure: the session is still live. Defer + retry.
       return {
         outcome: "failed",
@@ -144,6 +155,7 @@ export async function removeStewardViaCastra(
         removedIds,
       };
     }
+    signal?.throwIfAborted();
   }
 
   return {

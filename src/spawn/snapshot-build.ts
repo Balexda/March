@@ -190,6 +190,9 @@ export function buildSpawnImage(input: BuildSpawnImageInput): string {
  * shared layers. Today there are no aliases, so the no-force flag is
  * effectively cosmetic.
  */
+/** Upper bound on `docker image rm` during rollback/cleanup. */
+export const SPAWN_IMAGE_RM_TIMEOUT_MS = 15_000;
+
 export function removeSpawnImage(spawnId: string): void {
   const tag = spawnImageTag(spawnId);
   try {
@@ -198,6 +201,10 @@ export function removeSpawnImage(spawnId: string): void {
       // image hashes. Capture stderr to avoid noisy "no such image"
       // messages reaching the operator's terminal during rollback.
       stdio: ["ignore", "ignore", "pipe"],
+      // Rollback runs this synchronously on the Hatchery event loop; a stalled
+      // daemon must not block the cleanup steps after it.
+      timeout: SPAWN_IMAGE_RM_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
   } catch {
     // Idempotent by contract: a missing image is a successful no-op.

@@ -12,6 +12,8 @@ import type { SpawnBackend } from "../spawn/backends.js";
 // client is NOT mocked — it talks to a stubbed global fetch — so this proves the
 // real launch-time registration path fires (#172).
 
+const castraMocks = vi.hoisted(() => ({ removeSession: vi.fn(async () => ({ removed: true })) }));
+
 vi.mock("../castra/client.js", () => {
   class CastraClientError extends Error {}
   class CastraClient {}
@@ -23,7 +25,7 @@ vi.mock("../castra/client.js", () => {
       branch: req.branch,
       worktreePath: "/wt/ad-xyz",
     })),
-    removeSession: vi.fn(async () => ({ removed: true })),
+    removeSession: castraMocks.removeSession,
     sendPrompt: vi.fn(async () => {}),
   });
   return { CastraClient, CastraClientError, createCastraClientFromEnv };
@@ -53,6 +55,7 @@ vi.mock("../spawn/snapshot-build.js", () => {
 });
 
 import { runHatcherySpawn } from "./spawn-handoff.js";
+import { buildSpawnImage, removeSpawnImage } from "../spawn/snapshot-build.js";
 
 const backend: SpawnBackend = {
   name: "codex",
@@ -105,6 +108,8 @@ describe("runHatcherySpawn launch-time brood registration (#172)", () => {
         homeDir: home,
       }),
     ).rejects.toThrow(/image build failed/);
+    // A failure once the build has started still removes the spawn image.
+    expect(removeSpawnImage).toHaveBeenCalledTimes(1);
 
     const spawnRow = broodBodies.find((b) => b.kind === "spawn");
     const stewardRow = broodBodies.find((b) => b.kind === "steward");
@@ -129,6 +134,40 @@ describe("runHatcherySpawn launch-time brood registration (#172)", () => {
       repoPath: "/repo",
       worktreePath: "/wt/ad-xyz",
     });
+  });
+
+  it("rolls the launched steward back when Brood refuses it mid-reclaim", async () => {
+    const home = makeHome();
+    vi.stubGlobal("fetch", (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      broodBodies.push(body);
+      if (body.kind === "steward") {
+        return new Response(JSON.stringify({
+          error: `Session "${String(body.id)}" joins a group whose workspace is being reclaimed; retry after teardown.`,
+          code: "workspace_reclaiming",
+        }), { status: 409 });
+      }
+      return new Response(JSON.stringify(body), { status: 201 });
+    }) as unknown as typeof fetch);
+
+    await expect(
+      runHatcherySpawn({
+        repoPath: "/repo",
+        prompt: "do the thing",
+        backend,
+        agentDeckProfile: "march",
+        homeDir: home,
+      }),
+    ).rejects.toThrow(/being reclaimed/);
+
+    // Dispatch stops at registration: the steward session is removed, and
+    // nothing further runs against the reclaimed worktree.
+    expect(castraMocks.removeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "ad-xyz", profile: "march" }),
+    );
+    expect(buildSpawnImage).not.toHaveBeenCalled();
+    // No image build started, so the rollback skips the Docker image call.
+    expect(removeSpawnImage).not.toHaveBeenCalled();
   });
 
   it("does not register at launch when brood is unconfigured", async () => {

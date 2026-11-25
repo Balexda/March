@@ -82,7 +82,7 @@ Follow [March Vision](../../docs/vision.md) and the [Operating Philosophy](../..
 
 ### Tasks
 
-- [ ] **Check Tessera wiring from doctor**
+- [x] **Check Tessera wiring from doctor**
 
   Extend the probes and findings in `src/doctor/` for AS 8.6. This slice requires a recorded resolution to SD-008 and the deployed client-key wiring from US3.
 

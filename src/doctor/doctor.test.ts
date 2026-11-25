@@ -106,6 +106,7 @@ function ctx(opts: FakeOpts = {}): DoctorContext {
         return opts.castraSessions?.[p] ?? [];
       },
     },
+    tessera: { reachable: async () => false, key: async () => "unverifiable", ambient: async () => null },
     castraAuthProbe: async () => opts.castraAuth ?? "accepted",
     brood: {
       async list() {
@@ -563,4 +564,29 @@ describe("runDoctor aggregation", () => {
     expect(text).toContain("Result:");
     expect(text).toMatch(/[✓⚠✗]/);
   });
+});
+
+it("reports Tessera wiring and ambient token presence in human and JSON output", async () => {
+  const base = ctx({ profiles: [] });
+  const report = await runDoctor({
+    ...base,
+    tessera: {
+      reachable: async () => true,
+      key: async service => ({
+        hatchery: "accepted", brood: "rejected", herald: "missing",
+      } as const)[service as "hatchery" | "brood" | "herald"] ?? "unverifiable",
+      ambient: async service => service === "castra" ? ["GH_TOKEN"] : [],
+    },
+  });
+  expect(report.findings.filter(f => f.check === "tessera-wiring").map(f => [f.title, f.severity])).toEqual([
+    ["Tessera", "pass"], ["hatchery", "pass"], ["brood", "fail"],
+    ["herald", "fail"], ["legate", "warn"], ["statio", "warn"], ["castra", "warn"],
+  ]);
+  for (const output of [formatReport(report), JSON.stringify(report)]) {
+    expect(output).toContain("Tessera client key accepted");
+    expect(output).toContain("Tessera client key rejected");
+    expect(output).toContain("Tessera client key missing");
+    expect(output).toContain("Tessera client key unverifiable");
+    expect(output).toContain("ambient GitHub credential present (GH_TOKEN)");
+  }
 });

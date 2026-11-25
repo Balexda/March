@@ -588,11 +588,12 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       const result = await withCastraSpanAsync(
         { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
         async (span) => {
+          const removal = await adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
           request.log.info(
             { "castra.op": "remove", ...removeFields, ...traceLogFields(span) },
             "castra session removed",
           );
-          return adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
+          return removal;
         },
       );
       return { ok: true, removed: result.removed };

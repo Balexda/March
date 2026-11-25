@@ -1,6 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import {
   teardownSession,
   type TeardownDeps,
 } from "./teardown.js";
+import type { SessionRecord, ExtractionResult } from "./types.js";
 import type { TeardownSubstrate } from "./substrate.js";
 
 const tmpDirs: string[] = [];
@@ -40,6 +42,13 @@ interface Recorder {
 }
 
 /** Build injectable deps that record the order + arguments of side effects. */
+
+function lastFinished(home: string, id: string): { stewardIds?: string[] } {
+  const entries = fs.readFileSync(path.join(broodArchiveDir(id, home), "teardown.ndjson"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line) as { event?: string; stewardIds?: string[] });
+  return entries.filter((entry) => entry.event === "finished").at(-1) ?? {};
+}
+
 function recordingDeps(
   home: string,
   overrides: Partial<TeardownDeps> = {},
@@ -54,6 +63,7 @@ function recordingDeps(
   // Substrate adapter (#169): spawn + workspace reclamation behind one
   // injectable seam, mirroring how teardown depends on it in production.
   const substrate: TeardownSubstrate = {
+    stopCompute: async ({ sessionId }) => ({ outcome: "already-stopped", containerId: sessionId }),
     removeCompute: async ({ sessionId }) => {
       calls.push(`container:${sessionId}`);
     },
@@ -208,7 +218,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     store.close();
   });
 
-  it("continues after a failing step and records a warning", async () => {
+  it("defers workspace cleanup when compute removal fails and records a warning", async () => {
     const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
@@ -225,11 +235,48 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const containerStep = result.steps.find((s) => s.step === "container");
     expect(containerStep?.outcome).toBe("failed");
     expect(result.warnings.some((w) => w.includes("docker daemon down"))).toBe(true);
-    // Later steps still ran.
-    expect(result.steps.find((s) => s.step === "worktree")?.outcome).toBe("ok");
-    expect(result.steps.find((s) => s.step === "branch")?.outcome).toBe("ok");
+    // Steward removal still runs, but Git cleanup waits for verified compute absence.
+    expect(rec.calls).toContain(`steward:${group.stewardId}`);
+    for (const step of ["worktree", "branch"] as const) {
+      expect(result.steps.find((s) => s.step === step)).toEqual({
+        step, outcome: "skipped", detail: "deferred: compute removal failed",
+      });
+    }
+    expect(rec.calls.some((c) => c.startsWith("worktree:") || c.startsWith("branch:"))).toBe(false);
     expect(result.status).toBe("tearing-down");
     expect(store.get(group.spawnId)?.status).toBe("tearing-down");
+    store.close();
+  });
+
+  it("defers workspace cleanup when removal after a verified stop fails, then retries", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    const removeCompute = vi.fn<TeardownSubstrate["removeCompute"]>(async () => {
+      throw new Error("container restarted after stop check");
+    });
+    rec.deps.substrate = {
+      ...rec.deps.substrate!,
+      stopCompute: async () => ({ outcome: "stopped", containerId: "c".repeat(64) }),
+      removeCompute,
+    };
+
+    const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    expect(result.steps.find((s) => s.step === "stop")?.outcome).toBe("ok");
+    expect(result.steps.find((s) => s.step === "container")?.outcome).toBe("failed");
+    expect(removeCompute.mock.calls[0]?.[1]).toEqual({ outcome: "stopped", containerId: "c".repeat(64) });
+    expect(result.steps.find((s) => s.step === "worktree")?.detail).toBe("deferred: compute removal failed");
+    expect(result.steps.find((s) => s.step === "branch")?.detail).toBe("deferred: compute removal failed");
+    expect(rec.calls.some((c) => c.startsWith("worktree:") || c.startsWith("branch:"))).toBe(false);
+    expect(result.status).toBe("tearing-down");
+
+    removeCompute.mockResolvedValue(undefined);
+    const retry = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+    expect(retry.status).toBe("torndown");
+    expect(retry.steps.find((s) => s.step === "worktree")?.outcome).toBe("ok");
+    expect(retry.steps.find((s) => s.step === "branch")?.outcome).toBe("ok");
     store.close();
   });
 
@@ -317,6 +364,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const store = new SessionStore({ homeDir });
     const { spawnId, stewardId } = seedSpawnGroup(store);
     store.update(spawnId, { status: "running", failureReason: "original failure" });
+    const original = { session: store.get(spawnId), spawn: store.get(spawnId), steward: store.get(stewardId) };
     const archive = broodArchiveDir(spawnId, homeDir);
     fs.mkdirSync(path.dirname(archive), { recursive: true });
     fs.writeFileSync(archive, "blocks archive directory creation");
@@ -351,6 +399,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       restarted.close();
     }
 
+    expect(JSON.parse(fs.readFileSync(path.join(archive, "record.json"), "utf8"))).toEqual(original);
     const reopened = new SessionStore({ homeDir });
     try {
       expect(reopened.get(spawnId)).toMatchObject({
@@ -377,7 +426,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(removeCompute).toHaveBeenCalledOnce();
     expect(removeCompute).toHaveBeenCalledWith({
       sessionId: "ephemeral", kind: "legate", containerName: "march-legate-ephemeral",
-    });
+    }, { outcome: "already-stopped", containerId: "ephemeral" }, expect.any(AbortSignal));
     expect(result.status).toBe("torndown");
     // The standalone legate row itself is archived, captured before tearing-down.
     const snapshot = JSON.parse(
@@ -416,6 +465,798 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
       "logs for container-aaa",
     );
     store.close();
+  });
+
+  it("archives validated registry evidence before removal and keeps worktree files out", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const worktreePath = path.join(home, "worktree");
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "unrelated.txt"), "worktree evidence");
+    const patchText = "registry patch\n";
+    const sha256 = createHash("sha256").update(patchText).digest("hex");
+    const extractionResult: ExtractionResult = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, sha256, touchedPaths: [] },
+    };
+    store.update(spawnId, { worktreePath, extractionResult });
+    const dir = broodArchiveDir(spawnId, home);
+    const rec = recordingDeps(home);
+    const remove = vi.spyOn(rec.deps.substrate!, "removeCompute").mockImplementation(async () => {
+      expect(fs.readdirSync(dir).sort()).toEqual([
+        "artifacts", "container.log", "record.json", "teardown.ndjson",
+      ]);
+      expect(fs.readdirSync(path.join(dir, "artifacts")).sort()).toEqual([
+        "extraction-result.json", "spawn.patch",
+      ]);
+      expect(fs.readFileSync(path.join(dir, "container.log"), "utf8")).toBe("logs for container-aaa");
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "artifacts", "extraction-result.json"), "utf8")))
+        .toEqual(extractionResult);
+      expect(createHash("sha256").update(fs.readFileSync(path.join(dir, "artifacts", "spawn.patch")))
+        .digest("hex")).toBe(sha256);
+    });
+    try {
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(remove).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("serializes group requests and journals a failed steward removal followed by a retry", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const original = { session: store.get(spawnId), spawn: store.get(spawnId), steward: store.get(stewardId) };
+    const rec = recordingDeps(home);
+    const dir = broodArchiveDir(spawnId, home);
+    const snapshotPath = path.join(dir, "record.json");
+    const journalPath = path.join(dir, "teardown.ndjson");
+    const available = rec.deps.readContainerLogs!;
+    rec.deps.readContainerLogs = vi.fn(available).mockImplementationOnce(available)
+      .mockImplementation(() => { throw new Error("container gone"); });
+    let firstSnapshot: string | undefined;
+    const removeSteward = rec.deps.removeSteward!;
+    rec.deps.removeSteward = vi.fn(removeSteward).mockImplementationOnce(async () => {
+      firstSnapshot = fs.readFileSync(snapshotPath, "utf8");
+      return { outcome: "failed", removedIds: [], detail: "unavailable" };
+    });
+
+    try {
+      const [first, retry] = await Promise.all([
+        teardownSession(store, spawnId, { reason: "cleanup" }, rec.deps),
+        teardownSession(store, stewardId, {}, rec.deps),
+      ]);
+      expect(first.status).toBe("tearing-down");
+      expect(retry.status).toBe("torndown");
+      expect(retry.warnings).toContain("container logs unavailable: container gone");
+      expect(fs.readFileSync(path.join(dir, "container.log"), "utf8")).toBe("logs for container-aaa");
+      expect(fs.readFileSync(snapshotPath, "utf8")).toBe(firstSnapshot);
+      expect(JSON.parse(firstSnapshot!)).toEqual(original);
+      const history = fs.readFileSync(journalPath, "utf8");
+      const entries = history.trim().split("\n").map((line) => JSON.parse(line));
+      expect(entries).toMatchObject([
+        { attempt: 1, event: "started", at: expect.any(String), request: { force: false, kill: false, reason: "cleanup" } },
+        { attempt: 1, event: "finished", at: expect.any(String), status: first.status, steps: JSON.parse(JSON.stringify(first.steps)), warnings: first.warnings },
+        { attempt: 2, event: "started", at: expect.any(String), request: { force: false, kill: false } },
+        { attempt: 2, event: "finished", at: expect.any(String), status: retry.status, steps: JSON.parse(JSON.stringify(retry.steps)), warnings: retry.warnings },
+      ]);
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).steps).toEqual([]);
+      expect(fs.readFileSync(journalPath, "utf8")).toBe(history);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps legacy snapshot bytes and treats malformed extraction as an optional source", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    store.update(spawnId, {
+      extractionResult: { status: "succeeded" } as SessionRecord["extractionResult"],
+    });
+    const dir = broodArchiveDir(spawnId, home);
+    fs.mkdirSync(dir, { recursive: true });
+    const legacy = '{"spawn":{"status":"stopped"},"torndownAt":"legacy"}\n';
+    const snapshot = path.join(dir, "record.json");
+    fs.writeFileSync(snapshot, legacy);
+    try {
+      const result = await teardownSession(store, spawnId, {}, recordingDeps(home).deps);
+      expect(result.status).toBe("torndown");
+      expect(result.warnings).toContain("registry extraction result unavailable or malformed");
+      expect(fs.existsSync(path.join(dir, "artifacts"))).toBe(false);
+      expect(fs.readFileSync(snapshot, "utf8")).toBe(legacy);
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each(["record.json", "teardown.ndjson", "container.log", "artifacts/extraction-result.json", "artifacts/spawn.patch"])(
+    "blocks removal when the archive cannot write %s", async (blockedFile) => {
+      const home = makeHome();
+      const store = new SessionStore({ dbPath: ":memory:" });
+      const { spawnId } = seedSpawnGroup(store);
+      const patchText = "registry patch";
+      store.update(spawnId, { extractionResult: {
+        spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+        patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+          sha256: createHash("sha256").update(patchText).digest("hex") },
+      } });
+      const blocked = path.join(broodArchiveDir(spawnId, home), blockedFile);
+      let failedAppend: ReturnType<typeof vi.spyOn> | undefined;
+      if (blockedFile === "teardown.ndjson") {
+        const rename = fs.promises.rename;
+        failedAppend = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+          if (target === blocked) throw new Error("journal unavailable");
+          await rename(source, target);
+        });
+      } else {
+        fs.mkdirSync(blocked, { recursive: true });
+      }
+      const rec = recordingDeps(home);
+      try {
+        const result = await teardownSession(store, spawnId, {}, rec.deps);
+        expect(result.status).toBe("tearing-down");
+        expect(result.steps[0]).toMatchObject({ step: "archive", outcome: "failed" });
+        expect(result.steps.slice(1).every(({ outcome }) => outcome === "skipped")).toBe(true);
+        expect(rec.calls.filter((call) => !call.startsWith("logs:"))).toEqual([]);
+      } finally {
+        failedAppend?.mockRestore();
+        store.close();
+      }
+    },
+  );
+
+  it.each([false, true])("distinguishes source and archive digest mismatches (read-back: %s)", async (readBack) => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "registry patch";
+    const patchPath = path.join(broodArchiveDir(spawnId, home), "artifacts", "spawn.patch");
+    store.update(spawnId, { extractionResult: {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(readBack ? patchText : "different text").digest("hex") },
+    } });
+    const rec = recordingDeps(home);
+    const readFile = fs.promises.readFile;
+    const spy = readBack ? vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) =>
+      file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options)) : undefined;
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe(readBack ? "tearing-down" : "torndown");
+      expect(result.steps[0]?.outcome).toBe(readBack ? "failed" : "ok");
+      expect(result.warnings).toContain(readBack
+        ? "archive failed: archived extraction patch digest mismatch"
+        : "registry extraction patch digest mismatch");
+      expect(fs.existsSync(patchPath)).toBe(readBack);
+      expect(rec.calls.includes(`container:${spawnId}`)).toBe(!readBack);
+    } finally {
+      spy?.mockRestore();
+      store.close();
+    }
+  });
+
+  it("keeps the archived patch and registry result consistent across source changes", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "original registry patch";
+    const result = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(patchText).digest("hex") },
+    } satisfies ExtractionResult;
+    store.update(spawnId, { extractionResult: result });
+    const artifacts = path.join(broodArchiveDir(spawnId, home), "artifacts");
+    const resultPath = path.join(artifacts, "extraction-result.json");
+    const patchPath = path.join(artifacts, "spawn.patch");
+    const retryable = recordingDeps(home, {
+      removeSteward: async () => ({ outcome: "failed", detail: "unavailable", removedIds: [] }),
+    }).deps;
+    try {
+      expect((await teardownSession(store, spawnId, {}, retryable)).status).toBe("tearing-down");
+      store.update(spawnId, {
+        extractionResult: { ...result, patch: { ...result.patch, patchText: "changed bytes" } },
+      });
+      const mismatch = await teardownSession(store, spawnId, {}, retryable);
+      expect(mismatch.warnings).toContain("registry extraction patch digest mismatch");
+      expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toEqual(result);
+      expect(fs.readFileSync(patchPath, "utf8")).toBe(patchText);
+
+      const failure = {
+        spawnId, backend: "codex", status: "failed",
+        failureReason: "no changes exported", extractedAt: result.extractedAt,
+      } satisfies ExtractionResult;
+      store.update(spawnId, { extractionResult: failure });
+      const retry = await teardownSession(store, spawnId, {}, recordingDeps(home).deps);
+      expect(retry.status).toBe("torndown");
+      expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toEqual(failure);
+      expect(fs.existsSync(patchPath)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps an unmatched start when journal finalization fails after removal", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const dir = broodArchiveDir(spawnId, home);
+    const journal = path.join(dir, "teardown.ndjson");
+    const rename = fs.promises.rename;
+    const spy = vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+      if (target === journal && fs.existsSync(journal)) throw new Error("archive unavailable");
+      await rename(source, target);
+    });
+    const rec = recordingDeps(home);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.steps.find(({ step }) => step === "container")?.outcome).toBe("ok");
+      expect(result.warnings).toContain("archive finalization failed: archive unavailable");
+      expect(store.get(spawnId)?.status).toBe("tearing-down");
+      const interrupted = fs.readFileSync(journal, "utf8");
+      expect(JSON.parse(interrupted)).toMatchObject({ attempt: 1, event: "started" });
+      const snapshot = fs.readFileSync(path.join(dir, "record.json"), "utf8");
+      spy.mockRestore();
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(fs.readFileSync(path.join(dir, "record.json"), "utf8")).toBe(snapshot);
+      const history = fs.readFileSync(journal, "utf8");
+      expect(history.startsWith(interrupted)).toBe(true);
+      expect(history.trim().split("\n").map((line) => JSON.parse(line))).toMatchObject([
+        { attempt: 1, event: "started" },
+        { attempt: 2, event: "started" },
+        { attempt: 2, event: "finished", status: "torndown" },
+      ]);
+    } finally {
+      spy.mockRestore();
+      store.close();
+    }
+  });
+
+  it("recovers the registry after a restart following journal finalization", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.update(spawnId, { status: "running" });
+    const update = store.update.bind(store);
+    vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    const journal = path.join(broodArchiveDir(spawnId, homeDir), "teardown.ndjson");
+    try {
+      await expect(teardownSession(store, spawnId, { force: true }, rec.deps))
+        .rejects.toThrow("registry unavailable");
+      expect(store.get(spawnId)?.status).toBe("tearing-down");
+    } finally {
+      store.close();
+    }
+
+    const restarted = new SessionStore({ homeDir });
+    try {
+      const history = fs.readFileSync(journal, "utf8");
+      const finished = JSON.parse(history.trim().split("\n").at(-1)!);
+      expect(finished).toMatchObject({ event: "finished", status: "torndown" });
+      rec.calls.length = 0;
+      const read = fs.promises.readFile;
+      const unavailable = vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) => {
+        if (file === journal) throw new Error("archive unavailable");
+        return read(file, options);
+      });
+      try {
+        const deferred = await teardownSession(restarted, stewardId, {}, rec.deps);
+        expect(deferred).toMatchObject({ status: "tearing-down", warnings: ["archive recovery failed: archive unavailable"] });
+        expect(restarted.pendingTeardownCompletion(spawnId)).toBe(finished.attempt);
+      } finally {
+        unavailable.mockRestore();
+      }
+      const result = await teardownSession(restarted, stewardId, {}, rec.deps);
+      expect(result).toMatchObject({ status: "torndown", steps: [], warnings: [] });
+      for (const id of [spawnId, stewardId]) {
+        expect(restarted.get(id)).toMatchObject({ status: finished.status, torndownAt: finished.at });
+      }
+      expect(rec.calls).toEqual([]);
+      expect(fs.readFileSync(journal, "utf8")).toBe(history);
+
+      restarted.update(spawnId, { status: "running" });
+      await expect(teardownSession(restarted, spawnId, {}, rec.deps))
+        .rejects.toBeInstanceOf(BroodConflictError);
+      expect(restarted.get(spawnId)?.status).toBe("running");
+      expect(fs.readFileSync(journal, "utf8")).toBe(history);
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it("reconciles a pending completion after a status-only PATCH without repeating cleanup", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.update(spawnId, { status: "stopped" });
+      rec.calls.length = 0;
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result).toMatchObject({ status: "torndown", steps: [] });
+      expect(rec.calls).toEqual([]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("recovers only the steward the completed attempt verified", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      // The failed transaction rolled back the verified steward's update.
+      expect(store.get(stewardId)?.status).toBe("tearing-down");
+      store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+      created.length = 0;
+      rec.calls.length = 0;
+
+      const result = await teardownSession(store, "ad-session-bbb", {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings).toEqual([expect.stringContaining('"ad-session-bbb"')]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("torndown");
+      expect(store.get("ad-session-bbb")?.status).toBe("running");
+      const root = created.find((span) => span.name === "brood.teardown");
+      expect(root?.attributes["march.teardown.outcome"]).toBe("partial");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("tears down a re-registered resource identity instead of recovering over it", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({
+        id: spawnId, kind: "spawn", status: "running", containerId: "container-new", worktreePath: "/wt/new",
+      });
+      rec.calls.length = 0;
+      rec.deps.pathExists = (candidate) => candidate === "/wt/new";
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toBeInstanceOf(BroodConflictError);
+      expect(store.get(spawnId)?.status).toBe("running");
+
+      const result = await teardownSession(store, spawnId, { force: true }, rec.deps);
+      expect(result.status).toBe("torndown");
+      expect(result.steps.map((step) => step.step)).toEqual(["stop", "archive", "container", "steward", "worktree", "branch"]);
+      expect(rec.calls).toContain("logs:container-new");
+      expect(rec.worktreeTargets).toContainEqual(expect.objectContaining({ worktreePath: "/wt/new" }));
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a spawn-addressed recovery open until every later steward is removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+      rec.calls.length = 0;
+
+      const recovered = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(recovered.status).toBe("tearing-down");
+      const firstTorndownAt = store.get(spawnId)?.torndownAt;
+      expect(firstTorndownAt).toBeDefined();
+      expect(recovered.warnings).toEqual([expect.stringContaining('"ad-session-bbb"')]);
+      expect(store.get(stewardId)?.status).toBe("torndown");
+      expect(store.get("ad-session-bbb")?.status).toBe("running");
+
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-bbb");
+      expect(store.get("ad-session-bbb")?.status).toBe("torndown");
+      expect(store.get(spawnId)?.torndownAt).toBe(firstTorndownAt);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("removes every live steward under the spawn before reclaiming the shared worktree", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+    store.register({ id: "ad-session-ccc", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("torndown");
+      const stewardCalls = rec.calls.filter((call) => call.startsWith("steward:"));
+      expect(stewardCalls).toHaveLength(3);
+      for (const id of [stewardId, "ad-session-bbb", "ad-session-ccc"]) {
+        expect(store.get(id)?.status, id).toBe("torndown");
+      }
+      const lastSteward = Math.max(...stewardCalls.map((call) => rec.calls.indexOf(call)));
+      const firstGit = rec.calls.findIndex((call) => call.startsWith("worktree:") || call.startsWith("branch:"));
+      if (firstGit >= 0) expect(firstGit).toBeGreaterThan(lastSteward);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("defers worktree cleanup when a second steward under the spawn cannot be removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-ccc", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => input.sessionId === "ad-session-ccc"
+      ? (rec.calls.push(`steward:${input.sessionId}`), { outcome: "failed", detail: "still live", removedIds: [] })
+      : remove(input);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).not.toBe("torndown");
+      expect(result.warnings.join("\n")).toContain("ad-session-ccc");
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(store.get("ad-session-ccc")?.status).not.toBe("torndown");
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([stewardId]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("defers Git cleanup when a steward registers while another is being removed", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      if (!store.get("ad-session-late")) {
+        store.register({ id: "ad-session-late", kind: "steward", parentId: spawnId, status: "running" });
+      }
+      return remove(input);
+    };
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings.join("\n")).toContain('"ad-session-late"');
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(result.steps.find((step) => step.step === "worktree")?.detail)
+        .toBe("deferred: steward registered or changed during teardown");
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([stewardId]);
+
+      rec.calls.length = 0;
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-late");
+      expect(store.get("ad-session-late")?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("defers Git cleanup when a removed steward's Castra session changes mid-teardown", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "ad-session-bbb", kind: "steward", parentId: spawnId, status: "running" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      if (input.sessionId === "ad-session-bbb") {
+        store.update(stewardId, { agentDeckSessionId: "ad-session-yyy" });
+      }
+      return remove(input);
+    };
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("tearing-down");
+      expect(result.warnings.join("\n")).toContain(`"${stewardId}"`);
+      expect(rec.calls.some((call) => call.startsWith("worktree:") || call.startsWith("branch:"))).toBe(false);
+      expect(store.get(stewardId)?.status).not.toBe("torndown");
+
+      rec.deps.removeSteward = remove;
+      rec.calls.length = 0;
+      const retried = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(retried.status).toBe("torndown");
+      expect(rec.calls).toContain("steward:ad-session-yyy");
+      expect(store.get(stewardId)?.status).toBe("torndown");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("journals no verified stewards when archiving fails before removal", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "registry patch";
+    const patchPath = path.join(broodArchiveDir(spawnId, homeDir), "artifacts", "spawn.patch");
+    store.update(spawnId, { extractionResult: {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, touchedPaths: [],
+        sha256: createHash("sha256").update(patchText).digest("hex") },
+    } });
+    const readFile = fs.promises.readFile;
+    const spy = vi.spyOn(fs.promises, "readFile").mockImplementation(async (file, options) =>
+      file === patchPath ? Buffer.from("corrupt archive") : readFile(file, options));
+    const rec = recordingDeps(homeDir);
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.steps[0]?.outcome).toBe("failed");
+      expect(rec.calls.some((call) => call.startsWith("steward:"))).toBe(false);
+      expect(lastFinished(homeDir, spawnId).stewardIds).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      store.close();
+    }
+  });
+
+  describe("standalone steward primary", () => {
+    const soloId = "ad-session-solo";
+    const seedSolo = (store: SessionStore) => store.register({
+      id: soloId, kind: "steward", agentDeckSessionId: soloId, profile: "march", status: "running",
+    });
+
+    it("completes an unchanged standalone steward", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const rec = recordingDeps(homeDir);
+      try {
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+
+    it("keeps a standalone steward retryable when its Castra session changes mid-teardown", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const rec = recordingDeps(homeDir);
+      const remove = rec.deps.removeSteward!;
+      rec.deps.removeSteward = async (input) => {
+        const result = await remove(input);
+        store.update(soloId, { agentDeckSessionId: "ad-session-yyy" });
+        return result;
+      };
+      try {
+        const result = await teardownSession(store, soloId, {}, rec.deps);
+        expect(result.status).toBe("tearing-down");
+        expect(result.warnings.join("\n")).toContain(`"${soloId}"`);
+        expect(store.get(soloId)?.status).toBe("tearing-down");
+
+        rec.deps.removeSteward = remove;
+        rec.calls.length = 0;
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-yyy");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+
+    it("does not recover a standalone steward whose Castra session changed", async () => {
+      const homeDir = makeHome();
+      const store = new SessionStore({ homeDir });
+      seedSolo(store);
+      const update = store.update.bind(store);
+      const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+        if (id === soloId && changes.status === "torndown") throw new Error("registry unavailable");
+        return update(id, changes);
+      });
+      const rec = recordingDeps(homeDir);
+      try {
+        await expect(teardownSession(store, soloId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+        fail.mockRestore();
+        store.update(soloId, { agentDeckSessionId: "ad-session-yyy" });
+        rec.calls.length = 0;
+        expect((await teardownSession(store, soloId, {}, rec.deps)).status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-yyy");
+        expect(store.get(soloId)?.status).toBe("torndown");
+      } finally {
+        store.close();
+      }
+    });
+  });
+
+  it("leaves a steward that moved to another spawn mid-teardown under its new owner", async () => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "20260520-qqqqqq", kind: "spawn", status: "stopped" });
+    const rec = recordingDeps(homeDir);
+    const remove = rec.deps.removeSteward!;
+    rec.deps.removeSteward = async (input) => {
+      const result = await remove(input);
+      store.register({ id: stewardId, kind: "steward", parentId: "20260520-qqqqqq", status: "running" });
+      return result;
+    };
+    try {
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      expect(store.get(stewardId)).toMatchObject({ parentId: "20260520-qqqqqq", status: "running" });
+      expect(store.get(stewardId)?.torndownAt).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    ["re-parented to another spawn", { parentId: "20260520-qqqqqq" }, false],
+    ["re-registered with a new Castra session", { agentDeckSessionId: "ad-session-new" }, true],
+  ] as const)("does not recover a verified steward that was %s", async (_label, change, sameSpawn) => {
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({ id: "20260520-qqqqqq", kind: "spawn", status: "stopped" });
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      store.register({ id: stewardId, kind: "steward", status: "running", ...change });
+      rec.calls.length = 0;
+
+      const recovered = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(rec.calls).toEqual([]);
+      expect(store.get(spawnId)?.status).toBe("torndown");
+      expect(store.get(stewardId)?.status).toBe("running");
+      expect(recovered.status).toBe(sameSpawn ? "tearing-down" : "torndown");
+      if (sameSpawn) {
+        expect(recovered.warnings.join("\n")).toContain(`"${stewardId}"`);
+        const retried = await teardownSession(store, spawnId, {}, rec.deps);
+        expect(retried.status).toBe("torndown");
+        expect(rec.calls).toContain("steward:ad-session-new");
+        expect(store.get(stewardId)?.status).toBe("torndown");
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records a successful registry recovery in the teardown span", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const homeDir = makeHome();
+    const store = new SessionStore({ homeDir });
+    const { spawnId } = seedSpawnGroup(store);
+    const update = store.update.bind(store);
+    const fail = vi.spyOn(store, "update").mockImplementation((id, changes) => {
+      if (id === spawnId && changes.status === "torndown") throw new Error("registry unavailable");
+      return update(id, changes);
+    });
+    const rec = recordingDeps(homeDir);
+    try {
+      await expect(teardownSession(store, spawnId, {}, rec.deps)).rejects.toThrow("registry unavailable");
+      fail.mockRestore();
+      created.length = 0;
+      expect((await teardownSession(store, spawnId, {}, rec.deps)).status).toBe("torndown");
+      const root = created.find((span) => span.name === "brood.teardown");
+      expect(root?.attributes["march.teardown.outcome"]).toBe("success");
+      expect(root?.status.code).not.toBe(SpanStatusCode.ERROR);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("archives an extraction result committed while container logs are read", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    const patchText = "late patch\n";
+    const sha256 = createHash("sha256").update(patchText).digest("hex");
+    const extractionResult: ExtractionResult = {
+      spawnId, backend: "codex", status: "succeeded", extractedAt: "2026-08-19T00:00:00Z",
+      patch: { spawnId, backend: "codex", patchText, sha256, touchedPaths: [] },
+    };
+    const rec = recordingDeps(home, {
+      readContainerLogs: async () => {
+        store.update(spawnId, { extractionResult });
+        return "logs";
+      },
+    });
+    try {
+      const result = await teardownSession(store, spawnId, {}, rec.deps);
+      expect(result.status).toBe("torndown");
+      expect(result.warnings).not.toContain("registry extraction result unavailable or malformed");
+      expect(fs.readFileSync(path.join(broodArchiveDir(spawnId, home), "artifacts", "spawn.patch"), "utf8"))
+        .toBe(patchText);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("queues a steward on its new spawn's archive when it is re-parented while waiting", async () => {
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId, stewardId } = seedSpawnGroup(store);
+    store.register({
+      id: "20260520-bbbbbb", kind: "spawn", status: "stopped", repoPath: "/repo",
+      branch: "march/spawn/20260520-bbbbbb", worktreePath: "/wt/bbbbbb", containerId: "container-bbb",
+    });
+    let releaseP!: () => void;
+    let releaseQ!: () => void;
+    const gateP = new Promise<void>((resolve) => { releaseP = resolve; });
+    const gateQ = new Promise<void>((resolve) => { releaseQ = resolve; });
+    const order: string[] = [];
+    const rec = recordingDeps(home, {
+      readContainerLogs: async (containerId) => {
+        order.push(`start:${containerId}`);
+        if (containerId === "container-aaa") await gateP;
+        if (containerId === "container-bbb" && !order.includes("end:container-bbb")) await gateQ;
+        order.push(`end:${containerId}`);
+        return "logs";
+      },
+    });
+    try {
+      const first = teardownSession(store, spawnId, { reason: "P" }, rec.deps);
+      await vi.waitFor(() => expect(order).toContain("start:container-aaa"));
+      const queued = teardownSession(store, stewardId, { reason: "steward" }, rec.deps);
+      // Re-parent the waiting steward, then start Q's teardown.
+      store.register({ id: stewardId, kind: "steward", parentId: "20260520-bbbbbb" });
+      const q = teardownSession(store, "20260520-bbbbbb", { reason: "Q" }, rec.deps);
+      await vi.waitFor(() => expect(order).toContain("start:container-bbb"));
+      releaseP();
+      await first;
+      // The re-parented request must wait for Q rather than run beside it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(order.filter((entry) => entry === "start:container-bbb")).toHaveLength(1);
+      releaseQ();
+      await Promise.all([q, queued]);
+      const journal = fs.readFileSync(
+        path.join(broodArchiveDir("20260520-bbbbbb", home), "teardown.ndjson"), "utf8",
+      ).trim().split("\n").map((line) => JSON.parse(line));
+      expect(journal.map((entry) => `${entry.attempt}:${entry.event}`)).toEqual(
+        journal.map((_, index) => `${Math.floor(index / 2) + 1}:${index % 2 ? "finished" : "started"}`),
+      );
+    } finally {
+      store.close();
+    }
   });
 
   it("defers worktree + branch when steward removal fails (does not orphan a live checkout)", async () => {
@@ -522,16 +1363,36 @@ describe.skipIf(!sqliteAvailable)("teardownSession tracing", () => {
     try {
       await expect(teardownSession(store, "missing", {}, deps)).rejects.toThrow(/No session/);
       await expect(teardownSession(store, stewardId, {}, deps)).rejects.toThrow(/Pass force/);
-      await expect(teardownSession(store, spawnId, { kill: true, force: true }, deps))
-        .rejects.toThrow(/unsupported/);
+      await expect(teardownSession(store, spawnId, { kill: true }, deps))
+        .rejects.toThrow(/Pass force/);
       expect(created.map((span) => span.attributes["march.teardown.outcome"]))
-        .toEqual(["not-found", "conflict", "unsupported-mode"]);
+        .toEqual(["not-found", "conflict", "conflict"]);
       for (const span of created) {
         expect(span.name).toBe("brood.teardown");
         expect(span.ended).toBe(true);
         expect(span.status.code).toBe(SpanStatusCode.ERROR);
         expect(span.spanContext().traceId).toBe(traceId);
         expect(span.parentSpanContext?.spanId).toBe(spanId);
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("ends the teardown and archive spans with errors when evidence cannot be saved", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const home = makeHome();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const { spawnId } = seedSpawnGroup(store);
+    fs.mkdirSync(path.join(broodArchiveDir(spawnId, home), "container.log"), { recursive: true });
+    try {
+      expect((await teardownSession(store, spawnId, {}, recordingDeps(home).deps)).status)
+        .toBe("tearing-down");
+      for (const name of ["brood.teardown", "brood.teardown.archive"]) {
+        const span = created.find((candidate) => candidate.name === name);
+        expect(span?.ended, name).toBe(true);
+        expect(span?.status.code, name).toBe(SpanStatusCode.ERROR);
       }
     } finally {
       store.close();
