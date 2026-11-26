@@ -33,7 +33,7 @@
   _Acceptance criteria:_
 
   - Match open PRs by target repository and exact source repository and head. Return the existing record on retry, including after a concurrent creation or ambiguous response.
-  - Count a matched open PR as reused only when its base equals the resolved base. A matched PR on any other base must not be returned as a successful publication. It yields a defined non-success outcome that carries the existing PR's number and base (SD-004).
+  - Among matched open PRs, reuse one whose base equals the resolved base. Only when no matched PR targets the resolved base, return a defined non-success outcome that carries the mismatched PR's number and base. Never report that case as a successful publication (SD-004).
   - If only closed PRs exist, attempt a fresh PR. Use the configured base or the repository's authoritative default. An unresolved base prevents creation.
   - Return the contract's PR record on success. Auth, permission, network, and timeout failures return a stable terminal reason, pushed branch, commit, and bounded redacted diagnostic.
   - Bound lookup and creation without prompts. Emit deterministic slice child spans, errored on failure. Update affected subsystem contracts.
@@ -48,7 +48,11 @@
 |----|-------|-----------------|--------|------------|--------|
 | SD-002 | Terminal outcome persistence owner | Domain & Data Model | Medium | Medium | spec:SD-002 |
 | SD-003 | Pre-PR verification policy | Functional Scope | Medium | Medium | spec:SD-003 |
-| SD-004 | Outcome when an open PR on the same head targets a different base (terminal failure, or retarget). FR-011 and the contracts key reuse on the head branch alone | Data Integrity & Integration | Medium | Medium | local |
+| SD-004 | Open PR on the same head targets a different base | Data Integrity & Integration | Medium | Medium | local |
+
+### SD-004 — Open PR on the same head targets a different base
+
+When the only open PR for the integration head targets a base other than the resolved base, should integration fail terminally or retarget that PR? FR-011 and the contracts key reuse on the head branch alone, and the data model does not validate `baseBranch` on reuse. This slice only requires that the case is not reported as success. US5 needs the chosen outcome to record terminal state.
 
 ## Open Implementation Questions
 
