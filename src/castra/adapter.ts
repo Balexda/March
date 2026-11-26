@@ -359,14 +359,21 @@ export function pickLaunchedSession(
 
 class AgentDeckExecError extends Error {
   readonly stderr: string;
+  /** The `{error, code}` a `--json` agent-deck reported on stdout, if any. */
+  readonly jsonError?: AgentDeckJsonError;
   /** The command was killed at its timeout: it did not finish, whatever it printed. */
   readonly timedOut: boolean;
   /** The command's output passed the capture limit and it was killed. */
   readonly outputLimit: boolean;
-  constructor(message: string, stderr: string, flags: { timedOut?: boolean; outputLimit?: boolean } = {}) {
+  constructor(
+    message: string,
+    stderr: string,
+    flags: { timedOut?: boolean; outputLimit?: boolean; jsonError?: AgentDeckJsonError } = {},
+  ) {
     super(message);
     this.name = "AgentDeckExecError";
     this.stderr = stderr;
+    if (flags.jsonError) this.jsonError = flags.jsonError;
     this.timedOut = flags.timedOut ?? false;
     this.outputLimit = flags.outputLimit ?? false;
   }
@@ -380,13 +387,57 @@ class AgentDeckExecError extends Error {
 function reportedMissing(err: unknown): boolean {
   const e = err as Partial<AgentDeckExecError>;
   if (e.timedOut || e.outputLimit) return false;
-  return looksLikeNotFound(e.stderr ?? "");
+  // A --json agent-deck reports a missing session on stdout (code NOT_FOUND),
+  // leaving stderr empty.
+  if (e.jsonError?.code === "NOT_FOUND") return true;
+  return looksLikeNotFound(e.stderr ?? "") || looksLikeNotFound(e.jsonError?.error ?? "");
 }
 
 function stderrText(stderr: unknown): string {
   if (Buffer.isBuffer(stderr)) return stderr.toString("utf-8").trimEnd();
   if (typeof stderr === "string") return stderr.trimEnd();
   return "";
+}
+
+/** The failure a `--json` agent-deck reported: `{"success":false,"error":"...","code":"..."}`. */
+export interface AgentDeckJsonError {
+  readonly error: string;
+  readonly code?: string;
+}
+
+/**
+ * The trailing JSON object on agent-deck's stdout. The object is the last
+ * thing printed; anything before it is chatter, which may itself hold braces.
+ * Take the earliest brace from which the rest of stdout parses as one object.
+ */
+function trailingJsonObject(stdout: string): Record<string, unknown> | undefined {
+  for (let start = stdout.indexOf("{"); start >= 0; start = stdout.indexOf("{", start + 1)) {
+    const parsed = parseJsonMaybe(stdout.slice(start).trim());
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+/**
+ * The error a `--json` agent-deck printed on stdout. In JSON mode agent-deck
+ * reports a failure on stdout and leaves stderr empty, so without this the real
+ * reason (e.g. git's "branch already exists", which Hatchery's #243 self-heal
+ * keys on, or a show's NOT_FOUND) is lost behind a bare
+ * "Command failed: agent-deck (exit code 1)". Stdout with no such object is ignored.
+ */
+export function parseJsonError(stdout: unknown): AgentDeckJsonError | undefined {
+  const record = trailingJsonObject(stderrText(stdout));
+  const error = record?.error;
+  if (typeof error !== "string" || !error.trim()) return undefined;
+  const code = typeof record?.code === "string" && record.code ? record.code : undefined;
+  return code ? { error, code } : { error };
+}
+
+/** {@link parseJsonError} as message text: `error (CODE)`, or "" when there is none. */
+export function jsonErrorText(stdout: unknown): string {
+  const parsed = parseJsonError(stdout);
+  if (!parsed) return "";
+  return parsed.code ? `${parsed.error} (${parsed.code})` : parsed.error;
 }
 
 /**
@@ -448,10 +499,15 @@ async function runAgentDeck(
     const outputLimit = failure.outputLimit === true || /output exceeded/i.test((err as Error).message ?? "");
     // A timeout or output-limit kill leads the message: stderr printed before
     // the kill is not the outcome.
+    const stdout = (err as { stdout?: unknown }).stdout;
+    const jsonError = timedOut || outputLimit ? undefined : parseJsonError(stdout);
+    // A timeout or output-limit kill leads the message: stderr printed before
+    // the kill is not the outcome. Otherwise agent-deck's own JSON error leads,
+    // so a stderr warning cannot hide it.
     const message = timedOut || outputLimit
       ? `${(err as Error).message}${stderr ? `; stderr before it stopped: ${stderr}` : ""}`
-      : stderr || (err as Error).message || "agent-deck command failed";
-    throw new AgentDeckExecError(message, stderr, { timedOut, outputLimit });
+      : [jsonErrorText(stdout), stderr].filter(Boolean).join("; ") || (err as Error).message || "agent-deck command failed";
+    throw new AgentDeckExecError(message, stderr, { timedOut, outputLimit, jsonError });
   }
 }
 
@@ -547,17 +603,7 @@ async function readSession(
 
 /** The session id and worktree `agent-deck launch --json` reported; empty when it printed none. */
 export function parseLaunchOutput(stdout: string): { sessionId?: string; worktreePath?: string } {
-  // The JSON object is the last thing printed; anything before it is chatter,
-  // which may itself hold braces. Take the earliest brace from which the rest
-  // of stdout parses as one object: that is the trailing launch object.
-  let record: Record<string, unknown> | undefined;
-  for (let start = stdout.indexOf("{"); start >= 0; start = stdout.indexOf("{", start + 1)) {
-    const parsed = parseJsonMaybe(stdout.slice(start).trim());
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      record = parsed as Record<string, unknown>;
-      break;
-    }
-  }
+  const record = trailingJsonObject(stdout);
   if (!record) return {};
   const sessionId = firstString(record, ["session_id", "id"]);
   const worktreePath = firstString(record, ["worktree_path"]);

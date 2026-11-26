@@ -41,6 +41,7 @@ import {
   buildSessionShowArgs,
   createAgentDeckAdapter,
   expectedWorktreeDirName,
+  jsonErrorText,
   listInteractiveSessions,
   looksLikeComposerRefusal,
   paneTail,
@@ -395,6 +396,76 @@ describe("castra adapter — operations", () => {
     const adapter = makeAdapter();
     childProcessMock.execFileSync.mockReturnValue("garbled <not json> output");
     await expect(adapter.list({ profile: "march" })).rejects.toThrow(/unexpected output/);
+  });
+
+  it("surfaces a --json launch error agent-deck printed on stdout, so #243 self-heal can match it", async () => {
+    const stdout = JSON.stringify({
+      code: "INVALID_OPERATION",
+      error: "branch 'feature/x' already exists (remove -b flag to use existing branch)",
+      success: false,
+    });
+    const exec: ExecFn = async (cmd, args, opts) => {
+      if (cmd === "agent-deck" && args.includes("launch")) {
+        throw new ExecError("Command failed: agent-deck (exit code 1)", { stderr: "", stdout, exitCode: 1 });
+      }
+      return fakeExec(cmd, args, opts);
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const err = await adapter
+      .launch({ profile: "march", repoPath: "/repo", branch: "feature/x", title: "Steward", group: "g" })
+      .catch((e: unknown) => e as Error);
+    expect((err as Error).message).toMatch(/agent-deck launch failed: branch 'feature\/x' already exists/);
+    expect((err as Error).message).not.toMatch(/Command failed/);
+  });
+
+  it("finds the JSON launch error after stdout chatter and leads with it over a stderr warning", async () => {
+    const stdout = `Creating worktree {feature/x}...\n${JSON.stringify({
+      code: "INVALID_OPERATION",
+      error: "branch 'feature/x' already exists (remove -b flag to use existing branch)",
+      success: false,
+    })}`;
+    const exec: ExecFn = async (cmd, args, opts) => {
+      if (cmd === "agent-deck" && args.includes("launch")) {
+        throw new ExecError("Command failed: agent-deck (exit code 1)", {
+          stderr: "warning: tmux config not found",
+          stdout,
+          exitCode: 1,
+        });
+      }
+      return fakeExec(cmd, args, opts);
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    const err = await adapter
+      .launch({ profile: "march", repoPath: "/repo", branch: "feature/x", title: "Steward", group: "g" })
+      .catch((e: unknown) => e as Error);
+    expect((err as Error).message).toMatch(
+      /agent-deck launch failed: branch 'feature\/x' already exists .*\(INVALID_OPERATION\); warning: tmux config not found/,
+    );
+  });
+
+  it("treats a --json NOT_FOUND on stdout as a missing session, not an agent-deck failure", async () => {
+    const exec: ExecFn = async (cmd, args, opts) => {
+      if (cmd === "agent-deck" && args.includes("show")) {
+        throw new ExecError("Command failed: agent-deck (exit code 2)", {
+          stderr: "",
+          stdout: JSON.stringify({ code: "NOT_FOUND", error: "session 'gone' does not exist", success: false }),
+          exitCode: 2,
+        });
+      }
+      return fakeExec(cmd, args, opts);
+    };
+    const adapter = createAgentDeckAdapter({ exec, sleep: noSleep });
+    await expect(adapter.show({ profile: "p", sessionId: "gone" })).rejects.toThrow(CastraNotFoundError);
+  });
+
+  it("jsonErrorText reads agent-deck's JSON error and ignores anything else", () => {
+    expect(jsonErrorText('{"success":false,"error":"nope","code":"NOT_FOUND"}')).toBe("nope (NOT_FOUND)");
+    expect(jsonErrorText('{"success":false,"error":"nope"}')).toBe("nope");
+    expect(jsonErrorText('{"success":true}')).toBe("");
+    expect(jsonErrorText("not json")).toBe("");
+    expect(jsonErrorText("{broken")).toBe("");
+    expect(jsonErrorText('progress {1/2}\n{"success":false,"error":"late"}')).toBe("late");
+    expect(jsonErrorText(undefined)).toBe("");
   });
 
   it("launches and returns the identified session", async () => {

@@ -33,20 +33,24 @@ export interface ExecOptions {
  */
 export type ExecFn = (cmd: string, args: readonly string[], opts: ExecOptions) => Promise<string>;
 
-/** A failed child process. `stderr` carries the captured stderr text. */
+/** A failed child process. `stderr` carries the captured stderr text; `stdout`
+ *  the captured stdout (when captured) — a `--json` agent-deck reports its
+ *  error there, not on stderr. */
 export class ExecError extends Error {
   readonly stderr: string;
+  readonly stdout: string;
   readonly timedOut: boolean;
   readonly exitCode: number | null;
   /** The spawn failure's errno code (`ENOENT` when the executable is missing). */
   readonly code?: string;
   constructor(
     message: string,
-    details: { stderr?: string; timedOut?: boolean; exitCode?: number | null; code?: string } = {},
+    details: { stderr?: string; stdout?: string; timedOut?: boolean; exitCode?: number | null; code?: string } = {},
   ) {
     super(message);
     this.name = "ExecError";
     this.stderr = details.stderr ?? "";
+    this.stdout = details.stdout ?? "";
     this.timedOut = details.timedOut ?? false;
     this.exitCode = details.exitCode ?? null;
     this.code = details.code;
@@ -161,6 +165,7 @@ export const execCommand: ExecFn = (cmd, args, opts) =>
         fail(
           new ExecError(`Command failed: ${cmd} (${reason})`, {
             stderr: stderrText(),
+            stdout: Buffer.concat(stdout).toString("utf-8").trimEnd(),
             exitCode: code,
           }),
         );
