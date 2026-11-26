@@ -14,7 +14,7 @@ We want a new kind of work to be added as a module, without editing the core loo
 ## Proposed Solution
 <!-- audience: stakeholder; mode: explanation; length: 1-2 paragraphs; diagram: optional; examples: discouraged -->
 
-March models all work as one pipeline: **discover → implement → steward → land → close out**. A work item can enter at any stage and skip the ones it doesn't need. A Dependabot PR enters at *land*. A triage verdict never opens a PR. Two kinds of module, each enabled and configured per profile, plug into that pipeline. **Producers** (Smithy, issue triage, Dependabot) discover work items and give each one its special instructions. They say what kind of item it is, and they register **responders** for when something needs fixing: Smithy registers `/smithy.fix`. **Destinations** (a GitHub repository and GitHub issues first; Jira and Linear later) are where artifacts land. A destination owns the rules for landing there, applied per repository or board and matched on item kind (for example "a `cut` needs no approval in this repo"). It also raises the **signals** that something needs attention, such as a review thread, failed CI, a conflict, or a missing label. Finally it performs the landing and the close-out.
+March models all work as one pipeline: **discover → implement → steward → land → close out**. A work item can enter at any stage and skip the ones it doesn't need. A Dependabot PR enters at *land*. A triage verdict never opens a PR. Two kinds of module, each enabled and configured per profile, plug into that pipeline. **Producers** (Smithy, issue triage, Dependabot) discover work items and give each one its special instructions. They say what kind of item it is, and they register **responders** for when something needs fixing: Smithy registers `/smithy.fix`. **Destinations** (a GitHub repository and GitHub issues first; Jira and Linear later) are where artifacts land. A destination owns the rules for landing there, applied per repository or board and matched on item kind (for example "a `cut` needs no approval in this repo"). It also raises the **signals** that something needs attention. For a GitHub repo these come in the groups GitHub itself puts first on a PR (checks, comments and approvals), never as individual kinds of check or comment. Finally it performs the landing and the close-out.
 
 The core runs the lifecycle in between. It pairs each destination signal with the producer's responder. It reports a landed artifact back to the item's origin, so an accepted issue closes when its first artifact merges. And it keeps the safety, recovery, teardown and tracing guarantees March has today, which no module can bypass. What the operator sees: turning on a new kind of work, or a new place for work to land, is a profile configuration change, not a change to the legate. Each repository's merge rules live in one place, whichever module produced the PR.
 
@@ -29,7 +29,7 @@ The core runs the lifecycle in between. It pairs each destination signal with th
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: optional -->
 
 - Smithy runs as a module with no behavior change: existing tests stay green, and dispatch, merge, and dashboard outcomes match before and after the move.
-- Issue triage ships as a producer module with no edits to the Smithy-specific or core lifecycle code. Its issues close automatically when their first artifact lands.
+- Issue triage moves to a producer module with no edits to the Smithy-specific or core lifecycle code. Its issues close automatically when their first artifact lands.
 - Dependabot auto-merge becomes a source plus rows in the GitHub-repo destination's policy, and the dedicated `dependency-merge` handler is gone.
 - The steward watchdog contains no producer-specific branches. Landing rules are configured per repository and item kind, not per Smithy verb.
 
@@ -57,51 +57,59 @@ The coupling is concrete in the repo. The legate runs a fixed, order-dependent h
 
 - [Critical Assumption] The problem is structural coupling. Each kind of work has its discovery, prompts, merge rules and babysitting spread across legate internals, so adding or changing a flow means editing the core. Triage makes it urgent, because it ends in a verdict rather than a PR and needs a report back to its origin.
 - [Critical Assumption] Producers own no landing policy. The per-Smithy-verb merge rules and Dependabot's own gate, labels and pacing move to the GitHub-repo destination's per-repository configuration, matched on the item kind the producer declares.
-- [Critical Assumption] Behaviors split in two. The destination raises the signal (a review thread, failed CI, a conflict) and the producer supplies the responder (`/smithy.fix`). The core pairs them and arbitrates, so each steward gets at most one action per tick.
+- [Critical Assumption] Behaviors split in two. The destination raises the signal as one of a few generic groups (checks, comments, approvals) and the producer supplies the responder (`/smithy.fix`). The core pairs them and arbitrates, so each steward gets at most one action per tick. The core never knows which reviewer wrote a comment or which check failed. Asking for a fresh review is part of the destination's land gate, not a responder.
 - [Critical Assumption] The safety invariants stay in the core. Modules use only a closed vocabulary of steps and can never make a destructive step automatic. Recovery, teardown, spawn caps, dispatch idempotency and tracing stay core-owned, and module work nests under the existing per-item trace.
 - [Critical Assumption] No workflow engine or agent platform replaces March's core. This restructures an engine that already exists. Renovate is a possible future producer, and merge-queue tools cover only the land stage.
 - A work item carries an origin (what caused it, such as an issue) and a destination (where its artifact lands). Close-out is the origin's job, triggered when the destination reports the artifact landed.
-- Destinations are the open-core boundary's "connector framework" made concrete. Baseline GitHub destinations ship in the open engine; enterprise destinations such as Jira can ship privately.
-- Migration is incremental: Smithy first with no behavior change, then Dependabot, then CodeRabbit, then triage built as a module. Jira and Linear destinations are out of scope for the first cut.
+- Destinations are the open-core boundary's "connector framework" made concrete. Baseline GitHub destinations ship in the open engine; enterprise destinations such as Jira can ship privately. Every module, March's own included, uses the published, versioned module interface.
+- A profile binds one repository but can bind several destinations, such as its repo plus GitHub issues or a ticket board.
+- Migration is incremental: Smithy first with no behavior change, then Dependabot, then CodeRabbit re-review as part of the GitHub land gate. Triage keeps going while the framework is built and moves over as part of the migration. Jira and Linear destinations are out of scope for the first cut.
 - The primary user is the single maintainer/operator. End users of the target repositories are not users of this change.
 
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Title | Source Category | Impact | Confidence | Origin |
-|----|-------|-----------------|--------|------------|--------|
-| SD-001 | private-module-loading-in-first-cut | Solution Intent | High | Medium | local |
-| SD-002 | cross-cutting-behavior-placement | Solution Intent | Medium | Medium | local |
-| SD-003 | profile-to-destination-binding | Scope Edges | High | Low | local |
-| SD-004 | triage-sequencing-vs-modules | Scope Edges | High | Medium | local |
-| SD-005 | destination-policy-native-vs-march | Off-the-Shelf Alternatives | Medium | Medium | local |
-| SD-006 | coupling-cost-evidence | Problem Definition | Low | Medium | local |
+_None — no specification debt was recorded._
 
-### SD-001 — private-module-loading-in-first-cut
+### Resolved
 
-Unresolved choice between two approaches. The first cut could load out-of-tree modules through a published, versioned module interface, which private modules need under the open-core "consume the published surface only" invariant. Or it could use an in-tree, compile-time registry and defer the external plugin seam. The first makes the module interface part of the boundary contract now.
+#### SD-001 — private-module-loading-in-first-cut
 
-### SD-002 — cross-cutting-behavior-placement
+**Question:** Should the first cut load modules through a published, versioned module interface, or through an in-tree, compile-time registry with the external plugin seam deferred?
 
-Where do behaviors like CodeRabbit re-review live? They are neither producer- nor destination-specific. The options: (a) a GitHub-repo destination signal paired with a generic core responder; (b) a responder every producer registers; or (c) a third module kind, such as a reviewer or behavior module, enabled per profile.
+**Answer:** Use the published, versioned module interface from the first cut, including for Smithy. Building in-tree first would let broken abstractions through. Using the published interface for March's own modules dogfoods the seam that private modules depend on. Decided by the operator in PR review, 2026-11-26.
 
-### SD-003 — profile-to-destination-binding
+#### SD-002 — cross-cutting-behavior-placement
 
-In the first cut, does a profile still bind to exactly one repository, as worktrees, default-branch sync and the Smithy graph assume today? Or can one profile bind several destinations, which makes "these producers bound to these destinations" a many-to-many model from the start? A related question is whether destinations become registered entities that several profiles share.
+**Question:** Where do behaviors like CodeRabbit re-review live? They are neither producer- nor destination-specific.
 
-### SD-004 — triage-sequencing-vs-modules
+**Answer:** There is no reviewer-specific behavior. Review feedback is handled by one generic comment responder; which reviewer wrote the comment (CodeRabbit, Codex, Copilot or any other) doesn't matter. Asking for a fresh review belongs to the destination's land stage, because the gate is approval. It reacts to "the PR is waiting for new feedback", not to "there is feedback", and is needed where automatic review isn't enabled. Decided by the operator in PR review, 2026-11-26.
 
-Triage is landing now. Unresolved choice between three paths: (a) triage finishes ad hoc, including its own issue close-out, and is migrated later; (b) triage close-out waits for the core origin/close-out mechanism; or (c) the origin/close-out part of this work moves ahead of the Smithy migration.
+#### SD-003 — profile-to-destination-binding
 
-### SD-005 — destination-policy-native-vs-march
+**Question:** Does a profile bind to exactly one repository, or can it bind several destinations?
 
-Should the GitHub-repo destination evaluate its policy primitives in March, as the merge gate does today? Or should it delegate where it can to GitHub-native rulesets, branch protection and the merge queue, with March only translating item kind into labels and enabling auto-merge?
+**Answer:** A profile still binds to one repository, but that is not the same as one destination. A profile can bind several destinations, such as its GitHub repo plus GitHub issues, a Jira board or a Linear list. Decided by the operator in PR review, 2026-11-26.
 
-### SD-006 — coupling-cost-evidence
+#### SD-004 — triage-sequencing-vs-modules
 
-There is no measured cost of the current coupling. Examples would be the effort it took to add the Dependabot and CodeRabbit flows, or Smithy regressions caused by edits made for other flows. Is that evidence worth gathering to support the case, or are the structural evidence and the triage trigger enough?
+**Question:** Does triage wait for the module framework, or keep going while it is designed?
+
+**Answer:** Triage keeps going at its current pace while the module design is built out, and moves to the framework as part of the migration. Decided by the operator in PR review, 2026-11-26.
+
+#### SD-005 — destination-policy-native-vs-march
+
+**Question:** How much of the GitHub-repo destination's landing policy does March evaluate itself?
+
+**Answer:** The GitHub destination module owns what GitHub already shows as the main status groups of a PR: checks, comments and approvals. It passes them to March as signals. March is never aware of individual kinds of check or comment. A destination that lacks a group, such as a ticket board with no approvals, reports it as empty or passing. A further group can be added later even if GitHub leaves it empty. Decided by the operator in PR review, 2026-11-26.
+
+#### SD-006 — coupling-cost-evidence
+
+**Question:** Should a measured cost of the current coupling be gathered?
+
+**Answer:** No. The size of the codebase is evidence enough, together with the operator's estimate that adding issue triage the current way grows the code by about 40%. Decided by the operator in PR review, 2026-11-26.
 
 ## Open Questions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-- The triage sequencing decision (SD-004) needs the operator's call before the next triage slice lands. Otherwise triage builds the ad hoc close-out this PRD would replace.
+None at this time — ready for `smithy.ignite` to expand into an RFC.
