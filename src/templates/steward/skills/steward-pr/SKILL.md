@@ -96,11 +96,12 @@ rather than implying everything passed.
 
 ## Create the PR
 
-1. Confirm the branch is pushed (`git branch --show-current`, then ensure the
-   remote has it — your launch workflow already pushed it).
+1. Read the published branch name (`git branch --show-current`). Hatchery
+   already pushed it; do not push it again.
 2. Create the PR against the **exact pushed branch** — do not rename it or add a
-   `feature/` prefix; downstream PR discovery tracks the branch by name.
-   Prefer `gh pr create --title "<title>" --body "<body>"`.
+   `feature/` prefix; downstream PR discovery tracks the branch by name. Always
+   pass that branch with `--head` so `gh` never offers to push or fork:
+   `gh pr create --head "<branch>" --title "<title>" --body "<body>"`.
 3. Report the PR URL on the **final line** of your reply as `PR: <url>`.
 4. If any step fails, escalate via
    `NEED: <one-line summary> — <one-line next action>` instead of stopping

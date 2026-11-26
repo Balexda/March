@@ -370,6 +370,137 @@ async function selfHealManagerLaunchCollision(input: {
   });
 }
 
+/**
+ * Resume a publication that failed after its focused commit was created. That
+ * failure keeps the manager session, worktree, and branch, so a retry of the
+ * same slice collides at `manager.launch`, and self-heal refuses to remove
+ * the unmerged commit. Resumption needs the recorded checkout for the prior
+ * spawn, still on its recorded branch, with an equivalent commit for that
+ * spawn's persisted extraction at the tip. It then pushes that commit and hands
+ * the prior Steward the review prompt without launching a replacement. Returns
+ * undefined when the colliding branch is not a preserved publication.
+ */
+async function resumePreservedPublication(input: {
+  readonly repoPath: string;
+  readonly branch: string;
+  readonly homeDir?: string;
+  readonly prompt: string;
+  readonly backend: string;
+  readonly profile: string;
+  readonly traceKey: string;
+  readonly sliceId: string;
+  readonly dispatch: DispatchTrace;
+  readonly castra: CastraClient;
+}): Promise<HatcherySpawnResult | undefined> {
+  type Preserved = {
+    readonly spawnId: string;
+    readonly sessionId: string;
+    readonly worktreePath: string;
+    readonly target: AuthorizedStewardTarget;
+    readonly handoff: StewardHandoffInput;
+    readonly commit: IntegrationCommit;
+  };
+  const locate = (candidate: string): Preserved | undefined => {
+    const worktreePath = findWorktreePathForBranch(input.repoPath, candidate);
+    if (!worktreePath) return undefined;
+    const body = stewardGit(input.repoPath, "show", "-s", "--format=%B", "refs/heads/" + candidate);
+    const spawnId = /^March-Spawn-Id: (\d{8}-[0-9a-f]{6})$/m.exec(body)?.[1];
+    if (!spawnId) return undefined;
+    const record = loadSpawnRecord(spawnId, input.homeDir);
+    if (!record || record.integrationBranch !== candidate || !record.stewardSessionId) return undefined;
+    const eligibility = evaluateStewardHandoffEligibility({ spawnId, homeDir: input.homeDir });
+    if (!eligibility.eligible) return undefined;
+    const target = resolveStewardTarget({
+      spawnId, repoPath: input.repoPath, managerWorktreePath: worktreePath, homeDir: input.homeDir,
+    });
+    const commit = findIntegrationCommit(target, eligibility.handoff);
+    if (!commit) return undefined;
+    return { spawnId, sessionId: record.stewardSessionId, worktreePath, target, handoff: eligibility.handoff, commit };
+  };
+  const candidates = [...new Set([orphanManagerBranch(input.branch), input.branch])];
+  let preserved: Preserved | undefined;
+  for (const candidate of candidates) {
+    try {
+      preserved = locate(candidate);
+    } catch {
+      preserved = undefined;
+    }
+    if (preserved) break;
+  }
+  if (!preserved) return undefined;
+  const { spawnId, sessionId, worktreePath, target, handoff } = preserved;
+  input.dispatch.setAttributes({ "march.resumed_spawn_id": spawnId });
+
+  const commit = await input.dispatch.spanAsync("steward.push", async (span) => {
+    span.setAttributes({
+      "march.spawn_id": spawnId,
+      "march.branch": preserved.commit.branch,
+      "march.commit_sha": preserved.commit.commitSha,
+      "march.resumed": true,
+    });
+    return pushIntegrationCommit(target, handoff, preserved.commit, { homeDir: input.homeDir, sliceId: input.sliceId });
+  });
+
+  const dir = hatcherySpawnLogDir(spawnId, input.homeDir);
+  const artifacts: HatcherySpawnArtifacts = {
+    dir,
+    spawnOutputPath: path.join(dir, "spawn-output.log"),
+    patchPath: path.join(dir, "patch.diff"),
+    managerPromptPath: path.join(dir, "manager-prompt.md"),
+    metadataPath: path.join(dir, "metadata.json"),
+  };
+  const managerPrompt = buildManagerPrompt({
+    commit,
+    operatorPrompt: input.prompt,
+    patchPath: artifacts.patchPath,
+    spawnOutputPath: artifacts.spawnOutputPath,
+    metadataPath: artifacts.metadataPath,
+  });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
+  await input.dispatch.spanAsync("steward.send", () =>
+    sendPromptToAgentDeckManager(
+      { sessionId, prompt: managerPrompt, profile: input.profile, traceKey: input.traceKey },
+      input.castra,
+    ),
+  );
+  let metadata: { managerSession?: Partial<AgentDeckManagerSession>; exitCode?: unknown } = {};
+  try {
+    metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf8"));
+  } catch {
+    // The recorded session and checkout below are authoritative.
+  }
+  const managerSession: AgentDeckManagerSession = {
+    sessionId,
+    title: metadata.managerSession?.title ?? "",
+    group: metadata.managerSession?.group ?? "",
+    branch: metadata.managerSession?.branch ?? input.branch,
+    worktreePath,
+  };
+  return {
+    spawnId,
+    backend: input.backend,
+    branch: input.branch,
+    managerSession,
+    artifacts,
+    application: {
+      spawnId,
+      status: "applied",
+      touchedPaths: [...new Set(handoff.touchedPaths)].sort(),
+      appliedAt: preserved.commit.committedAt,
+    },
+    commit,
+    exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : 0,
+    summary: [
+      `Hatchery resumed publication for spawn ${spawnId} and handed off to manager session ${sessionId}.`,
+      `Branch: ${input.branch}`,
+      `Worktree: ${worktreePath}`,
+      `Patch: ${artifacts.patchPath}`,
+      `Logs: ${artifacts.spawnOutputPath}`,
+    ].join("\n"),
+  };
+}
+
 export function buildSpawnCommitPrompt(operatorPrompt: string): string {
   return [
     "Operator request:",
@@ -838,7 +969,8 @@ export function buildManagerPrompt(input: {
     "   changed from `[ ]` to `[x]` in the published commit.",
     "4. If corrections are needed, report NEED: <problem> — <next action> and stop.",
     "   Leave the published commit and branch intact. Do not edit, commit, or push.",
-    "5. Open the PR for the exact published branch using the `march-steward:steward-pr` skill.",
+    "5. Open the PR for the exact published branch (pass it to `gh pr create --head`)",
+    "   using the `march-steward:steward-pr` skill.",
     "6. Report the PR URL on the final line as `PR: <url>`. Escalate failures via NEED:.",
   ].join("\n");
 }
@@ -2053,6 +2185,34 @@ export async function runHatcherySpawn(
       ].join("\n"),
     };
   } catch (err) {
+    // A launch collision can be a preserved publication from an earlier spawn
+    // of this slice whose push failed. Resume it on the recorded checkout
+    // instead of escalating the collision (#739 review).
+    if (!manager && stage === "manager_launch" && isBranchAlreadyExistsError(err)) {
+      stage = "integration_push";
+      const resumed = await resumePreservedPublication({
+        repoPath: input.repoPath,
+        branch,
+        homeDir: input.homeDir,
+        prompt: input.prompt,
+        backend: input.backend.name,
+        profile: agentDeckProfile,
+        traceKey,
+        sliceId,
+        dispatch,
+        castra,
+      }).catch((resumeError: unknown) => {
+        dispatch.recordException(resumeError);
+        if (resumeError instanceof IntegrationPublicationError) throw resumeError;
+        stage = "steward_send";
+        throw new HatcherySpawnError((resumeError as Error).message);
+      });
+      if (resumed) {
+        handedOff = true;
+        return resumed;
+      }
+      stage = "manager_launch";
+    }
     dispatch.recordException(err);
     if (!(err instanceof HatcherySpawnError) || err instanceof StewardApplyError) {
       try {

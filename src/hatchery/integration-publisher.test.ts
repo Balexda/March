@@ -96,6 +96,9 @@ it("publishes the exact ref after a failed push and reuses the same commit", asy
   expect(git(remote, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(
     branchRef + " " + commit.commitSha + "\n",
   );
+  // The checkout tracks the published head, as `git push -u` would leave it.
+  expect(git(cwd, "rev-parse", "--symbolic-full-name", "@{upstream}").trim()).toBe("refs/remotes/origin/" + branch);
+  expect(git(cwd, "rev-parse", "@{upstream}").trim()).toBe(commit.commitSha);
 });
 
 it("preserves a separately created divergent remote head", async () => {
@@ -132,6 +135,7 @@ it("accepts an equivalent remote commit with a different committer date", async 
     branch, commitSha: equivalent, patchSha256: input.patchSha256,
   });
   expect(git(cwd, "rev-parse", "HEAD").trim()).toBe(commit.commitSha);
+  expect(git(cwd, "rev-parse", "@{upstream}").trim()).toBe(equivalent);
 });
 
 it("refuses to reuse a commit with matching metadata and different content", () => {

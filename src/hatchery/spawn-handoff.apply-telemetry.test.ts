@@ -19,7 +19,8 @@ import { removeSpawnWorktree } from "../brood/worktree.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath, sendPrompt, workerPatch, recordedState } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, workerPatch, recordedState, launchCollision } = vi.hoisted(() => ({
+  launchCollision: { value: false },
   worktreePath: { value: "" },
   sendPrompt: vi.fn(async () => {}),
   workerPatch: { value: "" },
@@ -52,13 +53,18 @@ vi.mock("../castra/client.js", () => {
   class CastraClient {}
   const createCastraClientFromEnv = () => ({
     launchSession: vi.fn(
-      async (req: { title: string; group?: string; branch: string }) => ({
+      async (req: { title: string; group?: string; branch: string }) => {
+        if (launchCollision.value) {
+          throw new Error(`agent-deck launch failed: Error: branch 'feature/${req.branch}' already exists`);
+        }
+        return {
         sessionId: "ad-xyz",
         title: req.title,
         group: req.group ?? "g",
         branch: req.branch,
         worktreePath: worktreePath.value,
-      }),
+        };
+      },
     ),
     removeSession: vi.fn(async () => ({ removed: true })),
     sendPrompt,
@@ -159,6 +165,7 @@ beforeEach(() => {
   worktreePath.value = makeWorktree();
   workerPatch.value = CONFLICTING_PATCH;
   sendPrompt.mockClear();
+  launchCollision.value = false;
   recordedState.paths = undefined;
   recordedState.unavailable = false;
   vi.stubEnv("MARCH_BROOD_URL", "");
@@ -313,6 +320,39 @@ it("gates Steward handoff on publication and preserves the retryable local commi
   const span = spans.find((candidate) => candidate.name === "steward.push");
   expect(span?.status.code).toBe(2);
   expect(span?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
+});
+
+it("resumes a preserved publication when a retry collides at manager launch", async () => {
+  workerPatch.value = ADD_PATCH;
+  const target = worktreePath.value;
+  const remote = gitAt(target, "remote", "get-url", "origin").trim();
+  gitAt(target, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const homeDir = makeHome();
+  const sliceId = "publication-resume-slice";
+  const failure = await runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId,
+  }).catch((error: { publication: { spawnId: string; commit: { commitSha: string } } }) => error.publication);
+  const preserved = (failure as { commit: { commitSha: string } }).commit.commitSha;
+
+  gitAt(target, "remote", "set-url", "origin", remote);
+  launchCollision.value = true;
+  const spans = captureSpans();
+  const result = await runHatcherySpawn({ repoPath, branch, prompt: "retry", backend, homeDir, sliceId });
+
+  expect(result.spawnId).toBe((failure as { spawnId: string }).spawnId);
+  expect(result.commit.commitSha).toBe(preserved);
+  expect(result.managerSession).toMatchObject({ sessionId: "ad-xyz", worktreePath: target });
+  expect(gitAt(remote, "rev-parse", "refs/heads/feature/" + branch).trim()).toBe(preserved);
+  expect(gitAt(target, "rev-parse", "@{upstream}").trim()).toBe(preserved);
+  expect(gitAt(target, "rev-list", "--count", "HEAD").trim()).toBe("2");
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: "ad-xyz",
+    prompt: expect.stringContaining(`Published commit: ${preserved}`),
+  }));
+  const push = spans.find((candidate) => candidate.name === "steward.push");
+  expect(push?.status.code).not.toBe(2);
+  expect(push?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
 });
 
 it("decodes Git-quoted header paths so a non-ASCII filename passes the staged-path check", async () => {

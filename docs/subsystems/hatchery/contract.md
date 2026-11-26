@@ -129,7 +129,12 @@ parent before creating a commit. GitHub publication uses the existing Steward
 Tessera credential scoped to the origin repository. The Steward receives the
 review and PR prompt only after the recorded remote branch is published or
 verified equivalent. A publication failure preserves a verified local commit
-and its checkout for retry. Git phases are bounded and traced on the slice,
+and its checkout for retry. A later dispatch of the slice that collides with
+that preserved branch at manager launch resumes it: Hatchery re-verifies the
+commit against the prior spawn's recorded extraction, then pushes it and hands
+the existing Steward the prompt instead of launching a replacement. A
+successful push records the branch as the checkout's upstream, and the Steward
+opens the PR with an explicit `--head`. Git phases are bounded and traced on the slice,
 following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 

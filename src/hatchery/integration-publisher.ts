@@ -154,6 +154,28 @@ export function createIntegrationCommit(target: Target, handoff: StewardHandoffI
   }
 }
 
+/**
+ * Record the published head as the checkout's upstream, as `git push -u` would.
+ * The push ran from a temporary repository, so without this the Steward checkout
+ * has no tracking state and `gh pr create` treats the branch as unpushed.
+ */
+function track(target: Target, gitDir: string, local: IntegrationCommit, published: IntegrationCommit): IntegrationCommit {
+  const branch = target.branchRef.slice("refs/heads/".length);
+  const tracking = "refs/remotes/origin/" + branch;
+  if (published.commitSha === local.commitSha) {
+    git(target.target, ["update-ref", tracking, published.commitSha]);
+  } else {
+    // An equivalent remote head was fetched into the transport only; copy that
+    // object into the checkout's repository so the tracking ref resolves.
+    git(gitDir, ["update-ref", "refs/march/published", published.commitSha]);
+    git(target.target, ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--",
+      gitDir, "refs/march/published:" + tracking]);
+  }
+  git(target.target, ["config", "--local", `branch.${branch}.remote`, "origin"]);
+  git(target.target, ["config", "--local", `branch.${branch}.merge`, target.branchRef]);
+  return published;
+}
+
 export async function pushIntegrationCommit(
   target: Target,
   handoff: StewardHandoffInput,
@@ -202,14 +224,14 @@ export async function pushIntegrationCommit(
       ["push", "--no-follow-tags", "--no-verify", "--recurse-submodules=no", "--"],
       [commit.commitSha + ":" + ref],
     );
-    if (push.code === 0) return commit;
+    if (push.code === 0) return track(target, gitDir, commit, commit);
 
     const lookup = await run(["ls-remote", "--exit-code", "--refs", "--"], [ref]);
     const [sha, remoteRef] = lookup.stdout.trim().split("\t");
     if (lookup.code !== 0 || remoteRef !== ref || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
       throw new Error("remote_ref_unavailable");
     }
-    if (sha === commit.commitSha) return commit;
+    if (sha === commit.commitSha) return track(target, gitDir, commit, commit);
     const fetch = await run(
       ["fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance", "--"],
       [ref],
@@ -218,7 +240,7 @@ export async function pushIntegrationCommit(
     if (fetch.code !== 0) throw new Error("remote_fetch_failed");
     const fetched = git(gitDir, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
     if (identity(fetched) !== identity(commit.commitSha)) throw new Error("remote_diverged");
-    return describeCommit({ target: gitDir, branchRef: ref }, handoff, fetched);
+    return track(target, gitDir, commit, describeCommit({ target: gitDir, branchRef: ref }, handoff, fetched));
   } catch (error) {
     throw publicationError(target, handoff, error, commit);
   } finally {
