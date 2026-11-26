@@ -20,7 +20,7 @@ kind: backend
 **Scope Boundaries**:
 - Includes the work-item model with namespaced kinds, bare Smithy verb aliases, origin, destination, entry stage, exactly one close-out owner and producer handoff that preserves the origin. Define landed and close-out reports and the observe and act facets.
 - Includes checks, comments and approvals. Mark checks as platform or user. Destinations always run the *not possible* and *not permitted* platform checks. Document the arbitration order from conflict through review threads, CI, conversation comments and finally the merge gate.
-- Includes a closed declarative step vocabulary with a destructive class on every step. Core owns execution, branch and worktree deletion and teardown. Destination policy can automate land and close-out within those rules. The contract accounts for the existing lease-protected conflict recovery on the item's own PR branch.
+- Includes a closed declarative step vocabulary with a destructive class on every step. Modules return intents only and receive no write-capable GitHub or git clients or credentials. Core owns execution, branch and worktree deletion and teardown. Destination policy can automate land and close-out within those rules. The contract accounts for the existing lease-protected conflict recovery on the item's own PR branch.
 - Includes the subsystem `contract.md` covering the export, roles, signals, step classes and compatibility rule. Document the pre-1.0 contract as unstable until Dependabot migrates. A major mismatch is incompatible, and a minor mismatch is incompatible before 1.0. Record the published contract as the open seam for private connectors in [the open-core boundary](../../open-core-boundary.md). Apply [March's vision](../../vision.md) and [operating philosophy](../../operating-philosophy.md) to the module and core responsibilities.
 - Excludes lifecycle execution, fold migration, isolation of module code and a generic authorization mechanism for destination commands.
 
@@ -96,7 +96,7 @@ _No unresolved specification debt remains._
 | F1 | Published Work Module Contract | — | — |
 | F2 | Module Loading and Startup Compatibility | F1 | — |
 | F3 | Profile Module Bindings and Known Kinds | F2 | — |
-| F4 | Module Author Conformance Kit | F2 | — |
+| F4 | Module Author Conformance Kit | F2, F3 | — |
 | F5 | Handler Inventory and Contract Flow Review | F1 | — |
 
 ## Cross-Milestone Dependencies
