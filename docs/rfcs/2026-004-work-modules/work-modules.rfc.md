@@ -265,7 +265,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| M1 | Module Contract v1, Loader and Conformance Kit | — | — |
+| M1 | Module Contract v1, Loader and Conformance Kit | — | docs/rfcs/2026-004-work-modules/01-module-contract-v1-loader-and-conformance-kit.features.md |
 | M2 | Core Work-Item Lifecycle and Identity | M1 | — |
 | M3 | GitHub-Repo Destination and Policy Migration | M1, M2 | — |
 | M4 | Smithy Producer | M2, M3 | — |
