@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execTextInGroup } from "../shared/exec-group.js";
 import { getGitHubToken, TesseraClientError } from "../tessera/client.js";
 
 export class HatcheryGitHubError extends Error {
@@ -27,22 +27,26 @@ export function hatcheryGitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function git(cwd: string, args: string[], env = hatcheryGitEnv()) {
-  return new Promise<{ code: number; stdout: string; unauthorized: boolean }>((resolve) => {
-    execFile("git", args, {
+async function git(cwd: string, args: string[], env = hatcheryGitEnv()) {
+  try {
+    const stdout = await execTextInGroup("git", args, {
       cwd, env, timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      // Git may stop to request credentials after a 401 without reporting the
-      // HTTP code in its fatal message. Only inspect the redacted status lines.
-      const statuses = [...stderr.matchAll(/<= Recv header: HTTP\/[\d.]+ (\d{3})\b/g)];
-      resolve({
-        code: error ? typeof error.code === "number" ? error.code : -1 : 0,
-        stdout,
-        unauthorized: !!error && (statuses.at(-1)?.[1] === "401" ||
-          /requested URL returned error: 401\b/i.test(stderr)),
-      });
     });
-  });
+    return { code: 0, stdout, timedOut: false, unauthorized: false };
+  } catch (error) {
+    const failure = error as { code?: number; stderr?: string; killed?: boolean };
+    const stderr = failure.stderr ?? "";
+    // Git may stop to request credentials after a 401 without reporting the
+    // HTTP code in its fatal message. Only inspect the redacted status lines.
+    const statuses = [...stderr.matchAll(/<= Recv header: HTTP\/[\d.]+ (\d{3})\b/g)];
+    return {
+      code: typeof failure.code === "number" ? failure.code : -1,
+      stdout: "",
+      timedOut: failure.killed === true,
+      unauthorized: statuses.at(-1)?.[1] === "401" ||
+        /requested URL returned error: 401\b/i.test(stderr),
+    };
+  }
 }
 
 export async function resolveHatcheryOrigin(cwd: string): Promise<Origin | undefined> {
@@ -87,48 +91,63 @@ export async function runHatcheryNetworkGit(
   sliceId?: string,
 ): Promise<number> {
   const run = async (token?: string) => {
-    const env = hatcheryGitEnv();
-    for (const key of Object.keys(env)) {
-      if (/^(?:GIT_CONFIG|GIT_TRACE|GIT_CURL_VERBOSE)/.test(key)) delete env[key];
-    }
-    delete env.GIT_SSL_NO_VERIFY;
-    const config = [
-      ["credential.helper", ""],
-      ["core.askPass", ""],
-      ["http.extraHeader", ""],
-      ["http.followRedirects", "false"],
-      ["http.sslVerify", "true"],
-      // Repository-local config and hooks are untrusted for a credentialed call:
-      // pin TLS verification at the URL's own specificity (command-line entries
-      // win ties) and run no hooks that could inherit the token.
-      ["core.hooksPath", "/dev/null"],
-    ];
-    if (token) config.push([`http.${origin.url}.sslVerify`, "true"], [
-      `http.${origin.url}.extraHeader`,
-      `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
-    ]);
-    Object.assign(env, {
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_COUNT: String(config.length),
-      GIT_ALLOW_PROTOCOL: token ? "https" : "file",
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_ASKPASS: "/bin/false",
-      SSH_ASKPASS: "/bin/false",
-    });
-    if (token) Object.assign(env, {
-      GIT_TRACE_CURL: "1",
-      GIT_TRACE_CURL_NO_DATA: "1",
-      GIT_TRACE_REDACT: "1",
-    });
-    config.forEach(([key, value], index) => {
-      env[`GIT_CONFIG_KEY_${index}`] = key;
-      env[`GIT_CONFIG_VALUE_${index}`] = value;
-    });
-    const result = await git(cwd, [...beforeUrl, origin.url, ...afterUrl], env);
+    const result = await runScopedNetworkGit(cwd, origin, beforeUrl, afterUrl, token);
     return { status: result.unauthorized ? 401 : 0, value: result.code };
   };
   return origin.repo ? withHatcheryGitHubRead(origin.repo, sliceId, run) : (await run()).value;
+}
+
+export async function runScopedNetworkGit(
+  cwd: string,
+  origin: Origin,
+  beforeUrl: string[],
+  afterUrl: string[],
+  token?: string,
+  isolatedHome?: string,
+) {
+  const env = hatcheryGitEnv();
+  for (const key of Object.keys(env)) {
+    if (/^(?:GIT_CONFIG|GIT_TRACE|GIT_CURL_VERBOSE)/.test(key)) delete env[key];
+  }
+  delete env.GIT_SSL_NO_VERIFY;
+  if (isolatedHome) delete env.GIT_EXEC_PATH;
+  if (isolatedHome) Object.assign(env, {
+    HOME: isolatedHome, CURL_HOME: isolatedHome, XDG_CONFIG_HOME: isolatedHome, NETRC: "/dev/null",
+  });
+  const config = [
+    ["credential.helper", ""],
+    ["core.askPass", ""],
+    ["http.extraHeader", ""],
+    ["http.followRedirects", "false"],
+    ["http.sslVerify", "true"],
+    // Repository-local config and hooks are untrusted for a credentialed call:
+    // pin TLS verification at the URL's own specificity (command-line entries
+    // win ties) and run no hooks that could inherit the token.
+    ["core.hooksPath", "/dev/null"],
+  ];
+  if (token) config.push([`http.${origin.url}.sslVerify`, "true"], [
+    `http.${origin.url}.extraHeader`,
+    `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  ]);
+  Object.assign(env, {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: String(config.length),
+    GIT_ALLOW_PROTOCOL: token ? "https" : "file",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/bin/false",
+    SSH_ASKPASS: "/bin/false",
+  });
+  if (token) Object.assign(env, {
+    GIT_TRACE_CURL: "1",
+    GIT_TRACE_CURL_NO_DATA: "1",
+    GIT_TRACE_REDACT: "1",
+  });
+  config.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  });
+  return git(cwd, [...beforeUrl, origin.url, ...afterUrl], env);
 }
 
 /** Read a GitHub repository's default branch through the scoped read entitlement. */

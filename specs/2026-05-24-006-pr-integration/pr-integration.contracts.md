@@ -157,7 +157,7 @@ publishIntegrationBranch(input: {
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Dirty unrelated changes | Publisher error | Worktree contains changes outside the validated patch. |
+| Unexpected staged tree | Publisher error | The staged tree differs from the validated patch result, including extra edits on touched paths. Unstaged changes are excluded. |
 | Empty staged diff | Publisher error | No reviewable commit would be created. |
 | Commit failure | Publisher error | Git cannot create or identify the focused commit. |
 | Push failure | Publisher error | Remote push fails due to network, auth, or remote rejection. |

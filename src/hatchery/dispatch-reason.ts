@@ -43,6 +43,8 @@ const FIXED: ReadonlyArray<readonly [RegExp, string]> = [
   [/spawn worker exited/i, "worker_exit"],
   [/already exists in index|corrupt patch|patch does not apply|git apply/i, "patch_apply_failed"],
   [/branch .*already exists|already exists.*branch|already checked out/i, "branch_collision"],
+  [/Steward publication failed \(commit_failed\)/i, "commit_failed"],
+  [/Steward publication failed \(push_failed\)/i, "push_failed"],
   [/castra/i, "castra_error"],
   [/docker/i, "docker_error"],
   [/timed out|timeout/i, "timeout"],

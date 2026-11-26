@@ -134,6 +134,9 @@ function makeWorktree(): string {
   fs.writeFileSync(path.join(dir, "f"), "hello\n");
   git("add", "f");
   git("commit", "-qm", "init");
+  const remote = path.join(makeHome(), "remote.git");
+  git("init", "-q", "--bare", remote);
+  git("remote", "add", "origin", remote);
   repoPath = dir;
   const target = path.join(makeHome(), "integration");
   git("worktree", "add", "-qb", "feature/" + branch, target);
@@ -222,7 +225,7 @@ describe("steward.apply diagnostics (#244)", () => {
 });
 
 it("fails the slice trace on a Tessera outage and processes the next local job", async () => {
-  execFileSync("git", ["remote", "add", "origin", "git@github.com:team/repo.git"], {
+  execFileSync("git", ["remote", "set-url", "origin", "git@github.com:team/repo.git"], {
     cwd: worktreePath.value,
   });
   vi.stubEnv("MARCH_TESSERA_URL", "http://outage-test-tessera");
@@ -281,11 +284,35 @@ it("reports exactly the staged paths and preserves the operator's file and index
     spawnId: result.spawnId, status: "applied", touchedPaths: ["new file.txt"],
     appliedAt: expect.any(String),
   });
-  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("new file.txt\n");
+  expect(gitAt(worktreePath.value, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).toBe("new file.txt\n");
   expect(fs.readFileSync(path.join(repoPath, "f"), "utf8")).toBe("operator staged edit\n");
   expect(fs.readFileSync(path.join(repoPath, ".git", "index"))).toEqual(indexBefore);
   expect(fs.existsSync(path.join(repoPath, "new file.txt"))).toBe(false);
   expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+it("gates Steward handoff on publication and preserves the retryable local commit", async () => {
+  workerPatch.value = ADD_PATCH;
+  const target = worktreePath.value;
+  gitAt(target, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const spans = captureSpans();
+  const sliceId = "publication-failure-slice";
+
+  await expect(runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir: makeHome(), sliceId,
+  })).rejects.toMatchObject({
+    message: "Steward publication failed (push_failed)",
+    publication: {
+      failureReason: "push_failed",
+      branch: "feature/" + branch,
+      commit: { commitSha: expect.any(String) },
+    },
+  });
+  expect(gitAt(target, "show", "HEAD:new file.txt")).toBe("totally different content\n");
+  expect(sendPrompt).not.toHaveBeenCalled();
+  const span = spans.find((candidate) => candidate.name === "steward.push");
+  expect(span?.status.code).toBe(2);
+  expect(span?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
 });
 
 it("decodes Git-quoted header paths so a non-ASCII filename passes the staged-path check", async () => {
@@ -436,7 +463,7 @@ it("expects only the destination of a copy to be staged", async () => {
   const result = await runFixture();
 
   expect(result.application).toMatchObject({ status: "applied", touchedPaths: ["f", "g"] });
-  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("g\n");
+  expect(gitAt(worktreePath.value, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).toBe("g\n");
   expect(sendPrompt).toHaveBeenCalledTimes(1);
 });
 

@@ -1,3 +1,4 @@
+import type { PublicationFailure } from "../integration-publisher.js";
 import type { HatcherySpawnResult, PatchApplicationResult } from "../spawn-handoff.js";
 
 /**
@@ -28,6 +29,7 @@ export type JobStatus = "pending" | "running" | "succeeded" | "failed";
 export interface JobError {
   readonly message: string;
   readonly application?: PatchApplicationResult;
+  readonly publication?: PublicationFailure;
 }
 
 /** A spawn job tracked by the service. `id` is a server UUID, distinct from the inner spawnId. */
@@ -44,7 +46,7 @@ export interface JobRecord {
 /** Message posted from the spawn worker thread back to the service. */
 export type SpawnWorkerMessage =
   | { readonly ok: true; readonly result: HatcherySpawnResult }
-  | { readonly ok: false; readonly error: string; readonly application?: PatchApplicationResult };
+  | { readonly ok: false; readonly error: string; readonly application?: PatchApplicationResult; readonly publication?: PublicationFailure };
 
 /** workerData passed into the spawn worker thread. */
 export interface SpawnWorkerData {

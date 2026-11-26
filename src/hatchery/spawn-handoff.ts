@@ -27,6 +27,14 @@ import {
   resolveHatcheryOrigin,
   runHatcheryNetworkGit,
 } from "./github-read.js";
+import {
+  createIntegrationCommit,
+  findIntegrationCommit,
+  IntegrationPublicationError,
+  publicationError,
+  pushIntegrationCommit,
+  type IntegrationCommit,
+} from "./integration-publisher.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -199,6 +207,7 @@ export interface HatcherySpawnResult {
   readonly exitCode: number;
   readonly summary: string;
   readonly application: PatchApplicationResult;
+  readonly commit: IntegrationCommit;
 }
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
@@ -794,14 +803,15 @@ export function buildManagerPrompt(input: {
   readonly patchPath?: string;
   readonly spawnOutputPath?: string;
   readonly metadataPath?: string;
+  readonly commit?: IntegrationCommit;
 }): string {
   const artifactGuidance =
     input.patchPath || input.metadataPath || input.spawnOutputPath
       ? [
           "Validated handoff artifacts:",
           input.patchPath
-            ? `- Patch input: ${input.patchPath} (validated ExtractionResult.patch.patchText; already applied).`
-            : "- Patch input: already applied from validated ExtractionResult.patch.patchText.",
+            ? `- Patch input: ${input.patchPath} (validated ExtractionResult.patch.patchText; already published).`
+            : "- Patch input: published from validated ExtractionResult.patch.patchText.",
           input.metadataPath
             ? `- Handoff metadata: ${input.metadataPath} (spawn id, backend, touched paths, digest, extraction timestamp).`
             : "- Handoff metadata: recorded with spawn artifacts.",
@@ -814,39 +824,22 @@ export function buildManagerPrompt(input: {
   return [
     "You are the March Hatchery management session for a completed spawn.",
     "",
-    "Review the already-applied staged change, then open a PR.",
+    "Review the published commit, then open a PR.",
+    ...(input.commit ? [`Published commit: ${input.commit.commitSha} on ${input.commit.branch}.`] : []),
     "",
     `Original request:\n${input.operatorPrompt.trimEnd()}`,
     "",
     ...artifactGuidance,
-    "Required workflow — execute every step in this turn; do NOT end your turn",
-    "between steps. The deterministic loop has no way to nudge you mid-task,",
-    "so a session that stops after the commit or push but before the PR is a",
-    "stranded steward that requires manual recovery.",
-    "1. Inspect `git status --short` and the staged diff.",
-    "2. Review the resulting diff for correctness and security.",
-    "3. Run the smallest meaningful verification for the touched code.",
-    "4. Confirm the work is actually complete: every acceptance criterion the",
-    "   slice was scoped to must be satisfied by the staged diff. If any item is",
-    "   missing, partial, or untested, FIX IT in this turn (extend the diff) or",
-    "   escalate via `NEED:` — do not proceed to commit on partial work. This",
-    "   prevents the downstream `dedup-blocks-re-dispatch` failure where the loop",
-    "   archives a merged-but-incomplete slice and then refuses to re-queue it.",
-    "5. Verify the work is marked complete: every tasks.md row this slice",
-    "   addresses must be flipped from `[ ]` to `[x]` in the staged diff. If the",
-    "   matching tasks.md path or row id is ambiguous, name your assumption in the",
-    "   PR body; if you cannot find them at all, escalate via `NEED:` rather than",
-    "   committing with the boxes still unchecked.",
-    "6. Commit the applied change. (`git commit`)",
-    "7. Push the branch to origin. (`git push -u origin <branch>`)",
-    "8. Open the PR using the `march-steward:steward-pr` skill, which defines the required",
-    "   title and body format (parentage-grounded Summary, surfaced spec debt +",
-    "   uncertainty, one-line validation — no per-file Changes dump). Use the",
-    "   artifact path and original request as its inputs.",
-    "9. Report the PR URL on the final line of your reply as `PR: <url>`. If any",
-    "   step fails, escalate via `NEED: <one-line summary> — <one-line next action>`",
-    "   instead of stopping silently. NEVER end your turn after a successful commit",
-    "   or push if the PR has not yet been opened — that leaves the workflow stranded.",
+    "Complete all review and PR steps in this turn.",
+    "1. Review the local HEAD commit, which Hatchery verified against the published branch.",
+    "   Inspect its diff for correctness and security.",
+    "2. Run the smallest meaningful verification for the touched code.",
+    "3. Confirm every acceptance criterion is satisfied and every matching tasks.md row",
+    "   changed from `[ ]` to `[x]` in the published commit.",
+    "4. If corrections are needed, report NEED: <problem> — <next action> and stop.",
+    "   Leave the published commit and branch intact. Do not edit, commit, or push.",
+    "5. Open the PR for the exact published branch using the `march-steward:steward-pr` skill.",
+    "6. Report the PR URL on the final line as `PR: <url>`. Escalate failures via NEED:.",
   ].join("\n");
 }
 
@@ -1616,6 +1609,7 @@ export async function runHatcherySpawn(
   let integrationBranch = orphanManagerBranch(branch);
   // Rollback writes Git state in the manager worktree, so it only runs once the
   // recorded target is authorized at rollback time (#735 review).
+  let integrationCommit: IntegrationCommit | undefined;
   let stewardTarget: StewardTarget | undefined;
   let containerId: string | undefined;
   let logs = "";
@@ -1921,18 +1915,12 @@ export async function runHatcherySpawn(
     }
 
     const artifactDir = hatcherySpawnLogDir(spawnId, input.homeDir);
-    const managerPrompt = buildManagerPrompt({
-      operatorPrompt: input.prompt,
-      patchPath: path.join(artifactDir, "patch.diff"),
-      spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
-      metadataPath: path.join(artifactDir, "metadata.json"),
-    });
     const artifacts = createHatcherySpawnArtifacts({
       spawnId,
       homeDir: input.homeDir,
       spawnOutput: logs,
       patch: eligibility.handoff.patchText,
-      managerPrompt,
+      managerPrompt: "",
       metadata: metadataFor(
         input,
         manager,
@@ -1943,10 +1931,37 @@ export async function runHatcherySpawn(
         eligibility.handoff,
       ),
     });
-    stage = "patch_apply";
+    stage = "integration_commit";
     const managerWorktreePath = manager.worktreePath;
     const { touchedPaths, patchText } = eligibility.handoff;
-    const application = dispatch.span("steward.apply", (span) => {
+    const publishTarget = { target: managerWorktreePath, branchRef: "refs/heads/" + integrationBranch };
+    const resolvePublishTarget = () => resolveStewardTarget(recordedTarget);
+    const handoff = eligibility.handoff;
+    function commitPhase<T>(name: string, action: (target: AuthorizedStewardTarget) => T): T {
+      return dispatch.span(name, (span) => {
+        span.setAttributes({ "march.spawn_id": spawnId, "march.branch": integrationBranch });
+        try {
+          return action(resolvePublishTarget());
+        } catch (error) {
+          throw publicationError(publishTarget, handoff, error);
+        }
+      });
+    }
+    // A prior commit can have survived an interrupted push. Inspect the
+    // authorized ref before attempting to reapply the extraction.
+    let recovered: IntegrationCommit | undefined;
+    try {
+      resolvePublishTarget();
+      recovered = commitPhase("steward.commit_lookup", (target) => findIntegrationCommit(target, handoff));
+    } catch (error) {
+      // Let US2 report its established authorization failure when the target
+      // cannot be resolved. Failures after authorization belong to commit.
+      if (error instanceof IntegrationPublicationError) throw error;
+    }
+    stage = "patch_apply";
+    const application: PatchApplicationResult = recovered
+      ? { spawnId, status: "applied", touchedPaths: [...new Set(touchedPaths)].sort(), appliedAt: recovered.committedAt }
+      : dispatch.span("steward.apply", (span) => {
       span.setAttributes({
         "march.slice_id": sliceId,
         "march.spawn_id": spawnId,
@@ -1983,6 +1998,29 @@ export async function runHatcherySpawn(
         throw error;
       }
     });
+    stage = "integration_commit";
+    integrationCommit = recovered ?? commitPhase("steward.commit", (target) => createIntegrationCommit(target, handoff));
+    const localCommit = integrationCommit;
+    stage = "integration_push";
+    const commit = await dispatch.spanAsync("steward.push", async (span) => {
+      span.setAttributes({ "march.spawn_id": spawnId, "march.branch": integrationBranch,
+        "march.commit_sha": localCommit.commitSha });
+      let target: AuthorizedStewardTarget;
+      try {
+        target = resolvePublishTarget();
+      } catch (error) {
+        throw publicationError(publishTarget, handoff, error, localCommit);
+      }
+      return pushIntegrationCommit(target, handoff, localCommit, { homeDir: input.homeDir, sliceId });
+    });
+    const managerPrompt = buildManagerPrompt({
+      commit,
+      operatorPrompt: input.prompt,
+      patchPath: path.join(artifactDir, "patch.diff"),
+      spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
+      metadataPath: path.join(artifactDir, "metadata.json"),
+    });
+    fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
     stage = "steward_send";
     await dispatch.spanAsync("steward.send", () =>
       sendPromptToAgentDeckManager(
@@ -2004,6 +2042,7 @@ export async function runHatcherySpawn(
       managerSession: manager,
       artifacts,
       application,
+      commit,
       exitCode: waitResult.exitCode,
       summary: [
         `Hatchery spawn ${spawnId} handed off to manager session ${manager.sessionId}.`,
@@ -2029,7 +2068,7 @@ export async function runHatcherySpawn(
     // Every Git-writing rollback below needs an authorized target, whatever
     // failed, and it is re-checked now: the checkout may have changed since it
     // was authorized, and a rejected target stays outside the rollback path.
-    const rollbackAuthorized = (err instanceof StewardApplyError ? err.targetAuthorized : true) &&
+    const rollbackAuthorized = !integrationCommit && (err instanceof StewardApplyError ? err.targetAuthorized : true) &&
       canAuthorizeRollback(stewardTarget, integrationBranch);
     const mgr = rollbackAuthorized ? manager : undefined;
     // #243: `manager.launch` failed because the dispatch branch already exists.
@@ -2148,6 +2187,7 @@ export async function runHatcherySpawn(
       err instanceof LaunchError ||
       err instanceof SpawnRecordError ||
       err instanceof HatcherySpawnError ||
+      err instanceof IntegrationPublicationError ||
       err instanceof HatcheryGitHubError
     ) {
       throw err;

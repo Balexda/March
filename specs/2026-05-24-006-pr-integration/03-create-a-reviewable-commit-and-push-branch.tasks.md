@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Create or recover the focused commit**
+- [x] **Create or recover the focused commit**
 
   Connect the publisher to US2’s authorized checkout and staged result in `src/hatchery/spawn-handoff.ts`. Check for reuse before reapplying the extraction (AS 3.1, AS 3.4, AS 3.5).
 
@@ -26,7 +26,7 @@
   - Repeated or overlapping attempts for unchanged content cannot create duplicate commits. Missing or invalid staged content with no equivalent commit produces a stable commit failure before push.
   - Local Git coverage exercises focused content, unrelated changes, empty staging, and retries after a commit already exists.
 
-- [ ] **Push the recorded branch and gate PR handoff on success**
+- [x] **Push the recorded branch and gate PR handoff on success**
 
   Publish through the existing Steward credential boundary and return the contract’s `IntegrationCommit` (AS 3.2, AS 3.3, AS 3.4).
 

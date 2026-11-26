@@ -1,3 +1,4 @@
+import { IntegrationPublicationError } from "../integration-publisher.js";
 import { Worker, parentPort } from "node:worker_threads";
 import { getBackend } from "../../spawn/backends.js";
 import { initOtel } from "../../observability/otel.js";
@@ -57,6 +58,7 @@ export function runSpawnInWorker(
       settle(() => {
         if (message.ok) resolve(message.result);
         else if (message.application) reject(new StewardApplyError(message.application, false));
+        else if (message.publication) reject(new IntegrationPublicationError(message.publication));
         else reject(new Error(message.error));
       });
     });
@@ -106,6 +108,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
     message = {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
+      ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
       ...(err instanceof StewardApplyError ? { application: err.application } : {}),
     };
   } finally {

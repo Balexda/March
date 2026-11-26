@@ -22,6 +22,8 @@ export type SpawnFailureStage =
   | "patch_extract"
   | "handoff_eligibility"
   | "patch_apply"
+  | "integration_commit"
+  | "integration_push"
   | "steward_send"
   | "rollback";
 

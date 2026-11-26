@@ -42,6 +42,7 @@ function fakeResult(spawnId = "spawn-123"): HatcherySpawnResult {
       metadataPath: "/logs/meta.json",
     },
     application: { spawnId: spawnId, status: "applied", touchedPaths: ["f"] },
+    commit: { spawnId: spawnId, branch: "recorded", commitSha: "abc", patchSha256: "def", committedAt: "2026-01-01T00:00:00Z" },
     exitCode: 0,
     summary: "ok",
   };

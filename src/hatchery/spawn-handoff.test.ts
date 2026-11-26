@@ -138,42 +138,15 @@ describe("spawn-handoff", () => {
     );
   });
 
-  it("manager prompt enumerates push and PR creation as separate atomic steps", () => {
-    // Regression guard for the steward-strands-after-push bug. The previous
-    // prompt combined commit + push + open PR in one step; in production
-    // sonnet sometimes ended its turn after the successful push tool result,
-    // leaving the workflow stranded with no PR. Splitting the workflow into
-    // atomic steps and explicitly forbidding mid-task exit fixes this.
-    //
-    // Steps 4 and 5 now sit between the verification and the commit, so the
-    // terminal-action numbering is 6/7/8/9 (not 4/5/6/7).
+  it("asks the Steward to verify the published commit and escalate corrections", () => {
     const prompt = buildManagerPrompt({ operatorPrompt: "Do the work." });
-    // Each terminal action gets its own numbered step so claude can't
-    // consider "step N complete" after just the commit.
-    expect(prompt).toMatch(/6\. Commit/);
-    expect(prompt).toMatch(/7\. Push/);
-    expect(prompt).toMatch(/8\. Open the PR using the `march-steward:steward-pr` skill/);
-    expect(prompt).toMatch(/9\. Report the PR URL/);
-    // The mid-task-exit prohibition must be present in plain language so
-    // claude reads it during planning, not just as boilerplate.
-    expect(prompt).toMatch(/do NOT end your turn/i);
+    expect(prompt).toContain("Review the published commit");
+    expect(prompt).toContain("every acceptance criterion");
+    expect(prompt).toContain("`[ ]` to `[x]`");
     expect(prompt).toContain("NEED:");
-    expect(prompt).toContain("stranded steward");
-    // No combined "commit + push + open PR" step survives in the commit step.
-    expect(prompt).not.toMatch(/6\.[^\n]*push[^\n]*PR/);
-  });
-
-  it("manager prompt requires verifying completion and ticking tasks.md boxes", () => {
-    // Regression guard for the "merged PR but tasks.md row still `[ ]`" drift
-    // that wedges the deterministic loop: the loop dedups future dispatches
-    // off the merged slice id, so any unchecked rows are silently abandoned.
-    // The handoff prompt must force the steward to (a) confirm acceptance
-    // criteria are actually met and (b) flip the matching tasks.md rows.
-    const prompt = buildManagerPrompt({ operatorPrompt: "Do the work." });
-    expect(prompt).toMatch(/4\. Confirm the work is actually complete/);
-    expect(prompt).toMatch(/5\. Verify the work is marked complete/);
-    expect(prompt).toMatch(/`\[ \]` to `\[x\]`/);
-    expect(prompt).toContain("dedup-blocks-re-dispatch");
+    expect(prompt).toContain("Do not edit, commit, or push");
+    expect(prompt).toContain("exact published branch");
+    expect(prompt).toContain("PR: <url>");
   });
 
   it("validates selected backend auth without exposing secret values or paths", () => {
@@ -240,9 +213,9 @@ describe("spawn-handoff", () => {
     expect(fs.readFileSync(artifacts.patchPath, "utf-8")).toBe(patch);
     expect(fs.readFileSync(artifacts.spawnOutputPath, "utf-8")).toBe("spawn log");
     const writtenPrompt = fs.readFileSync(artifacts.managerPromptPath, "utf-8");
-    expect(writtenPrompt).toContain("Review the already-applied staged change");
+    expect(writtenPrompt).toContain("Review the published commit");
     expect(writtenPrompt).toContain(
-      `Patch input: ${artifacts.patchPath} (validated ExtractionResult.patch.patchText; already applied).`,
+      `Patch input: ${artifacts.patchPath} (validated ExtractionResult.patch.patchText; already published).`,
     );
     expect(writtenPrompt).toContain("do not use it as patch input");
     const metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf-8"));
