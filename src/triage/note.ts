@@ -2,7 +2,9 @@ import { emitTriageNoteSelectionFailure } from "../observability/triage-trace.js
 import { parseJsonWithUniqueKeys, validateTriageVerdict, type TriageVerdictV1 } from "./verdict.js";
 
 const MARKER_PREFIX = /<!--[ \t\r\n]*march-triage-note/g;
-const V1_MARKER = /^<!-- march-triage-note:v1 ([A-Za-z0-9+/]+={0,2}) -->\r?$/m;
+// The marker must stand on its own line and terminate the comment (trailing
+// whitespace aside); a marker followed by more text is malformed.
+const V1_MARKER = /(?:^|\n)<!-- march-triage-note:v1 ([A-Za-z0-9+/]+={0,2}) -->\s*$/;
 const GRADE_LABELS = {
   "minor-gaps": "Minor gaps",
   "major-gaps": "Major gaps",

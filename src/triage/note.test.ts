@@ -123,6 +123,7 @@ describe("selectTriageNote", () => {
     ["duplicate verdict key", rawMarker(JSON.stringify({ ...evaluation, originalVerdict: { ...basic, outcome: "mark" } })
       .replace('"outcome":"mark"', '"outcome":"close","outcome":"mark"'))],
     ["duplicate payload key", rawMarker(JSON.stringify(evaluation).replace('{', '{"rubricVersion":"other",'))],
+    ["trailing text after marker", `${proposed}\nAdditional text`],
     ["repeated marker", `${proposed}\n\n${marker(evaluation)}`],
     ["valid and malformed markers", `${proposed}\n\n<!-- march-triage-note:v1`],
   ])("fails without a proposal for an owned note with %s", (_case, body) => {
