@@ -8,7 +8,7 @@ import {
 import { runSpawnInWorker } from "./spawn-runner.js";
 import { DISPATCH_REASON_NONE, dispatchReasonCode } from "../dispatch-reason.js";
 import { SpawnWindow } from "./readiness.js";
-import type { HatcherySpawnResult } from "../spawn-handoff.js";
+import { StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
 import type { JobRecord, SpawnRequest } from "./types.js";
 
 /** Executes one spawn request. Default runs in a worker; tests inject a fake. */
@@ -155,7 +155,10 @@ export class JobStore {
         }
       }
     } catch (err) {
-      record.error = { message: errorMessage(err) };
+      record.error = {
+        message: errorMessage(err),
+        ...(err instanceof StewardApplyError ? { application: err.application } : {}),
+      };
       record.status = "failed";
       this.logger?.error({ ...fields, err: errorMessage(err) }, "spawn job failed");
       const reason = dispatchReasonCode(err);

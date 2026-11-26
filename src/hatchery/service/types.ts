@@ -1,4 +1,4 @@
-import type { HatcherySpawnResult } from "../spawn-handoff.js";
+import type { HatcherySpawnResult, PatchApplicationResult } from "../spawn-handoff.js";
 
 /**
  * Wire shape for a spawn request. Mirrors {@link HatcherySpawnOptions} but with
@@ -27,6 +27,7 @@ export type JobStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface JobError {
   readonly message: string;
+  readonly application?: PatchApplicationResult;
 }
 
 /** A spawn job tracked by the service. `id` is a server UUID, distinct from the inner spawnId. */
@@ -43,7 +44,7 @@ export interface JobRecord {
 /** Message posted from the spawn worker thread back to the service. */
 export type SpawnWorkerMessage =
   | { readonly ok: true; readonly result: HatcherySpawnResult }
-  | { readonly ok: false; readonly error: string };
+  | { readonly ok: false; readonly error: string; readonly application?: PatchApplicationResult };
 
 /** workerData passed into the spawn worker thread. */
 export interface SpawnWorkerData {

@@ -21,11 +21,12 @@ import type { SpawnBackend } from "../spawn/backends.js";
 
 // Hoisted so the vi.mock factories (themselves hoisted to the top of the file)
 // can reference these without a "cannot access before initialization" error.
-const { removeSpawnWorktreeSpy, removeSessionSpy, launchShouldThrow } =
+const { removeSpawnWorktreeSpy, removeSessionSpy, launchShouldThrow, managerWorktree } =
   vi.hoisted(() => ({
     removeSpawnWorktreeSpy: vi.fn(),
     removeSessionSpy: vi.fn(async () => ({ removed: true })),
     launchShouldThrow: { value: false },
+    managerWorktree: { value: "/wt/ad-xyz" },
   }));
 
 vi.mock("../brood/worktree.js", async (importOriginal) => {
@@ -47,7 +48,7 @@ vi.mock("../castra/client.js", () => {
           title: req.title,
           group: req.group ?? "g",
           branch: req.branch,
-          worktreePath: "/wt/ad-xyz",
+          worktreePath: managerWorktree.value,
         };
       },
     ),
@@ -84,6 +85,7 @@ import {
   orphanManagerBranch,
   runHatcherySpawn,
 } from "./spawn-handoff.js";
+import { makeLinkedWorktree } from "../testing/linked-worktree.js";
 
 const backend: SpawnBackend = {
   name: "codex",
@@ -101,8 +103,11 @@ function makeHome(): string {
   return dir;
 }
 
+const cleanups: Array<() => void> = [];
+
 beforeEach(() => {
   launchShouldThrow.value = false;
+  managerWorktree.value = "/wt/ad-xyz";
   vi.stubEnv("MARCH_BROOD_URL", ""); // disable launch-time brood registration
 });
 
@@ -110,6 +115,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.clearAllMocks();
   while (tmpDirs.length) fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  while (cleanups.length) cleanups.pop()!();
 });
 
 describe("orphanManagerBranch", () => {
@@ -129,10 +135,14 @@ describe("orphanManagerBranch", () => {
 describe("runHatcherySpawn orphan-branch rollback (#211)", () => {
   it("removes the orphan worktree+branch by exact path on a post-launch failure", async () => {
     const home = makeHome();
+    // Rollback writes Git state, so it needs a real recorded linked worktree.
+    const fixture = makeLinkedWorktree("feature/smithy/cut/01-spawn-f3-s3");
+    cleanups.push(fixture.cleanup);
+    managerWorktree.value = fixture.worktreePath;
 
     await expect(
       runHatcherySpawn({
-        repoPath: "/repo",
+        repoPath: fixture.repoPath,
         prompt: "do the thing",
         backend,
         agentDeckProfile: "march",
@@ -145,11 +155,31 @@ describe("runHatcherySpawn orphan-branch rollback (#211)", () => {
     // by the exact-path rollback helper.
     expect(removeSessionSpy).toHaveBeenCalledTimes(1);
     expect(removeSpawnWorktreeSpy).toHaveBeenCalledTimes(1);
-    expect(removeSpawnWorktreeSpy).toHaveBeenCalledWith("/repo", {
+    expect(removeSpawnWorktreeSpy).toHaveBeenCalledWith(fixture.repoPath, {
       spawnId: expect.stringMatching(/^\d{8}-[0-9a-f]{6}$/),
       branch: "feature/smithy/cut/01-spawn-f3-s3",
-      worktreePath: "/wt/ad-xyz",
+      worktreePath: fixture.worktreePath,
     });
+  });
+
+  it("skips the Git-writing rollback when the manager worktree cannot be authorized", async () => {
+    const home = makeHome();
+
+    await expect(
+      runHatcherySpawn({
+        repoPath: "/repo",
+        prompt: "do the thing",
+        backend,
+        agentDeckProfile: "march",
+        branch: "smithy/cut/01-spawn-f3-s3",
+        homeDir: home,
+      }),
+    ).rejects.toThrow(/image build failed/);
+
+    // "/wt/ad-xyz" is not a recorded linked worktree, so neither the
+    // worktree-pruning session removal nor the branch removal may run.
+    expect(removeSessionSpy).not.toHaveBeenCalled();
+    expect(removeSpawnWorktreeSpy).not.toHaveBeenCalled();
   });
 
   it("does not attempt branch rollback when the manager launch itself fails", async () => {

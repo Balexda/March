@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { FINDER_BIN } from "../../shared/deps.js";
 import { buildServer } from "./server.js";
+import type { JobRecord } from "./types.js";
 import { buildServer as buildCastraServer } from "../../castra/server.js";
 import { createAgentDeckAdapter } from "../../castra/adapter.js";
 import type { FastifyInstance } from "fastify";
@@ -259,10 +260,10 @@ exit 0
     process.env.CASTRA_API_TOKEN = CASTRA_TOKEN;
   }
 
-  async function poll(id: string): Promise<{ status: string; result?: unknown; error?: { message: string } }> {
+  async function poll(id: string): Promise<JobRecord> {
     for (let i = 0; i < 600; i++) {
       const res = await app!.inject({ method: "GET", url: `/spawns/${id}` });
-      const job = res.json();
+      const job = res.json<JobRecord>();
       if (job.status === "succeeded" || job.status === "failed") return job;
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -300,6 +301,12 @@ exit 0
     const id = await submit(repoRoot, { title: "manager title", branch: "smithy/cut/generated" });
     const job = await poll(id);
     expect(job.status).toBe("succeeded");
+    expect(job.result?.application).toEqual({
+      spawnId: job.result?.spawnId,
+      status: "applied",
+      touchedPaths: ["generated.txt"],
+      appliedAt: expect.any(String),
+    });
 
     // Castra prefixes every agent-deck invocation with `-p <profile>`; the
     // Hatchery falls back to the default profile when none is supplied.

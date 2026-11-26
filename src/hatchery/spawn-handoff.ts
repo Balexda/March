@@ -38,6 +38,7 @@ import {
 import { generateSpawnId, parkSpawnWorktree, removeSpawnWorktree } from "../brood/worktree.js";
 import {
   readSpawnRecordExtractionResult,
+  loadSpawnRecord,
   markSpawnRecordFailed,
   markSpawnRecordRunning,
   markSpawnRecordStopped,
@@ -169,6 +170,26 @@ export type StewardHandoffEligibility =
 
 export type HandoffRefusalReason = "missing" | "failed" | "noop";
 
+export interface PatchApplicationResult {
+  readonly spawnId: string;
+  readonly status: "applied" | "failed";
+  readonly touchedPaths: string[];
+  readonly diagnostic?: string;
+  readonly appliedAt?: string;
+}
+
+export class StewardApplyError extends HatcherySpawnError {
+  constructor(
+    readonly application: PatchApplicationResult,
+    readonly targetAuthorized: boolean,
+  ) {
+    super(application.diagnostic === "timeout"
+      ? "Steward patch application timed out"
+      : "git apply failed in manager worktree (" + application.diagnostic + ")");
+    this.name = "StewardApplyError";
+  }
+}
+
 export interface HatcherySpawnResult {
   readonly spawnId: string;
   readonly backend: string;
@@ -177,6 +198,7 @@ export interface HatcherySpawnResult {
   readonly artifacts: HatcherySpawnArtifacts;
   readonly exitCode: number;
   readonly summary: string;
+  readonly application: PatchApplicationResult;
 }
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
@@ -390,15 +412,134 @@ export function extractPatchFromSpawnOutput(output: string): string {
   return normalizeTrailingNewline(patch);
 }
 
-function patchTouchedPaths(patch: string): string[] {
-  const paths = new Set<string>();
-  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = headerRe.exec(patch)) !== null) {
-    paths.add(match[1]);
-    paths.add(match[2]);
+const GIT_QUOTE_ESCAPES: Readonly<Record<string, number>> = {
+  a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92,
+};
+
+/**
+ * Decode a Git C-style quoted path (`"caf\303\251.txt"`, the default
+ * `core.quotePath` form for non-ASCII or special characters). Octal escapes
+ * are raw bytes, so the result is decoded as UTF-8. Returns null when the
+ * token is not a well-formed quoted string.
+ */
+function decodeGitQuotedPath(token: string): string | null {
+  if (token.length < 2 || !token.startsWith('"') || !token.endsWith('"')) return null;
+  const bytes: number[] = [];
+  const body = token.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    // Read whole code points: with core.quotePath=false a literal supplementary
+    // character (e.g. an emoji) sits beside escapes, and encoding its UTF-16
+    // surrogates separately would corrupt it (#735 review).
+    const ch = String.fromCodePoint(body.codePointAt(i)!);
+    if (ch === '"') return null;
+    if (ch !== "\\") {
+      bytes.push(...Buffer.from(ch, "utf-8"));
+      i += ch.length - 1;
+      continue;
+    }
+    const next = body[++i];
+    if (next === undefined) return null;
+    if (/[0-7]/.test(next)) {
+      const octal = body.slice(i, i + 3);
+      if (!/^[0-7]{3}$/.test(octal)) return null;
+      bytes.push(parseInt(octal, 8));
+      i += 2;
+    } else if (next in GIT_QUOTE_ESCAPES) {
+      bytes.push(GIT_QUOTE_ESCAPES[next]);
+    } else {
+      return null;
+    }
   }
-  return [...paths].sort();
+  return Buffer.from(bytes).toString("utf-8");
+}
+
+/** Strip a required `a/` or `b/` prefix from a (decoded) header path. */
+function stripDiffPrefix(path: string, prefix: "a/" | "b/"): string | null {
+  return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
+/** Length of a leading quoted token in `s` (including both quotes), or -1. */
+function quotedTokenLength(s: string): number {
+  if (!s.startsWith('"')) return -1;
+  for (let i = 1; i < s.length; i++) {
+    if (s[i] === "\\") i++;
+    else if (s[i] === '"') return i + 1;
+  }
+  return -1;
+}
+
+interface PatchFileOp {
+  readonly oldPath: string;
+  readonly newPath: string;
+  /** The block carries `copy from`/`copy to`: the old path is left unchanged. */
+  readonly copy: boolean;
+}
+
+/**
+ * Old/new paths from every `diff --git` header, decoding Git's quoted form so
+ * filenames such as `café.txt` match the names `git diff --cached -z` stages.
+ * Handles either side being quoted independently (#735 review).
+ */
+function patchFileOps(patch: string): PatchFileOp[] {
+  const ops: PatchFileOp[] = [];
+  const headerRe = /^diff --git (.+)$/gm;
+  const headers = [...patch.matchAll(headerRe)];
+  for (const [index, match] of headers.entries()) {
+    const blockEnd = headers[index + 1]?.index ?? patch.length;
+    const block = patch.slice(match.index, blockEnd);
+    const rest = match[1];
+    let oldRaw: string | null = null;
+    let newRaw: string | null = null;
+    const qa = quotedTokenLength(rest);
+    if (qa > 0) {
+      oldRaw = decodeGitQuotedPath(rest.slice(0, qa));
+      const tail = rest.slice(qa);
+      if (tail.startsWith(" ")) {
+        const b = tail.slice(1);
+        newRaw = b.startsWith('"') ? decodeGitQuotedPath(b) : b;
+      }
+    } else if (rest.endsWith('"')) {
+      const split = rest.lastIndexOf(' "b/');
+      if (split > 0) {
+        oldRaw = rest.slice(0, split);
+        newRaw = decodeGitQuotedPath(rest.slice(split + 1));
+      }
+    } else {
+      const plain = /^(a\/.+?) (b\/.+)$/.exec(rest);
+      if (plain) {
+        oldRaw = plain[1];
+        newRaw = plain[2];
+      }
+    }
+    const oldPath = oldRaw === null ? null : stripDiffPrefix(oldRaw, "a/");
+    const newPath = newRaw === null ? null : stripDiffPrefix(newRaw, "b/");
+    if (oldPath === null || newPath === null) {
+      throw new HatcherySpawnError(
+        "Spawn patch has an unparseable `diff --git` header; refusing to apply.",
+      );
+    }
+    ops.push({ oldPath, newPath, copy: /^copy from /m.test(block) });
+  }
+  return ops;
+}
+
+function patchHeaderPaths(patch: string): string[] {
+  return patchFileOps(patch).flatMap((op) => [op.oldPath, op.newPath]);
+}
+
+function patchTouchedPaths(patch: string): string[] {
+  return [...new Set(patchHeaderPaths(patch))].sort();
+}
+
+/**
+ * Copy sources that `git apply --index` leaves unstaged: a copy stages only its
+ * destination, while a rename (with `--no-renames`) stages both sides. A path
+ * that is also modified by another block still counts as staged (#735 review).
+ */
+function patchUnstagedCopySources(patch: string): Set<string> {
+  const ops = patchFileOps(patch);
+  const changed = new Set(ops.flatMap((op) => (op.copy ? [op.newPath] : [op.oldPath, op.newPath])));
+  return new Set(ops.filter((op) => op.copy && !changed.has(op.oldPath)).map((op) => op.oldPath));
 }
 
 /**
@@ -437,16 +578,12 @@ function lastPatchSentinel(output: string): string | null {
  * outside the manager worktree.
  */
 function assertPatchPathsSafe(patch: string): void {
-  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = headerRe.exec(patch)) !== null) {
-    for (const candidate of [match[1], match[2]]) {
-      if (candidate.startsWith("/") || candidate.split("/").includes("..")) {
-        throw new HatcherySpawnError(
-          `Spawn patch references an unsafe path "${candidate}" ` +
-            "(absolute or parent-directory escape); refusing to apply.",
-        );
-      }
+  for (const candidate of patchHeaderPaths(patch)) {
+    if (candidate.startsWith("/") || candidate.split("/").includes("..")) {
+      throw new HatcherySpawnError(
+        `Spawn patch references an unsafe path "${candidate}" ` +
+          "(absolute or parent-directory escape); refusing to apply.",
+      );
     }
   }
 }
@@ -1007,18 +1144,24 @@ export function applyPatchToManagerWorktree(input: {
     }
   }
   assertBranchOwnedWorktree(worktreePath);
+  return applyWithFallback(worktreePath, input.patchPath);
+}
+
+function applyWithFallback(worktreePath: string, patchPath: string, patchText?: string): PatchApplyStrategy {
   try {
-    runGitApply(["apply", "--index", input.patchPath], worktreePath);
+    runGitApply(["apply", "--index", patchPath], worktreePath, patchText);
     return "index";
   } catch (errIndex) {
+    if (gitTimedOut(errIndex)) throw errIndex;
     const stderrIndex = stderrText((errIndex as { stderr?: unknown }).stderr);
     // Defensive fallback (#244): a 3-way merge can resolve a patch whose base
     // context drifted (e.g. a "new file" the worktree base already has). It
     // never silently masks a real conflict — that still throws below.
     try {
-      runGitApply(["apply", "--index", "--3way", input.patchPath], worktreePath);
+      runGitApply(["apply", "--index", "--3way", patchPath], worktreePath, patchText);
       return "index-3way";
     } catch (err3way) {
+      if (gitTimedOut(err3way)) throw err3way;
       const stderr3way = stderrText((err3way as { stderr?: unknown }).stderr);
       // Combine both rejects: the plain `--index` stderr names the path with an
       // `error:` line, while the `--3way` stderr explains why the merge couldn't
@@ -1084,13 +1227,187 @@ function assertBranchOwnedWorktree(worktreePath: string): void {
   }
 }
 
-function runGitApply(args: readonly string[], cwd: string): void {
-  execFileSync("git", args as string[], {
+function gitTimedOut(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "ETIMEDOUT";
+}
+
+function runGitApply(args: string[], cwd: string, input?: string): void {
+  execFileSync("git", args, {
+    cwd,
+    env: { ...hatcheryGitEnv(), LC_ALL: "C" },
+    input,
+    stdio: [input === undefined ? "ignore" : "pipe", "ignore", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
+  });
+}
+
+function stewardGit(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
     cwd,
     env: hatcheryGitEnv(),
-    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
   });
+}
+
+function integrationBranchForManager(worktreePath: string, dispatchBranch: string): string {
+  const agentDeckBranch = orphanManagerBranch(dispatchBranch);
+  try {
+    // Castra can report a symbolic launch name even when agent-deck used its
+    // feature/ prefix. Record the exact ref from the requested branch family.
+    const ref = stewardGit(worktreePath, "symbolic-ref", "--quiet", "HEAD").trimEnd();
+    if (ref === "refs/heads/" + dispatchBranch) return dispatchBranch;
+  } catch {
+    // Authorization reports an unavailable or detached checkout if it persists.
+  }
+  return agentDeckBranch;
+}
+
+interface StewardTarget {
+  readonly spawnId: string;
+  readonly repoPath: string;
+  readonly managerWorktreePath: string;
+  readonly homeDir?: string;
+}
+
+function targetFailureReason(error: unknown): string {
+  if (error instanceof SpawnRecordError) return "missing_lifecycle_state";
+  if (gitTimedOut(error)) return "timeout";
+  return "integration_target_unavailable";
+}
+
+interface AuthorizedStewardTarget {
+  readonly target: string;
+  readonly branchRef: string;
+}
+
+function stewardHeadRef(target: string): string {
+  return stewardGit(target, "symbolic-ref", "--quiet", "HEAD").trimEnd();
+}
+
+function resolveStewardTarget(input: StewardTarget): AuthorizedStewardTarget {
+  const record = loadSpawnRecord(input.spawnId, input.homeDir);
+  if (!record || record.id !== input.spawnId) throw new SpawnRecordError("missing_lifecycle_state");
+  if (!record.repoPath || !record.worktreePath || !record.integrationBranch) {
+    throw new Error("integration_target_unavailable");
+  }
+  return authorizeLinkedCheckout(input, {
+    repoPath: record.repoPath,
+    worktreePath: record.worktreePath,
+    integrationBranch: record.integrationBranch,
+  });
+}
+
+/**
+ * The checkout must be a linked worktree (never the operator checkout) of the
+ * requested repository, at the manager path, with the exact branch checked out.
+ */
+function authorizeLinkedCheckout(
+  input: StewardTarget,
+  record: { readonly repoPath: string; readonly worktreePath: string; readonly integrationBranch: string },
+): AuthorizedStewardTarget {
+  const gitPath = (cwd: string, flag: string) =>
+    fs.realpathSync(stewardGit(cwd, "rev-parse", "--path-format=absolute", flag).replace(/\n$/, ""));
+  const repo = gitPath(record.repoPath, "--show-toplevel");
+  const target = fs.realpathSync(record.worktreePath);
+  const commonDir = gitPath(repo, "--git-common-dir");
+  if (
+    repo !== gitPath(input.repoPath, "--show-toplevel") ||
+    target === repo ||
+    target !== gitPath(target, "--show-toplevel") ||
+    target !== fs.realpathSync(input.managerWorktreePath) ||
+    gitPath(target, "--git-common-dir") !== commonDir ||
+    gitPath(target, "--git-dir") === commonDir ||
+    stewardHeadRef(target) !== "refs/heads/" + record.integrationBranch
+  ) {
+    throw new Error("integration_target_unavailable");
+  }
+  stewardGit(target, "rev-parse", "--verify", "HEAD^{commit}");
+  return { target, branchRef: "refs/heads/" + record.integrationBranch };
+}
+
+function canAuthorizeRollback(
+  target: StewardTarget | undefined,
+  integrationBranch: string,
+): boolean {
+  if (!target) return false;
+  try {
+    if (loadSpawnRecord(target.spawnId, target.homeDir)) {
+      resolveStewardTarget(target);
+    } else {
+      // No lifecycle record was written (e.g. record_init failed): authorize the
+      // values that would have been recorded, with the same checkout checks.
+      authorizeLinkedCheckout(target, {
+        repoPath: target.repoPath,
+        worktreePath: target.managerWorktreePath,
+        integrationBranch,
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applyStewardHandoff(input: StewardTarget & {
+  readonly handoff: StewardHandoffInput;
+  readonly span: DispatchSpanHandle;
+}): PatchApplicationResult {
+  const { spawnId, handoff, span } = input;
+  const touchedPaths = [...new Set(handoff.touchedPaths)].sort();
+  let targetAuthorized = false;
+  const fail = (diagnostic: string) =>
+    new StewardApplyError({ spawnId, status: "failed", touchedPaths, diagnostic }, targetAuthorized);
+
+  try {
+    const { target, branchRef } = resolveStewardTarget(input);
+    if (handoff.spawnId !== spawnId) throw fail("patch_apply_failed");
+    const expectedStaged = touchedPaths.filter((name) => !patchUnstagedCopySources(handoff.patchText).has(name));
+    const assertOnBranch = () => {
+      // Another process could switch this clean worktree between authorization,
+      // application, and the Steward handoff (#735 review). A switched checkout
+      // is no longer the authorized target, so rollback must not touch it.
+      if (stewardHeadRef(target) !== branchRef) {
+        targetAuthorized = false;
+        throw fail("integration_target_unavailable");
+      }
+    };
+
+    targetAuthorized = true;
+    const staged = () => stewardGit(target, "diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z")
+      .split("\0").filter(Boolean).sort();
+    if (staged().length) throw fail("staged_paths_mismatch");
+
+    let strategy: PatchApplyStrategy;
+    assertOnBranch();
+    try {
+      strategy = applyWithFallback(target, "-", handoff.patchText);
+    } catch (error) {
+      // Git diagnostics can include private paths and content. Expose a fixed reason.
+      if (error instanceof PatchApplyError &&
+          /patch does not apply|patch failed|already exists|with conflicts|does not match index/i.test(error.stderr)) {
+        throw fail("patch_conflict");
+      }
+      throw error;
+    }
+    span.setAttributes({ "march.patch.strategy": strategy });
+    const paths = staged();
+    if (!paths.length) throw fail("empty_staged_diff");
+    if (paths.length !== expectedStaged.length || paths.some((name, i) => name !== expectedStaged[i])) {
+      throw fail("staged_paths_mismatch");
+    }
+    assertOnBranch();
+
+    return { spawnId, status: "applied", touchedPaths, appliedAt: new Date().toISOString() };
+  } catch (error) {
+    if (error instanceof StewardApplyError) throw error;
+    throw fail(targetAuthorized && !gitTimedOut(error) ? "patch_apply_failed" : targetFailureReason(error));
+  }
 }
 
 /** Run a git command for its side effect, discarding stdout. */
@@ -1199,11 +1516,13 @@ export interface PinBaseResult {
 export async function pinManagerWorktreeToDefaultBranch(
   worktreePath: string,
   sliceId?: string,
+  authorizeWrite?: () => void,
 ): Promise<PinBaseResult> {
   if (!fs.existsSync(worktreePath)) {
     return { defaultBranch: resolveDefaultBranch(worktreePath), fetched: false, pinned: false };
   }
   const origin = await resolveHatcheryOrigin(worktreePath);
+  if (origin) authorizeWrite?.();
   // For a GitHub origin, ask GitHub through the same scope: a local origin/HEAD
   // is not refreshed by `git fetch` and can still name a renamed/deleted branch,
   // and guessing `main` without one would fail the fetch the same way.
@@ -1220,20 +1539,27 @@ export async function pinManagerWorktreeToDefaultBranch(
     fetched = result === 0;
     if (!fetched && origin.repo) throw new HatcheryGitHubError("fetch_failed");
   }
-  let pinned = false;
+  let tip: string | undefined;
   try {
     // Resolve once so another job cannot move the tracking ref between the
     // ancestry check and reset.
-    const tip = runGitCapture(
+    const candidate = runGitCapture(
       ["rev-parse", "--verify", "refs/remotes/origin/" + defaultBranch + "^{commit}"],
       worktreePath,
     );
-    if (isAncestor("HEAD", tip, worktreePath)) {
-      runGitQuiet(["reset", "--hard", tip], worktreePath);
-      pinned = true;
-    }
+    if (isAncestor("HEAD", candidate, worktreePath)) tip = candidate;
   } catch {
     // Preserve the original base if there is no tracking ref or reset fails.
+  }
+  let pinned = false;
+  if (tip) {
+    authorizeWrite?.();
+    try {
+      runGitQuiet(["reset", "--hard", tip], worktreePath);
+      pinned = true;
+    } catch {
+      // Preserve the original base if the reset fails.
+    }
   }
   return { defaultBranch, fetched, pinned };
 }
@@ -1287,6 +1613,10 @@ export async function runHatcherySpawn(
   let exitCode: number | undefined;
 
   let manager: AgentDeckManagerSession | undefined;
+  let integrationBranch = orphanManagerBranch(branch);
+  // Rollback writes Git state in the manager worktree, so it only runs once the
+  // recorded target is authorized at rollback time (#735 review).
+  let stewardTarget: StewardTarget | undefined;
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
@@ -1318,10 +1648,17 @@ export async function runHatcherySpawn(
     const spawnPrompt = buildSpawnCommitPrompt(input.prompt);
     stage = "record_init";
 
+    integrationBranch = integrationBranchForManager(manager.worktreePath, branch);
+    // Set before the record write so a failed write can still authorize rollback.
+    const recordedTarget: StewardTarget = {
+      spawnId, repoPath: input.repoPath, managerWorktreePath: manager.worktreePath, homeDir: input.homeDir,
+    };
+    stewardTarget = recordedTarget;
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
       branch,
+      integrationBranch,
       worktreePath: manager.worktreePath,
       backend: input.backend.name,
     }, input.homeDir);
@@ -1367,7 +1704,16 @@ export async function runHatcherySpawn(
     stage = "pin_base";
     await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
       pinSpan.setAttributes({ "march.worktree": managerWorktree });
-      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);
+      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId, () => {
+        try {
+          resolveStewardTarget(recordedTarget);
+        } catch (error) {
+          throw new StewardApplyError({
+            spawnId, status: "failed", touchedPaths: [],
+            diagnostic: targetFailureReason(error),
+          }, false);
+        }
+      });
       pinSpan.setAttributes({
         "march.default_branch": pin.defaultBranch,
         "march.pin_base.fetched": pin.fetched,
@@ -1599,59 +1945,42 @@ export async function runHatcherySpawn(
     });
     stage = "patch_apply";
     const managerWorktreePath = manager.worktreePath;
-    const patchSummary = summarizePatch(artifacts.patchPath);
-    dispatch.span("steward.apply", (span) => {
-      // Static diagnostics, known before the apply runs — so even a worktree-not-
-      // found failure still carries the slice/spawn/patch context (#244 item 2).
+    const { touchedPaths, patchText } = eligibility.handoff;
+    const application = dispatch.span("steward.apply", (span) => {
       span.setAttributes({
         "march.slice_id": sliceId,
         "march.spawn_id": spawnId,
         "march.worktree": managerWorktreePath,
         "march.patch_path": artifacts.patchPath,
-        "march.patch.files": patchSummary.files,
-        "march.patch.bytes": patchSummary.bytes,
-        "march.patch.first_path": patchSummary.firstPath ?? "",
+        "march.patch.files": touchedPaths.length,
+        "march.patch.bytes": Buffer.byteLength(patchText),
+        "march.patch.first_path": touchedPaths[0]?.slice(0, 256) ?? "",
       });
       try {
-        const strategy = applyPatchToManagerWorktree({
-          patchPath: artifacts.patchPath,
-          worktreePath: managerWorktreePath,
-          repoPath: input.repoPath,
+        return applyStewardHandoff({
+          ...recordedTarget,
+          handoff: eligibility.handoff,
+          span,
         });
-        span.setAttributes({ "march.patch.strategy": strategy });
-      } catch (err) {
-        if (err instanceof PatchApplyError) {
-          span.setAttributes({
-            "march.patch.reject": err.firstRejectLine ?? "",
-            "march.patch.offending_path": err.offendingPath ?? "",
-          });
-          // Trace-correlated log so Grafana's "Logs for this span" is populated —
-          // attached to THIS child span's ids explicitly (no ContextManager).
+      } catch (error) {
+        if (error instanceof StewardApplyError) {
+          const diagnostic = error.application.diagnostic ?? "patch_apply_failed";
+          span.setAttributes({ "march.patch.reject": diagnostic });
           const sc = span.spanContext();
           emitSpawnLog({
             severity: "ERROR",
-            body:
-              `steward.apply: git apply failed for spawn ${spawnId}` +
-              (err.offendingPath ? ` at ${err.offendingPath}` : "") +
-              `\npatch: ${artifacts.patchPath} (${patchSummary.files} files, ${patchSummary.bytes} bytes)` +
-              `\n${err.stderr}`,
+            body: error.message,
             traceId: sc?.traceId,
             spanId: sc?.spanId,
             attributes: {
               event_kind: "steward_apply_failed",
               "march.slice_id": sliceId,
               "march.spawn_id": spawnId,
-              "march.worktree": managerWorktreePath,
-              "march.patch_path": artifacts.patchPath,
-              "march.patch.files": patchSummary.files,
-              "march.patch.bytes": patchSummary.bytes,
-              "march.patch.first_path": patchSummary.firstPath ?? "",
-              "march.patch.offending_path": err.offendingPath ?? "",
-              "march.patch.reject": err.firstRejectLine ?? "",
+              "march.patch.reject": diagnostic,
             },
           });
         }
-        throw err;
+        throw error;
       }
     });
     stage = "steward_send";
@@ -1674,6 +2003,7 @@ export async function runHatcherySpawn(
       branch,
       managerSession: manager,
       artifacts,
+      application,
       exitCode: waitResult.exitCode,
       summary: [
         `Hatchery spawn ${spawnId} handed off to manager session ${manager.sessionId}.`,
@@ -1685,7 +2015,7 @@ export async function runHatcherySpawn(
     };
   } catch (err) {
     dispatch.recordException(err);
-    if (!(err instanceof HatcherySpawnError)) {
+    if (!(err instanceof HatcherySpawnError) || err instanceof StewardApplyError) {
       try {
         markSpawnRecordFailed(spawnId, { error: (err as Error).message }, input.homeDir);
       } catch {
@@ -1696,7 +2026,12 @@ export async function runHatcherySpawn(
     // seams (Docker rm, Castra removeSession, git branch -D), so it gets a
     // single span tagged with the stage that triggered it, not one span per
     // call. Best-effort throughout; never mask the original failure.
-    const mgr = manager;
+    // Every Git-writing rollback below needs an authorized target, whatever
+    // failed, and it is re-checked now: the checkout may have changed since it
+    // was authorized, and a rejected target stays outside the rollback path.
+    const rollbackAuthorized = (err instanceof StewardApplyError ? err.targetAuthorized : true) &&
+      canAuthorizeRollback(stewardTarget, integrationBranch);
+    const mgr = rollbackAuthorized ? manager : undefined;
     // #243: `manager.launch` failed because the dispatch branch already exists.
     // `mgr` is undefined, so the `mgr && !handedOff` rollback below cannot clean
     // it — the gap that makes the wedge self-perpetuating. Detect it here so the
@@ -1732,7 +2067,7 @@ export async function runHatcherySpawn(
             await dispatch.spanAsync("manager.park", async (parkSpan) => {
               const parked = parkSpawnWorktree(input.repoPath, {
                 spawnId,
-                branch: orphanManagerBranch(branch),
+                branch: integrationBranch,
                 worktreePath: mgr.worktreePath,
               });
               const manifestPath = writeParkedSpawnManifest(input.homeDir, {
@@ -1773,7 +2108,7 @@ export async function runHatcherySpawn(
             try {
               removeSpawnWorktree(input.repoPath, {
                 spawnId,
-                branch: orphanManagerBranch(branch),
+                branch: integrationBranch,
                 worktreePath: mgr.worktreePath,
               });
             } catch {
