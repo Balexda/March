@@ -46,6 +46,11 @@
 
 _None — no specification debt was recorded._
 
+## Open Implementation Questions
+<!-- audience: builder; mode: reference; length: one table row per question; diagram: optional; examples: discouraged -->
+
+_None — no open implementation questions._
+
 ## Dependency Order
 <!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->
 
