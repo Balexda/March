@@ -29,6 +29,10 @@ function marker(payload: unknown, version = "v1") {
   return `<!-- march-triage-note:${version} ${Buffer.from(JSON.stringify(payload)).toString("base64")} -->`;
 }
 
+function rawMarker(json: string) {
+  return `<!-- march-triage-note:v1 ${Buffer.from(json).toString("base64")} -->`;
+}
+
 describe("renderTriageNote", () => {
   it.each(TRIAGE_OUTCOMES)("publishes the %s outcome and confidence before the rationale", (outcome) => {
     const needsDefinition = outcome === "needs-definition"
@@ -116,6 +120,9 @@ describe("selectTriageNote", () => {
     ["extra field", marker({ ...evaluation, extra: true })],
     ["blank context", marker({ ...evaluation, repositoryContext: [""] })],
     ["invalid verdict", marker({ ...evaluation, originalVerdict: { ...basic, outcome: "unknown" } })],
+    ["duplicate verdict key", rawMarker(JSON.stringify({ ...evaluation, originalVerdict: { ...basic, outcome: "mark" } })
+      .replace('"outcome":"mark"', '"outcome":"close","outcome":"mark"'))],
+    ["duplicate payload key", rawMarker(JSON.stringify(evaluation).replace('{', '{"rubricVersion":"other",'))],
     ["repeated marker", `${proposed}\n\n${marker(evaluation)}`],
     ["valid and malformed markers", `${proposed}\n\n<!-- march-triage-note:v1`],
   ])("fails without a proposal for an owned note with %s", (_case, body) => {

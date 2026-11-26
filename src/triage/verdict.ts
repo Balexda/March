@@ -84,6 +84,16 @@ function parseCandidate(raw: string): unknown {
   return JSON.parse(raw);
 }
 
+/** Parses JSON, treating a repeated key in any object as invalid. */
+export function parseJsonWithUniqueKeys(raw: string): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  try {
+    return { ok: true, value: parseCandidate(raw) };
+  } catch (error) {
+    if (!(error instanceof InvalidVerdict || error instanceof SyntaxError)) throw error;
+    return { ok: false };
+  }
+}
+
 function readObject(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     reject(field, "invalid-value");

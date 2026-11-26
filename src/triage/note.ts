@@ -1,5 +1,5 @@
 import { emitTriageNoteSelectionFailure } from "../observability/triage-trace.js";
-import { validateTriageVerdict, type TriageVerdictV1 } from "./verdict.js";
+import { parseJsonWithUniqueKeys, validateTriageVerdict, type TriageVerdictV1 } from "./verdict.js";
 
 const MARKER_PREFIX = /<!--[ \t\r\n]*march-triage-note/g;
 const V1_MARKER = /^<!-- march-triage-note:v1 ([A-Za-z0-9+/]+={0,2}) -->\r?$/m;
@@ -72,13 +72,18 @@ function hasValidMarker(body: string): boolean {
   const bytes = Buffer.from(encoded, "base64");
   if (bytes.toString("base64") !== encoded) return false;
 
-  let payload: unknown;
+  let text: string;
   try {
-    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch (error) {
-    if (!(error instanceof SyntaxError || error instanceof TypeError)) throw error;
+    if (!(error instanceof TypeError)) throw error;
     return false;
   }
+  // Reject repeated keys anywhere in the payload: JSON.parse would keep only the
+  // last value, letting a conflicting verdict pass re-validation.
+  const parsed = parseJsonWithUniqueKeys(text);
+  if (!parsed.ok) return false;
+  const payload = parsed.value;
 
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
   const { rubricVersion, issueContentHash, originalVerdict, repositoryContext } =
