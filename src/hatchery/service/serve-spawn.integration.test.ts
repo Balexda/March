@@ -112,6 +112,9 @@ describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/
       ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "initial"],
       { cwd: repoRoot, env },
     );
+    const remote = path.join(parent, "remote.git");
+    execFileSync("git", ["init", "-q", "--bare", remote], { cwd: repoRoot, env });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: repoRoot, env });
     return repoRoot;
   }
 

@@ -233,7 +233,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Share of spawn dispatch jobs that failed, over the dashboard time range. Tracks the async job outcome (march_hatchery_dispatches_total) — a POST /spawns returns 202 before the job runs, so HTTP request metrics never reflect a failed dispatch.",
+      "description": "Share of spawn dispatch jobs that failed, over the dashboard time range. Tracks the async job outcome (march_hatchery_dispatches_total) — a POST /spawns returns 202 before the job runs, so HTTP request metrics never reflect a failed dispatch. This includes focused commit and branch publication failures.",
       "fieldConfig": {
         "defaults": {
           "color": {

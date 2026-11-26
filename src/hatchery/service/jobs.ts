@@ -1,3 +1,4 @@
+import { IntegrationPublicationError } from "../integration-publisher.js";
 import { randomUUID } from "node:crypto";
 import {
   decActiveSpawns,
@@ -157,6 +158,7 @@ export class JobStore {
     } catch (err) {
       record.error = {
         message: errorMessage(err),
+        ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
         ...(err instanceof StewardApplyError ? { application: err.application } : {}),
       };
       record.status = "failed";

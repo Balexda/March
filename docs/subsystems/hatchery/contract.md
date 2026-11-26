@@ -117,15 +117,27 @@ Job record response:
 | `result.exitCode` | number | Spawn worker exit code. |
 | `result.summary` | string | Spawn summary. |
 | `result.application` | object | Verified patch application with `spawnId`, `status: "applied"`, `touchedPaths`, and `appliedAt`. |
+| `result.commit` | object | Published `IntegrationCommit` with `spawnId`, exact `branch`, `commitSha`, `patchSha256`, and `committedAt`. |
+| `error.publication` | object | Bounded `commit_failed`, `push_failed`, or `timeout` with the spawn ID, recorded branch, patch digest, and local commit when available. |
 | `error.message` | string | Present when execution fails. |
 | `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. |
 
-The Steward prompt is sent after Hatchery stages the admitted extraction in the
-Brood-recorded linked worktree and verifies that the staged paths match the
-extraction and that the checkout is still on the recorded branch. A failed
-spawn rolls back the manager worktree only after that worktree is authorized as
-the recorded linked checkout. Hatchery bounds local Git commands and reports failures on the slice
-trace, following the [March vision](../../vision.md) and
+Hatchery binds publication to the Brood-recorded linked checkout. It checks the
+branch tip for a commit representing the same spawn and patch, then compares
+the staged tree with the result of replaying the validated patch against the
+parent before creating a commit. GitHub publication uses the existing Steward
+Tessera credential scoped to the origin repository. The Steward receives the
+review and PR prompt only after the recorded remote branch is published or
+verified equivalent. A publication failure preserves a verified local commit
+and its checkout for retry. A later dispatch of the slice that collides with
+that preserved branch at manager launch resumes it, but only when the prior
+spawn record's `admittedWork` (slice id, prompt sha256, backend) matches the
+current dispatch. Hatchery re-verifies the commit against the prior spawn's
+recorded extraction, then pushes it and hands
+the existing Steward the prompt instead of launching a replacement. A
+successful push records the branch as the checkout's upstream, and the Steward
+opens the PR with an explicit `--head`. Git phases are bounded and traced on the slice,
+following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 
 ## Invariants

@@ -103,6 +103,20 @@ export interface SpawnRecord {
    * Forward-compatible (no `version` bump).
    */
   extractionResult?: ExtractionResult;
+  /**
+   * Identity of the work Hatchery admitted for this spawn. A later dispatch
+   * may resume this spawn's preserved publication only when it presents the
+   * same identity. Forward-compatible (no `version` bump).
+   */
+  admittedWork?: AdmittedWork;
+}
+
+/** The slice, request, and backend a spawn was admitted to perform. */
+export interface AdmittedWork {
+  readonly sliceId: string;
+  /** sha256 of the operator prompt, so the record does not duplicate it. */
+  readonly promptSha256: string;
+  readonly backend: string;
 }
 
 /** Inputs required to write the initial `"created"` spawn record. */
@@ -350,6 +364,17 @@ export function updateSpawnRecordPrompt(
  * @throws {SpawnRecordError} If the source record is missing, unreadable, or
  *   the atomic write fails.
  */
+export function updateSpawnRecordAdmittedWork(
+  id: string,
+  admittedWork: AdmittedWork,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = { ...existing, admittedWork: { ...admittedWork } };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
 export function updateSpawnRecordStewardSession(
   id: string,
   stewardSessionId: string,

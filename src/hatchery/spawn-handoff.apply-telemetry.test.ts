@@ -19,7 +19,8 @@ import { removeSpawnWorktree } from "../brood/worktree.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath, sendPrompt, workerPatch, recordedState } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, workerPatch, recordedState, launchCollision } = vi.hoisted(() => ({
+  launchCollision: { value: false },
   worktreePath: { value: "" },
   sendPrompt: vi.fn(async () => {}),
   workerPatch: { value: "" },
@@ -52,13 +53,18 @@ vi.mock("../castra/client.js", () => {
   class CastraClient {}
   const createCastraClientFromEnv = () => ({
     launchSession: vi.fn(
-      async (req: { title: string; group?: string; branch: string }) => ({
+      async (req: { title: string; group?: string; branch: string }) => {
+        if (launchCollision.value) {
+          throw new Error(`agent-deck launch failed: Error: branch 'feature/${req.branch}' already exists`);
+        }
+        return {
         sessionId: "ad-xyz",
         title: req.title,
         group: req.group ?? "g",
         branch: req.branch,
         worktreePath: worktreePath.value,
-      }),
+        };
+      },
     ),
     removeSession: vi.fn(async () => ({ removed: true })),
     sendPrompt,
@@ -134,6 +140,9 @@ function makeWorktree(): string {
   fs.writeFileSync(path.join(dir, "f"), "hello\n");
   git("add", "f");
   git("commit", "-qm", "init");
+  const remote = path.join(makeHome(), "remote.git");
+  git("init", "-q", "--bare", remote);
+  git("remote", "add", "origin", remote);
   repoPath = dir;
   const target = path.join(makeHome(), "integration");
   git("worktree", "add", "-qb", "feature/" + branch, target);
@@ -156,6 +165,7 @@ beforeEach(() => {
   worktreePath.value = makeWorktree();
   workerPatch.value = CONFLICTING_PATCH;
   sendPrompt.mockClear();
+  launchCollision.value = false;
   recordedState.paths = undefined;
   recordedState.unavailable = false;
   vi.stubEnv("MARCH_BROOD_URL", "");
@@ -222,7 +232,7 @@ describe("steward.apply diagnostics (#244)", () => {
 });
 
 it("fails the slice trace on a Tessera outage and processes the next local job", async () => {
-  execFileSync("git", ["remote", "add", "origin", "git@github.com:team/repo.git"], {
+  execFileSync("git", ["remote", "set-url", "origin", "git@github.com:team/repo.git"], {
     cwd: worktreePath.value,
   });
   vi.stubEnv("MARCH_TESSERA_URL", "http://outage-test-tessera");
@@ -281,11 +291,75 @@ it("reports exactly the staged paths and preserves the operator's file and index
     spawnId: result.spawnId, status: "applied", touchedPaths: ["new file.txt"],
     appliedAt: expect.any(String),
   });
-  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("new file.txt\n");
+  expect(gitAt(worktreePath.value, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).toBe("new file.txt\n");
   expect(fs.readFileSync(path.join(repoPath, "f"), "utf8")).toBe("operator staged edit\n");
   expect(fs.readFileSync(path.join(repoPath, ".git", "index"))).toEqual(indexBefore);
   expect(fs.existsSync(path.join(repoPath, "new file.txt"))).toBe(false);
   expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+it("gates Steward handoff on publication and preserves the retryable local commit", async () => {
+  workerPatch.value = ADD_PATCH;
+  const target = worktreePath.value;
+  gitAt(target, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const spans = captureSpans();
+  const sliceId = "publication-failure-slice";
+
+  await expect(runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir: makeHome(), sliceId,
+  })).rejects.toMatchObject({
+    message: "Steward publication failed (push_failed)",
+    publication: {
+      failureReason: "push_failed",
+      branch: "feature/" + branch,
+      commit: { commitSha: expect.any(String) },
+    },
+  });
+  expect(gitAt(target, "show", "HEAD:new file.txt")).toBe("totally different content\n");
+  expect(sendPrompt).not.toHaveBeenCalled();
+  const span = spans.find((candidate) => candidate.name === "steward.push");
+  expect(span?.status.code).toBe(2);
+  expect(span?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
+});
+
+it("resumes a preserved publication when a retry collides at manager launch", async () => {
+  workerPatch.value = ADD_PATCH;
+  const target = worktreePath.value;
+  const remote = gitAt(target, "remote", "get-url", "origin").trim();
+  gitAt(target, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const homeDir = makeHome();
+  const sliceId = "publication-resume-slice";
+  const failure = await runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId,
+  }).catch((error: { publication: { spawnId: string; commit: { commitSha: string } } }) => error.publication);
+  const preserved = (failure as { commit: { commitSha: string } }).commit.commitSha;
+
+  gitAt(target, "remote", "set-url", "origin", remote);
+  launchCollision.value = true;
+  const spans = captureSpans();
+  // A different request naming the same branch must not inherit the publication.
+  await expect(runHatcherySpawn({ repoPath, branch, prompt: "other work", backend, homeDir, sliceId }))
+    .rejects.toThrow(/already exists|diverged|manager/i);
+  await expect(runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId: "other-slice" }))
+    .rejects.toThrow(/already exists|diverged|manager/i);
+  expect(gitAt(remote, "for-each-ref", "refs/heads/feature/" + branch).trim()).toBe("");
+  sendPrompt.mockClear();
+  const result = await runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId });
+
+  expect(result.spawnId).toBe((failure as { spawnId: string }).spawnId);
+  expect(result.commit.commitSha).toBe(preserved);
+  expect(result.managerSession).toMatchObject({ sessionId: "ad-xyz", worktreePath: target });
+  expect(gitAt(remote, "rev-parse", "refs/heads/feature/" + branch).trim()).toBe(preserved);
+  expect(gitAt(target, "rev-parse", "@{upstream}").trim()).toBe(preserved);
+  expect(gitAt(target, "rev-list", "--count", "HEAD").trim()).toBe("2");
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: "ad-xyz",
+    prompt: expect.stringContaining(`Published commit: ${preserved}`),
+  }));
+  const push = spans.find((candidate) => candidate.name === "steward.push");
+  expect(push?.status.code).not.toBe(2);
+  expect(push?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
 });
 
 it("decodes Git-quoted header paths so a non-ASCII filename passes the staged-path check", async () => {
@@ -436,7 +510,7 @@ it("expects only the destination of a copy to be staged", async () => {
   const result = await runFixture();
 
   expect(result.application).toMatchObject({ status: "applied", touchedPaths: ["f", "g"] });
-  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("g\n");
+  expect(gitAt(worktreePath.value, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).toBe("g\n");
   expect(sendPrompt).toHaveBeenCalledTimes(1);
 });
 
