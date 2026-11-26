@@ -14,7 +14,7 @@ We want a new kind of work to be added as a module, without editing the core loo
 ## Proposed Solution
 <!-- audience: stakeholder; mode: explanation; length: 1-2 paragraphs; diagram: optional; examples: discouraged -->
 
-March models all work as one pipeline: **discover → implement → steward → land → close out**. A work item can enter at any stage and skip the ones it doesn't need. A Dependabot PR enters at *land*. A triage verdict never opens a PR. Two kinds of module, each enabled and configured per profile, plug into that pipeline. **Producers** (Smithy, issue triage, Dependabot) discover work items and give each one its special instructions. They say what kind of item it is, and they register **responders** for when something needs fixing: Smithy registers `/smithy.fix`. **Destinations** (a GitHub repository and GitHub issues first; Jira and Linear later) are where artifacts land. A destination owns the rules for landing there, applied per repository or board and matched on item kind (for example "a `cut` needs no approval in this repo"). It also raises the **signals** that something needs attention. For a GitHub repo these come in the groups GitHub itself puts first on a PR (checks, comments and approvals), never as individual kinds of check or comment. Finally it performs the landing and the close-out.
+March models all work as one pipeline: **discover → implement → steward → land → close out**. A work item can enter at any stage and skip the ones it doesn't need. A Dependabot PR enters at *land*. A triage verdict never opens a PR. Two kinds of module, each enabled and configured per profile, plug into that pipeline. **Producers** (Smithy, issue triage, Dependabot) discover work items and give each one its special instructions. They say what kind of item it is, and they register **responders** for when something needs fixing: Smithy registers `/smithy.fix`. **Destinations** (a GitHub repository and GitHub issues first; Jira and Linear later) are where artifacts land. A destination owns the rules for landing there, applied per repository or board and matched on item kind (for example "a `cut` needs no approval in this repo"). It also raises the **signals** that something needs attention. For a GitHub repo these come in the groups GitHub itself puts first on a PR (checks, comments and approvals), never as individual kinds of check or comment. Finally it performs the landing and reports when the artifact has landed. Close-out then runs at the item's origin, not at the artifact's destination.
 
 The core runs the lifecycle in between. It pairs each destination signal with the producer's responder. It reports a landed artifact back to the item's origin, so an accepted issue closes when its first artifact merges. And it keeps the safety, recovery, teardown and tracing guarantees March has today, which no module can bypass. What the operator sees: turning on a new kind of work, or a new place for work to land, is a profile configuration change, not a change to the legate. Each repository's merge rules live in one place, whichever module produced the PR.
 
@@ -60,7 +60,7 @@ The coupling is concrete in the repo. The legate runs a fixed, order-dependent h
 - [Critical Assumption] Behaviors split in two. The destination raises the signal as one of a few generic groups (checks, comments, approvals) and the producer supplies the responder (`/smithy.fix`). The core pairs them and arbitrates, so each steward gets at most one action per tick. The core never knows which reviewer wrote a comment or which check failed. Asking for a fresh review is part of the destination's land gate, not a responder.
 - [Critical Assumption] The safety invariants stay in the core. Modules use only a closed vocabulary of steps and can never make a destructive step automatic. Recovery, teardown, spawn caps, dispatch idempotency and tracing stay core-owned, and module work nests under the existing per-item trace.
 - [Critical Assumption] No workflow engine or agent platform replaces March's core. This restructures an engine that already exists. Renovate is a possible future producer, and merge-queue tools cover only the land stage.
-- A work item carries an origin (what caused it, such as an issue) and a destination (where its artifact lands). Close-out is the origin's job, triggered when the destination reports the artifact landed.
+- A work item carries an origin (what caused it, such as an issue) and a destination (where its artifact lands). The two can be different modules. For an issue-originated PR, the GitHub-repo destination lands the PR and reports it landed, and the module serving the origin (the GitHub-issues destination) performs the close-out by closing the issue. Each item has exactly one owner for close-out: the module serving its origin.
 - Destinations are the open-core boundary's "connector framework" made concrete. Baseline GitHub destinations ship in the open engine; enterprise destinations such as Jira can ship privately. Every module, March's own included, uses the published, versioned module interface.
 - A profile binds one repository but can bind several destinations, such as its repo plus GitHub issues or a ticket board.
 - Migration is incremental: Smithy first with no behavior change, then Dependabot, then CodeRabbit re-review as part of the GitHub land gate. Triage keeps going while the framework is built and moves over as part of the migration. Jira and Linear destinations are out of scope for the first cut.
@@ -69,7 +69,13 @@ The coupling is concrete in the repo. The legate runs a fixed, order-dependent h
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-_None — no specification debt was recorded._
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-007 | re-review-without-approval-gate | Solution Intent | Medium | Medium | local |
+
+### SD-007 — re-review-without-approval-gate
+
+Asking for a fresh review lives in the destination's land gate, because that gate is approval (SD-002). Unresolved choice for a destination, or an item kind, that does not require approval, such as a profile that relaxes approval for `forge`. Option (a): the land stage still asks for a fresh review whenever the item is waiting on reviewer feedback. Option (b): no fresh review is requested, and the comment signals alone decide whether the item can land. Under (b), a PR with outstanding review could wait for feedback nobody asks for.
 
 ### Resolved
 
@@ -112,4 +118,4 @@ _None — no specification debt was recorded._
 ## Open Questions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None at this time — ready for `smithy.ignite` to expand into an RFC.
+- SD-007: does the land stage still ask for a fresh review when the destination does not require approval? This can be settled in `smithy.ignite`, and does not block expanding the PRD into an RFC.
