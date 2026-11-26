@@ -34,6 +34,17 @@ describe("execCommand (real child processes)", () => {
     expect((err as ExecError).timedOut).toBe(false);
   });
 
+  it("keeps captured stdout on a non-zero exit (agent-deck --json reports errors there)", async () => {
+    const err = await execCommand(
+      node,
+      ["-e", "process.stdout.write('{\"success\":false,\"error\":\"boom\"}\\n'); process.exit(1)"],
+      { capture: true, timeoutMs: 10_000 },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecError);
+    expect((err as ExecError).stderr).toBe("");
+    expect((err as ExecError).stdout).toBe('{"success":false,"error":"boom"}');
+  });
+
   it("SIGKILLs a child that outlives its timeout, without waiting for it", async () => {
     const started = Date.now();
     const err = await execCommand(node, ["-e", "setTimeout(() => {}, 30000)"], {
