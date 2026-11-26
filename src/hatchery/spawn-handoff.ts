@@ -1370,8 +1370,12 @@ function applyStewardHandoff(input: StewardTarget & {
     const expectedStaged = touchedPaths.filter((name) => !patchUnstagedCopySources(handoff.patchText).has(name));
     const assertOnBranch = () => {
       // Another process could switch this clean worktree between authorization,
-      // application, and the Steward handoff (#735 review).
-      if (stewardHeadRef(target) !== branchRef) throw fail("integration_target_unavailable");
+      // application, and the Steward handoff (#735 review). A switched checkout
+      // is no longer the authorized target, so rollback must not touch it.
+      if (stewardHeadRef(target) !== branchRef) {
+        targetAuthorized = false;
+        throw fail("integration_target_unavailable");
+      }
     };
 
     targetAuthorized = true;
@@ -1611,9 +1615,8 @@ export async function runHatcherySpawn(
   let manager: AgentDeckManagerSession | undefined;
   let integrationBranch = orphanManagerBranch(branch);
   // Rollback writes Git state in the manager worktree, so it only runs once the
-  // recorded target has been authorized (#735 review).
+  // recorded target is authorized at rollback time (#735 review).
   let stewardTarget: StewardTarget | undefined;
-  let targetAuthorized = false;
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
@@ -1704,7 +1707,6 @@ export async function runHatcherySpawn(
       const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId, () => {
         try {
           resolveStewardTarget(recordedTarget);
-          targetAuthorized = true;
         } catch (error) {
           throw new StewardApplyError({
             spawnId, status: "failed", touchedPaths: [],
@@ -1955,13 +1957,11 @@ export async function runHatcherySpawn(
         "march.patch.first_path": touchedPaths[0]?.slice(0, 256) ?? "",
       });
       try {
-        const applied = applyStewardHandoff({
+        return applyStewardHandoff({
           ...recordedTarget,
           handoff: eligibility.handoff,
           span,
         });
-        targetAuthorized = true;
-        return applied;
       } catch (error) {
         if (error instanceof StewardApplyError) {
           const diagnostic = error.application.diagnostic ?? "patch_apply_failed";
@@ -2027,11 +2027,10 @@ export async function runHatcherySpawn(
     // single span tagged with the stage that triggered it, not one span per
     // call. Best-effort throughout; never mask the original failure.
     // Every Git-writing rollback below needs an authorized target, whatever
-    // failed: a failure before authorization re-checks the recorded target, and
-    // a rejected target stays outside the rollback path.
-    const rollbackAuthorized = err instanceof StewardApplyError
-      ? err.targetAuthorized
-      : targetAuthorized || canAuthorizeRollback(stewardTarget, integrationBranch);
+    // failed, and it is re-checked now: the checkout may have changed since it
+    // was authorized, and a rejected target stays outside the rollback path.
+    const rollbackAuthorized = (err instanceof StewardApplyError ? err.targetAuthorized : true) &&
+      canAuthorizeRollback(stewardTarget, integrationBranch);
     const mgr = rollbackAuthorized ? manager : undefined;
     // #243: `manager.launch` failed because the dispatch branch already exists.
     // `mgr` is undefined, so the `mgr && !handedOff` rollback below cannot clean

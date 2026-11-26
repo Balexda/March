@@ -10,6 +10,7 @@ import type { Span } from "@opentelemetry/sdk-trace-base";
 import type { SpawnBackend } from "../spawn/backends.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { traceIdForDispatch } from "../observability/trace-ids.js";
+import { removeSpawnWorktree } from "../brood/worktree.js";
 
 // Issue #244 acceptance: a steward.apply failure must produce a span carrying the
 // slice/spawn/worktree/patch diagnostics AND a trace-correlated log. This drives
@@ -456,6 +457,9 @@ it("fails when the worktree leaves the integration branch while the patch is app
     application: { status: "failed", diagnostic: "integration_target_unavailable" },
   });
   expect(sendPrompt).not.toHaveBeenCalled();
+  // The switched checkout is no longer authorized: rollback must leave it alone.
+  expect(vi.mocked(removeSpawnWorktree)).not.toHaveBeenCalled();
+  expect(gitAt(worktreePath.value, "rev-parse", "--abbrev-ref", "HEAD")).toBe("concurrent-switch\n");
 });
 
 it("keeps a literal supplementary character beside an escape in a quoted path", async () => {
