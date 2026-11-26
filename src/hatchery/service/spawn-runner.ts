@@ -1,7 +1,7 @@
 import { Worker, parentPort } from "node:worker_threads";
 import { getBackend } from "../../spawn/backends.js";
 import { initOtel } from "../../observability/otel.js";
-import { runHatcherySpawn, type HatcherySpawnResult } from "../spawn-handoff.js";
+import { runHatcherySpawn, StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
 import type {
   SpawnRequest,
   SpawnWorkerData,
@@ -56,6 +56,7 @@ export function runSpawnInWorker(
     worker.once("message", (message: SpawnWorkerMessage) => {
       settle(() => {
         if (message.ok) resolve(message.result);
+        else if (message.application) reject(new StewardApplyError(message.application, false));
         else reject(new Error(message.error));
       });
     });
@@ -105,6 +106,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
     message = {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
+      ...(err instanceof StewardApplyError ? { application: err.application } : {}),
     };
   } finally {
     await otel.shutdown();

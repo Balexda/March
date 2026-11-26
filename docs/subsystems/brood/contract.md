@@ -7,6 +7,10 @@ the Brood role in `docs/vision.md` and `docs/operating-philosophy.md`: Brood is
 the lifecycle authority, while the CLI is only the deliberate intervention
 surface over that authority.
 
+Hatchery sets `integrationBranch` on the on-disk spawn record to the exact local
+Steward branch. It reads that field through `loadSpawnRecord` to authorize Git
+writes to the Steward worktree. The `branch` field keeps the dispatch branch name.
+
 ## Public Interface
 
 <!-- BEGIN AUTOGEN -->

@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Bind patch application to the recorded integration checkout**
+- [x] **Bind patch application to the recorded integration checkout**
 
   In the Hatchery Steward handoff, carry the US1 eligibility result into the existing patch-apply path in `src/hatchery/spawn-handoff.ts`. Resolve the authorized worktree and exact branch from lifecycle state before applying the patch (AS 2.1, AS 2.2, AS 2.5).
 
@@ -26,7 +26,7 @@
   - An absent lifecycle record, missing worktree or branch, wrong branch, detached checkout, or target resolving to the operator checkout fails before any Git mutation. Cover symlink and subdirectory aliases of the operator checkout.
   - A disposable linked worktree test verifies that the operator checkout's files and index stay unchanged.
 
-- [ ] **Report staged paths and stop failed handoffs**
+- [x] **Report staged paths and stop failed handoffs**
 
   Verify the staged result in the Hatchery apply path and report the application outcome using the contract's `PatchApplicationResult` fields. Exercise the outcome through the Steward handoff with local Git fixtures (AS 2.3, AS 2.4).
 

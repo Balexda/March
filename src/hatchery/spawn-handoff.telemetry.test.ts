@@ -199,18 +199,13 @@ describe("runHatcherySpawn outcome + failure_stage telemetry", () => {
         branch: "smithy/cut/01-spawn-f3-s3",
         homeDir: home,
       }),
-    ).rejects.toThrow(/manager worktree not found/);
+    ).rejects.toThrow(/integration_target_unavailable/);
 
     // Outcome is failure even though the container exited 0.
     expect(recordSpawnRunSpy).toHaveBeenCalledTimes(1);
     expect(recordSpawnRunSpy).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "failure", failureStage: "patch_apply" }),
     );
-    // And the rollback removed the orphan branch (issue #211 cleanup).
-    expect(removeSpawnWorktreeSpy).toHaveBeenCalledWith("/repo", {
-      spawnId: expect.stringMatching(/^\d{8}-[0-9a-f]{6}$/),
-      branch: "feature/smithy/cut/01-spawn-f3-s3",
-      worktreePath: worktreePath.value,
-    });
+    expect(removeSpawnWorktreeSpy).not.toHaveBeenCalled();
   });
 });

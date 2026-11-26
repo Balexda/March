@@ -60,6 +60,8 @@ export interface SpawnRecord {
   repoPath: string;
   /** Git branch name created for this spawn. */
   branch: string;
+  /** Exact local branch owned by a Hatchery Steward checkout. */
+  integrationBranch?: string;
   /** Absolute path to the spawn's worktree directory. */
   worktreePath: string;
   /** Backend identifier (e.g. `"claude-code"`). */
@@ -108,6 +110,7 @@ export interface CreateSpawnRecordInput {
   id: string;
   repoPath: string;
   branch: string;
+  integrationBranch?: string;
   worktreePath: string;
   backend?: string;
 }
@@ -163,6 +166,7 @@ export function writeInitialSpawnRecord(
     id: input.id,
     repoPath: input.repoPath,
     branch: input.branch,
+    ...(input.integrationBranch ? { integrationBranch: input.integrationBranch } : {}),
     worktreePath: input.worktreePath,
     backend: input.backend ?? DEFAULT_BACKEND,
     status: "created",

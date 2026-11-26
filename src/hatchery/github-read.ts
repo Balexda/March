@@ -17,6 +17,13 @@ export function hatcheryGitEnv(): NodeJS.ProcessEnv {
   delete env.GH_ENTERPRISE_TOKEN;
   delete env.GITHUB_ENTERPRISE_TOKEN;
   delete env.MARCH_TESSERA_CLIENT_KEY;
+  // Hatchery Git operations select their checkout through cwd.
+  for (const key of [
+    "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+  ]) {
+    delete env[key];
+  }
   return env;
 }
 

@@ -18,8 +18,11 @@ import { traceIdForDispatch } from "../observability/trace-ids.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, workerPatch, recordedState } = vi.hoisted(() => ({
   worktreePath: { value: "" },
+  sendPrompt: vi.fn(async () => {}),
+  workerPatch: { value: "" },
+  recordedState: { paths: undefined as string[] | undefined, unavailable: false },
 }));
 
 // We exercise the steward.apply telemetry, not the #211 rollback — stub the
@@ -27,6 +30,20 @@ const { worktreePath } = vi.hoisted(() => ({
 vi.mock("../brood/worktree.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../brood/worktree.js")>();
   return { ...actual, removeSpawnWorktree: vi.fn() };
+});
+
+vi.mock("../brood/spawn-record.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../brood/spawn-record.js")>();
+  return {
+    ...actual,
+    loadSpawnRecord: (...args: Parameters<typeof actual.loadSpawnRecord>) =>
+      recordedState.unavailable ? undefined : actual.loadSpawnRecord(...args),
+    readSpawnRecordExtractionResult: (...args: Parameters<typeof actual.readSpawnRecordExtractionResult>) => {
+      const result = actual.readSpawnRecordExtractionResult(...args);
+      if (result?.status !== "succeeded" || !recordedState.paths) return result;
+      return { ...result, patch: { ...result.patch, touchedPaths: recordedState.paths } };
+    },
+  };
 });
 
 vi.mock("../castra/client.js", () => {
@@ -43,7 +60,7 @@ vi.mock("../castra/client.js", () => {
       }),
     ),
     removeSession: vi.fn(async () => ({ removed: true })),
-    sendPrompt: vi.fn(async () => {}),
+    sendPrompt,
   });
   return { CastraClient, CastraClientError, createCastraClientFromEnv };
 });
@@ -71,7 +88,6 @@ const CONFLICTING_PATCH =
   "diff --git a/f b/f\nnew file mode 100644\nindex 0000000..deadbee\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+totally different content\n";
 // The worker now emits the patch on the deterministic sentinel line (base64),
 // not as raw `agent_message` text — mirror that so extraction yields the patch.
-const SPAWN_LOG = `__MARCH_PATCH_B64__:${Buffer.from(CONFLICTING_PATCH, "utf-8").toString("base64")}`;
 
 vi.mock("../spawn/container-launch.js", () => {
   class LaunchError extends Error {}
@@ -82,7 +98,7 @@ vi.mock("../spawn/container-launch.js", () => {
     copyOtelEmitterToContainer: vi.fn(),
     startSpawnContainer: vi.fn(),
     waitForSpawnContainer: vi.fn(() => ({ exitCode: 0 })),
-    readSpawnContainerLogs: vi.fn(() => SPAWN_LOG),
+    readSpawnContainerLogs: vi.fn(() => "__MARCH_PATCH_B64__:" + Buffer.from(workerPatch.value).toString("base64")),
     removeSpawnContainer: vi.fn(),
   };
 });
@@ -104,6 +120,9 @@ function makeHome(): string {
   tmpDirs.push(dir);
   return dir;
 }
+let repoPath: string;
+const branch = "smithy/cut/01-spawn";
+
 function makeWorktree(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "apply-tel-wt-"));
   tmpDirs.push(dir);
@@ -114,7 +133,10 @@ function makeWorktree(): string {
   fs.writeFileSync(path.join(dir, "f"), "hello\n");
   git("add", "f");
   git("commit", "-qm", "init");
-  return dir;
+  repoPath = dir;
+  const target = path.join(makeHome(), "integration");
+  git("worktree", "add", "-qb", "feature/" + branch, target);
+  return target;
 }
 
 function captureSpans(): Span[] {
@@ -131,6 +153,10 @@ function captureSpans(): Span[] {
 
 beforeEach(() => {
   worktreePath.value = makeWorktree();
+  workerPatch.value = CONFLICTING_PATCH;
+  sendPrompt.mockClear();
+  recordedState.paths = undefined;
+  recordedState.unavailable = false;
   vi.stubEnv("MARCH_BROOD_URL", "");
   vi.stubEnv("MARCH_HERALD_URL", "");
   initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
@@ -152,15 +178,21 @@ describe("steward.apply diagnostics (#244)", () => {
 
     await expect(
       runHatcherySpawn({
-        repoPath: "/repo",
+        repoPath,
         prompt: "do the thing",
         backend,
         agentDeckProfile: "march",
-        branch: "smithy/cut/01-spawn",
+        branch,
         sliceId: "my-slice-id",
         homeDir: home,
       }),
-    ).rejects.toThrow(/git apply failed/);
+    ).rejects.toMatchObject({
+      application: {
+        spawnId: expect.any(String), status: "failed", touchedPaths: ["f"],
+        diagnostic: "patch_conflict",
+      },
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
 
     const span = created.find((s) => s.name === "steward.apply")!;
     expect(span).toBeDefined();
@@ -170,11 +202,11 @@ describe("steward.apply diagnostics (#244)", () => {
       "march.worktree": worktreePath.value,
       "march.patch.files": 1,
       "march.patch.first_path": "f",
-      // Failure-only attrs: the parsed reject + offending path.
-      "march.patch.offending_path": "f",
+      "march.patch.reject": "patch_conflict",
     });
     expect(span.attributes["march.patch.bytes"]).toBeGreaterThan(0);
-    expect(String(span.attributes["march.patch.reject"])).toContain("already exists in index");
+    expect(span.status.code).toBe(2);
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("my-slice-id"));
 
     // A trace-correlated log line for the failure.
     const logCall = emit.mock.calls.find(
@@ -183,7 +215,7 @@ describe("steward.apply diagnostics (#244)", () => {
     expect(logCall).toBeDefined();
     expect(logCall![0].attributes).toMatchObject({
       "march.slice_id": "my-slice-id",
-      "march.patch.offending_path": "f",
+      "march.patch.reject": "patch_conflict",
     });
   });
 });
@@ -201,7 +233,7 @@ it("fails the slice trace on a Tessera outage and processes the next local job",
   vi.stubGlobal("fetch", issuance);
   const spans = captureSpans();
   const input = {
-    repoPath: "/repo", prompt: "do the thing", backend, branch: "smithy/cut/03",
+    repoPath, prompt: "do the thing", backend, branch,
     sliceId: "pin-outage-slice", homeDir: makeHome(),
   };
 
@@ -220,8 +252,164 @@ it("fails the slice trace on a Tessera outage and processes the next local job",
     ?.attributes["march.failure_stage"]).toBe("pin_base");
 
   worktreePath.value = makeWorktree();
-  await expect(runHatcherySpawn({ ...input, sliceId: "next-local-slice" })).rejects.toThrow(/git apply failed/);
+  await expect(runHatcherySpawn({ ...input, repoPath, sliceId: "next-local-slice" })).rejects.toThrow(/git apply failed/);
   expect(issuance).toHaveBeenCalledTimes(1);
   expect(spans.some((span) => span.name === "steward.apply" &&
     span.spanContext().traceId === traceIdForDispatch("next-local-slice"))).toBe(true);
 });
+
+const ADD_PATCH = CONFLICTING_PATCH.replaceAll("/f", "/new file.txt");
+
+function runFixture() {
+  return runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir: makeHome() });
+}
+
+function gitAt(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+it("reports exactly the staged paths and preserves the operator's file and index", async () => {
+  fs.writeFileSync(path.join(repoPath, "f"), "operator staged edit\n");
+  gitAt(repoPath, "add", "f");
+  const indexBefore = fs.readFileSync(path.join(repoPath, ".git", "index"));
+  workerPatch.value = ADD_PATCH;
+
+  const result = await runFixture();
+
+  expect(result.application).toEqual({
+    spawnId: result.spawnId, status: "applied", touchedPaths: ["new file.txt"],
+    appliedAt: expect.any(String),
+  });
+  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("new file.txt\n");
+  expect(fs.readFileSync(path.join(repoPath, "f"), "utf8")).toBe("operator staged edit\n");
+  expect(fs.readFileSync(path.join(repoPath, ".git", "index"))).toEqual(indexBefore);
+  expect(fs.existsSync(path.join(repoPath, "new file.txt"))).toBe(false);
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+it.each(["missing", "missing branch", "wrong branch", "detached", "other repo", "operator symlink", "operator subdirectory"])(
+  "stops before staging when the target is %s",
+  async (invalidTarget) => {
+    const target = worktreePath.value;
+    switch (invalidTarget) {
+      case "missing":
+        worktreePath.value = path.join(makeHome(), "missing");
+        break;
+      case "missing branch":
+        gitAt(target, "update-ref", "-d", "refs/heads/feature/" + branch);
+        break;
+      case "wrong branch":
+        gitAt(target, "switch", "-qc", "unexpected");
+        break;
+      case "detached":
+        gitAt(target, "switch", "-q", "--detach");
+        break;
+      case "other repo": {
+        const operatorRepo = repoPath;
+        worktreePath.value = makeWorktree();
+        repoPath = operatorRepo;
+        break;
+      }
+      case "operator symlink":
+        worktreePath.value = path.join(makeHome(), "operator");
+        fs.symlinkSync(repoPath, worktreePath.value, "dir");
+        break;
+      case "operator subdirectory":
+        worktreePath.value = path.join(repoPath, "subdir");
+        fs.mkdirSync(worktreePath.value);
+        break;
+    }
+    workerPatch.value = ADD_PATCH;
+
+    await expect(runFixture()).rejects.toMatchObject({
+      application: { status: "failed", diagnostic: "integration_target_unavailable" },
+    });
+    expect(gitAt(repoPath, "diff", "--cached", "--name-only")).toBe("");
+    expect(gitAt(target, "diff", "--cached", "--name-only")).toBe(invalidTarget === "missing branch" ? "f\n" : "");
+    expect(sendPrompt).not.toHaveBeenCalled();
+  },
+);
+
+it("refuses unrelated staged changes before applying", async () => {
+  const target = worktreePath.value;
+  fs.writeFileSync(path.join(target, "unrelated"), "existing staged content\n");
+  gitAt(target, "add", "unrelated");
+  workerPatch.value = ADD_PATCH;
+
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", diagnostic: "staged_paths_mismatch" },
+  });
+  expect(gitAt(target, "diff", "--cached", "--name-only")).toBe("unrelated\n");
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("rejects an empty staged diff when the three-way result already exists", async () => {
+  const target = worktreePath.value;
+  fs.writeFileSync(path.join(target, "new file.txt"), "totally different content\n");
+  gitAt(target, "add", "new file.txt");
+  workerPatch.value = gitAt(target, "diff", "--cached", "--binary");
+  gitAt(target, "commit", "-qm", "base already contains patch");
+
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", diagnostic: "empty_staged_diff" },
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("rejects the result if Git stages different paths from those admitted", async () => {
+  workerPatch.value = ADD_PATCH;
+  recordedState.paths = ["unexpected"];
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", touchedPaths: ["unexpected"], diagnostic: "staged_paths_mismatch" },
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("fails closed when the lifecycle record disappears before application", async () => {
+  workerPatch.value = ADD_PATCH;
+  recordedState.unavailable = true;
+
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", diagnostic: "missing_lifecycle_state" },
+  });
+  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("");
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("guards the operator's staged changes even when base pinning could reset them", async () => {
+  gitAt(repoPath, "update-ref", "refs/remotes/origin/main", "HEAD");
+  fs.writeFileSync(path.join(repoPath, "f"), "operator staged edit\n");
+  gitAt(repoPath, "add", "f");
+  const indexBefore = fs.readFileSync(path.join(repoPath, ".git", "index"));
+  worktreePath.value = repoPath;
+
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", diagnostic: "integration_target_unavailable" },
+  });
+  expect(fs.readFileSync(path.join(repoPath, "f"), "utf8")).toBe("operator staged edit\n");
+  expect(fs.readFileSync(path.join(repoPath, ".git", "index"))).toEqual(indexBefore);
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("reports a bounded Git timeout on the same slice trace", async () => {
+  const directory = makeHome();
+  fs.writeFileSync(path.join(directory, "git"), [
+    "#!/bin/sh",
+    'if [ "$1" = "apply" ]; then exec sleep 20; fi',
+    'PATH="$MARCH_TEST_REAL_GIT_PATH" exec git "$@"',
+    "",
+  ].join("\n"), { mode: 0o755 });
+  vi.stubEnv("MARCH_TEST_REAL_GIT_PATH", process.env.PATH);
+  vi.stubEnv("PATH", directory + path.delimiter + process.env.PATH);
+  const spans = captureSpans();
+  const sliceId = "apply-timeout-slice";
+  workerPatch.value = ADD_PATCH;
+
+  await expect(runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir: makeHome(), sliceId,
+  })).rejects.toMatchObject({ application: { status: "failed", diagnostic: "timeout" } });
+  const span = spans.find((candidate) => candidate.name === "steward.apply");
+  expect(span?.status.code).toBe(2);
+  expect(span?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
+  expect(sendPrompt).not.toHaveBeenCalled();
+}, 12_000);

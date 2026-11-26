@@ -116,7 +116,15 @@ Job record response:
 | `result.artifacts` | object | Artifact directory and spawn output, patch, manager prompt, and metadata paths. |
 | `result.exitCode` | number | Spawn worker exit code. |
 | `result.summary` | string | Spawn summary. |
+| `result.application` | object | Verified patch application with `spawnId`, `status: "applied"`, `touchedPaths`, and `appliedAt`. |
 | `error.message` | string | Present when execution fails. |
+| `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. |
+
+The Steward prompt is sent after Hatchery stages the admitted extraction in the
+Brood-recorded linked worktree and verifies that the staged paths match the
+extraction. Hatchery bounds local Git commands and reports failures on the slice
+trace, following the [March vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
 
 ## Invariants
 

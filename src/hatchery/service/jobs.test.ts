@@ -41,6 +41,7 @@ function fakeResult(spawnId = "spawn-123"): HatcherySpawnResult {
       managerPromptPath: "/logs/prompt.md",
       metadataPath: "/logs/meta.json",
     },
+    application: { spawnId: spawnId, status: "applied", touchedPaths: ["f"] },
     exitCode: 0,
     summary: "ok",
   };

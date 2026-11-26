@@ -38,6 +38,7 @@ import {
 import { generateSpawnId, parkSpawnWorktree, removeSpawnWorktree } from "../brood/worktree.js";
 import {
   readSpawnRecordExtractionResult,
+  loadSpawnRecord,
   markSpawnRecordFailed,
   markSpawnRecordRunning,
   markSpawnRecordStopped,
@@ -169,6 +170,26 @@ export type StewardHandoffEligibility =
 
 export type HandoffRefusalReason = "missing" | "failed" | "noop";
 
+export interface PatchApplicationResult {
+  readonly spawnId: string;
+  readonly status: "applied" | "failed";
+  readonly touchedPaths: string[];
+  readonly diagnostic?: string;
+  readonly appliedAt?: string;
+}
+
+export class StewardApplyError extends HatcherySpawnError {
+  constructor(
+    readonly application: PatchApplicationResult,
+    readonly targetAuthorized: boolean,
+  ) {
+    super(application.diagnostic === "timeout"
+      ? "Steward patch application timed out"
+      : "git apply failed in manager worktree (" + application.diagnostic + ")");
+    this.name = "StewardApplyError";
+  }
+}
+
 export interface HatcherySpawnResult {
   readonly spawnId: string;
   readonly backend: string;
@@ -177,6 +198,7 @@ export interface HatcherySpawnResult {
   readonly artifacts: HatcherySpawnArtifacts;
   readonly exitCode: number;
   readonly summary: string;
+  readonly application: PatchApplicationResult;
 }
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
@@ -1007,18 +1029,24 @@ export function applyPatchToManagerWorktree(input: {
     }
   }
   assertBranchOwnedWorktree(worktreePath);
+  return applyWithFallback(worktreePath, input.patchPath);
+}
+
+function applyWithFallback(worktreePath: string, patchPath: string, patchText?: string): PatchApplyStrategy {
   try {
-    runGitApply(["apply", "--index", input.patchPath], worktreePath);
+    runGitApply(["apply", "--index", patchPath], worktreePath, patchText);
     return "index";
   } catch (errIndex) {
+    if (gitTimedOut(errIndex)) throw errIndex;
     const stderrIndex = stderrText((errIndex as { stderr?: unknown }).stderr);
     // Defensive fallback (#244): a 3-way merge can resolve a patch whose base
     // context drifted (e.g. a "new file" the worktree base already has). It
     // never silently masks a real conflict — that still throws below.
     try {
-      runGitApply(["apply", "--index", "--3way", input.patchPath], worktreePath);
+      runGitApply(["apply", "--index", "--3way", patchPath], worktreePath, patchText);
       return "index-3way";
     } catch (err3way) {
+      if (gitTimedOut(err3way)) throw err3way;
       const stderr3way = stderrText((err3way as { stderr?: unknown }).stderr);
       // Combine both rejects: the plain `--index` stderr names the path with an
       // `error:` line, while the `--3way` stderr explains why the merge couldn't
@@ -1084,13 +1112,129 @@ function assertBranchOwnedWorktree(worktreePath: string): void {
   }
 }
 
-function runGitApply(args: readonly string[], cwd: string): void {
-  execFileSync("git", args as string[], {
+function gitTimedOut(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "ETIMEDOUT";
+}
+
+function runGitApply(args: string[], cwd: string, input?: string): void {
+  execFileSync("git", args, {
+    cwd,
+    env: { ...hatcheryGitEnv(), LC_ALL: "C" },
+    input,
+    stdio: [input === undefined ? "ignore" : "pipe", "ignore", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
+  });
+}
+
+function stewardGit(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
     cwd,
     env: hatcheryGitEnv(),
-    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
   });
+}
+
+function integrationBranchForManager(worktreePath: string, dispatchBranch: string): string {
+  const agentDeckBranch = orphanManagerBranch(dispatchBranch);
+  try {
+    // Castra can report a symbolic launch name even when agent-deck used its
+    // feature/ prefix. Record the exact ref from the requested branch family.
+    const ref = stewardGit(worktreePath, "symbolic-ref", "--quiet", "HEAD").trimEnd();
+    if (ref === "refs/heads/" + dispatchBranch) return dispatchBranch;
+  } catch {
+    // Authorization reports an unavailable or detached checkout if it persists.
+  }
+  return agentDeckBranch;
+}
+
+interface StewardTarget {
+  readonly spawnId: string;
+  readonly repoPath: string;
+  readonly managerWorktreePath: string;
+  readonly homeDir?: string;
+}
+
+function targetFailureReason(error: unknown): string {
+  if (error instanceof SpawnRecordError) return "missing_lifecycle_state";
+  if (gitTimedOut(error)) return "timeout";
+  return "integration_target_unavailable";
+}
+
+function resolveStewardTarget(input: StewardTarget): string {
+  const record = loadSpawnRecord(input.spawnId, input.homeDir);
+  if (!record || record.id !== input.spawnId) throw new SpawnRecordError("missing_lifecycle_state");
+  if (!record.repoPath || !record.worktreePath || !record.integrationBranch) {
+    throw new Error("integration_target_unavailable");
+  }
+
+  const gitPath = (cwd: string, flag: string) =>
+    fs.realpathSync(stewardGit(cwd, "rev-parse", "--path-format=absolute", flag).replace(/\n$/, ""));
+  const repo = gitPath(record.repoPath, "--show-toplevel");
+  const target = fs.realpathSync(record.worktreePath);
+  const commonDir = gitPath(repo, "--git-common-dir");
+  if (
+    repo !== gitPath(input.repoPath, "--show-toplevel") ||
+    target === repo ||
+    target !== gitPath(target, "--show-toplevel") ||
+    target !== fs.realpathSync(input.managerWorktreePath) ||
+    gitPath(target, "--git-common-dir") !== commonDir ||
+    gitPath(target, "--git-dir") === commonDir ||
+    stewardGit(target, "symbolic-ref", "--quiet", "HEAD").trimEnd() !== "refs/heads/" + record.integrationBranch
+  ) {
+    throw new Error("integration_target_unavailable");
+  }
+  stewardGit(target, "rev-parse", "--verify", "HEAD^{commit}");
+  return target;
+}
+
+function applyStewardHandoff(input: StewardTarget & {
+  readonly handoff: StewardHandoffInput;
+  readonly span: DispatchSpanHandle;
+}): PatchApplicationResult {
+  const { spawnId, handoff, span } = input;
+  const touchedPaths = [...new Set(handoff.touchedPaths)].sort();
+  let targetAuthorized = false;
+  const fail = (diagnostic: string) =>
+    new StewardApplyError({ spawnId, status: "failed", touchedPaths, diagnostic }, targetAuthorized);
+
+  try {
+    const target = resolveStewardTarget(input);
+    if (handoff.spawnId !== spawnId) throw fail("patch_apply_failed");
+
+    targetAuthorized = true;
+    const staged = () => stewardGit(target, "diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z")
+      .split("\0").filter(Boolean).sort();
+    if (staged().length) throw fail("staged_paths_mismatch");
+
+    let strategy: PatchApplyStrategy;
+    try {
+      strategy = applyWithFallback(target, "-", handoff.patchText);
+    } catch (error) {
+      // Git diagnostics can include private paths and content. Expose a fixed reason.
+      if (error instanceof PatchApplyError &&
+          /patch does not apply|patch failed|already exists|with conflicts|does not match index/i.test(error.stderr)) {
+        throw fail("patch_conflict");
+      }
+      throw error;
+    }
+    span.setAttributes({ "march.patch.strategy": strategy });
+    const paths = staged();
+    if (!paths.length) throw fail("empty_staged_diff");
+    if (paths.length !== touchedPaths.length || paths.some((name, i) => name !== touchedPaths[i])) {
+      throw fail("staged_paths_mismatch");
+    }
+
+    return { spawnId, status: "applied", touchedPaths, appliedAt: new Date().toISOString() };
+  } catch (error) {
+    if (error instanceof StewardApplyError) throw error;
+    throw fail(targetAuthorized && !gitTimedOut(error) ? "patch_apply_failed" : targetFailureReason(error));
+  }
 }
 
 /** Run a git command for its side effect, discarding stdout. */
@@ -1199,11 +1343,13 @@ export interface PinBaseResult {
 export async function pinManagerWorktreeToDefaultBranch(
   worktreePath: string,
   sliceId?: string,
+  authorizeWrite?: () => void,
 ): Promise<PinBaseResult> {
   if (!fs.existsSync(worktreePath)) {
     return { defaultBranch: resolveDefaultBranch(worktreePath), fetched: false, pinned: false };
   }
   const origin = await resolveHatcheryOrigin(worktreePath);
+  if (origin) authorizeWrite?.();
   // For a GitHub origin, ask GitHub through the same scope: a local origin/HEAD
   // is not refreshed by `git fetch` and can still name a renamed/deleted branch,
   // and guessing `main` without one would fail the fetch the same way.
@@ -1220,20 +1366,27 @@ export async function pinManagerWorktreeToDefaultBranch(
     fetched = result === 0;
     if (!fetched && origin.repo) throw new HatcheryGitHubError("fetch_failed");
   }
-  let pinned = false;
+  let tip: string | undefined;
   try {
     // Resolve once so another job cannot move the tracking ref between the
     // ancestry check and reset.
-    const tip = runGitCapture(
+    const candidate = runGitCapture(
       ["rev-parse", "--verify", "refs/remotes/origin/" + defaultBranch + "^{commit}"],
       worktreePath,
     );
-    if (isAncestor("HEAD", tip, worktreePath)) {
-      runGitQuiet(["reset", "--hard", tip], worktreePath);
-      pinned = true;
-    }
+    if (isAncestor("HEAD", candidate, worktreePath)) tip = candidate;
   } catch {
     // Preserve the original base if there is no tracking ref or reset fails.
+  }
+  let pinned = false;
+  if (tip) {
+    authorizeWrite?.();
+    try {
+      runGitQuiet(["reset", "--hard", tip], worktreePath);
+      pinned = true;
+    } catch {
+      // Preserve the original base if the reset fails.
+    }
   }
   return { defaultBranch, fetched, pinned };
 }
@@ -1287,6 +1440,7 @@ export async function runHatcherySpawn(
   let exitCode: number | undefined;
 
   let manager: AgentDeckManagerSession | undefined;
+  let integrationBranch = orphanManagerBranch(branch);
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
@@ -1318,10 +1472,12 @@ export async function runHatcherySpawn(
     const spawnPrompt = buildSpawnCommitPrompt(input.prompt);
     stage = "record_init";
 
+    integrationBranch = integrationBranchForManager(manager.worktreePath, branch);
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
       branch,
+      integrationBranch,
       worktreePath: manager.worktreePath,
       backend: input.backend.name,
     }, input.homeDir);
@@ -1343,6 +1499,9 @@ export async function runHatcherySpawn(
     // and worktree instead of leaving it running unregistered (#717 review).
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
+    const stewardTarget = {
+      spawnId, repoPath: input.repoPath, managerWorktreePath: managerWorktree, homeDir: input.homeDir,
+    };
 
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
@@ -1367,7 +1526,16 @@ export async function runHatcherySpawn(
     stage = "pin_base";
     await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
       pinSpan.setAttributes({ "march.worktree": managerWorktree });
-      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);
+      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId, () => {
+        try {
+          resolveStewardTarget(stewardTarget);
+        } catch (error) {
+          throw new StewardApplyError({
+            spawnId, status: "failed", touchedPaths: [],
+            diagnostic: targetFailureReason(error),
+          }, false);
+        }
+      });
       pinSpan.setAttributes({
         "march.default_branch": pin.defaultBranch,
         "march.pin_base.fetched": pin.fetched,
@@ -1599,59 +1767,42 @@ export async function runHatcherySpawn(
     });
     stage = "patch_apply";
     const managerWorktreePath = manager.worktreePath;
-    const patchSummary = summarizePatch(artifacts.patchPath);
-    dispatch.span("steward.apply", (span) => {
-      // Static diagnostics, known before the apply runs — so even a worktree-not-
-      // found failure still carries the slice/spawn/patch context (#244 item 2).
+    const { touchedPaths, patchText } = eligibility.handoff;
+    const application = dispatch.span("steward.apply", (span) => {
       span.setAttributes({
         "march.slice_id": sliceId,
         "march.spawn_id": spawnId,
         "march.worktree": managerWorktreePath,
         "march.patch_path": artifacts.patchPath,
-        "march.patch.files": patchSummary.files,
-        "march.patch.bytes": patchSummary.bytes,
-        "march.patch.first_path": patchSummary.firstPath ?? "",
+        "march.patch.files": touchedPaths.length,
+        "march.patch.bytes": Buffer.byteLength(patchText),
+        "march.patch.first_path": touchedPaths[0]?.slice(0, 256) ?? "",
       });
       try {
-        const strategy = applyPatchToManagerWorktree({
-          patchPath: artifacts.patchPath,
-          worktreePath: managerWorktreePath,
-          repoPath: input.repoPath,
+        return applyStewardHandoff({
+          ...stewardTarget,
+          handoff: eligibility.handoff,
+          span,
         });
-        span.setAttributes({ "march.patch.strategy": strategy });
-      } catch (err) {
-        if (err instanceof PatchApplyError) {
-          span.setAttributes({
-            "march.patch.reject": err.firstRejectLine ?? "",
-            "march.patch.offending_path": err.offendingPath ?? "",
-          });
-          // Trace-correlated log so Grafana's "Logs for this span" is populated —
-          // attached to THIS child span's ids explicitly (no ContextManager).
+      } catch (error) {
+        if (error instanceof StewardApplyError) {
+          const diagnostic = error.application.diagnostic ?? "patch_apply_failed";
+          span.setAttributes({ "march.patch.reject": diagnostic });
           const sc = span.spanContext();
           emitSpawnLog({
             severity: "ERROR",
-            body:
-              `steward.apply: git apply failed for spawn ${spawnId}` +
-              (err.offendingPath ? ` at ${err.offendingPath}` : "") +
-              `\npatch: ${artifacts.patchPath} (${patchSummary.files} files, ${patchSummary.bytes} bytes)` +
-              `\n${err.stderr}`,
+            body: error.message,
             traceId: sc?.traceId,
             spanId: sc?.spanId,
             attributes: {
               event_kind: "steward_apply_failed",
               "march.slice_id": sliceId,
               "march.spawn_id": spawnId,
-              "march.worktree": managerWorktreePath,
-              "march.patch_path": artifacts.patchPath,
-              "march.patch.files": patchSummary.files,
-              "march.patch.bytes": patchSummary.bytes,
-              "march.patch.first_path": patchSummary.firstPath ?? "",
-              "march.patch.offending_path": err.offendingPath ?? "",
-              "march.patch.reject": err.firstRejectLine ?? "",
+              "march.patch.reject": diagnostic,
             },
           });
         }
-        throw err;
+        throw error;
       }
     });
     stage = "steward_send";
@@ -1674,6 +1825,7 @@ export async function runHatcherySpawn(
       branch,
       managerSession: manager,
       artifacts,
+      application,
       exitCode: waitResult.exitCode,
       summary: [
         `Hatchery spawn ${spawnId} handed off to manager session ${manager.sessionId}.`,
@@ -1685,7 +1837,7 @@ export async function runHatcherySpawn(
     };
   } catch (err) {
     dispatch.recordException(err);
-    if (!(err instanceof HatcherySpawnError)) {
+    if (!(err instanceof HatcherySpawnError) || err instanceof StewardApplyError) {
       try {
         markSpawnRecordFailed(spawnId, { error: (err as Error).message }, input.homeDir);
       } catch {
@@ -1696,7 +1848,8 @@ export async function runHatcherySpawn(
     // seams (Docker rm, Castra removeSession, git branch -D), so it gets a
     // single span tagged with the stage that triggered it, not one span per
     // call. Best-effort throughout; never mask the original failure.
-    const mgr = manager;
+    // A rejected target must also stay outside the Git-writing rollback path.
+    const mgr = err instanceof StewardApplyError && !err.targetAuthorized ? undefined : manager;
     // #243: `manager.launch` failed because the dispatch branch already exists.
     // `mgr` is undefined, so the `mgr && !handedOff` rollback below cannot clean
     // it — the gap that makes the wedge self-perpetuating. Detect it here so the
@@ -1732,7 +1885,7 @@ export async function runHatcherySpawn(
             await dispatch.spanAsync("manager.park", async (parkSpan) => {
               const parked = parkSpawnWorktree(input.repoPath, {
                 spawnId,
-                branch: orphanManagerBranch(branch),
+                branch: integrationBranch,
                 worktreePath: mgr.worktreePath,
               });
               const manifestPath = writeParkedSpawnManifest(input.homeDir, {
@@ -1773,7 +1926,7 @@ export async function runHatcherySpawn(
             try {
               removeSpawnWorktree(input.repoPath, {
                 spawnId,
-                branch: orphanManagerBranch(branch),
+                branch: integrationBranch,
                 worktreePath: mgr.worktreePath,
               });
             } catch {

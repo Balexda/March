@@ -181,6 +181,7 @@ describe("runHatcherySpawn validator cleanup", () => {
       status: "failed",
       backend: "claude-code",
       branch,
+      integrationBranch: "feature/" + branch,
       imageId: "march-spawn-test-id",
       failureReason: expect.stringContaining("undeclared bind mount"),
     });

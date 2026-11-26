@@ -27,6 +27,7 @@ function fakeResult(): HatcherySpawnResult {
       managerPromptPath: "/l/m",
       metadataPath: "/l/j",
     },
+    application: { spawnId: "spawn-1", status: "applied", touchedPaths: ["f"] },
     exitCode: 0,
     summary: "ok",
   };
