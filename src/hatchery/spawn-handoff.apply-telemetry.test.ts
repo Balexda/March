@@ -428,3 +428,32 @@ it("reports a bounded Git timeout on the same slice trace", async () => {
   expect(span?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
   expect(sendPrompt).not.toHaveBeenCalled();
 }, 12_000);
+
+it("expects only the destination of a copy to be staged", async () => {
+  workerPatch.value = "diff --git a/f b/g\nsimilarity index 100%\ncopy from f\ncopy to g\n";
+
+  const result = await runFixture();
+
+  expect(result.application).toMatchObject({ status: "applied", touchedPaths: ["f", "g"] });
+  expect(gitAt(worktreePath.value, "diff", "--cached", "--name-only")).toBe("g\n");
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+it("fails when the worktree leaves the integration branch while the patch is applied", async () => {
+  const directory = makeHome();
+  fs.writeFileSync(path.join(directory, "git"), [
+    "#!/bin/sh",
+    'PATH="$MARCH_TEST_REAL_GIT_PATH"',
+    'if [ "$1" = "apply" ]; then git switch -q -c concurrent-switch >/dev/null 2>&1; fi',
+    'exec git "$@"',
+    "",
+  ].join("\n"), { mode: 0o755 });
+  vi.stubEnv("MARCH_TEST_REAL_GIT_PATH", process.env.PATH);
+  vi.stubEnv("PATH", directory + path.delimiter + process.env.PATH);
+  workerPatch.value = ADD_PATCH;
+
+  await expect(runFixture()).rejects.toMatchObject({
+    application: { status: "failed", diagnostic: "integration_target_unavailable" },
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+});

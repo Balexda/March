@@ -122,7 +122,9 @@ Job record response:
 
 The Steward prompt is sent after Hatchery stages the admitted extraction in the
 Brood-recorded linked worktree and verifies that the staged paths match the
-extraction. Hatchery bounds local Git commands and reports failures on the slice
+extraction and that the checkout is still on the recorded branch. A failed
+spawn rolls back the manager worktree only after that worktree is authorized as
+the recorded linked checkout. Hatchery bounds local Git commands and reports failures on the slice
 trace, following the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
 

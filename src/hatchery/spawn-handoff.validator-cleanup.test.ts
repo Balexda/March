@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpawnBackend } from "../spawn/backends.js";
 import { loadSpawnRecord } from "../brood/spawn-record.js";
+import { makeLinkedWorktree } from "../testing/linked-worktree.js";
 
 const {
   cleanupSpy,
@@ -16,6 +17,7 @@ const {
   removeSpawnContainerSpy,
   removeSpawnImageSpy,
   removeSpawnWorktreeSpy,
+  managerWorktree,
   startSpawnContainerSpy,
 } = vi.hoisted(() => ({
   cleanupSpy: vi.fn(),
@@ -25,6 +27,7 @@ const {
   removeSpawnContainerSpy: vi.fn(),
   removeSpawnImageSpy: vi.fn(),
   removeSpawnWorktreeSpy: vi.fn(),
+  managerWorktree: { value: "/worktrees/manager-session" },
   startSpawnContainerSpy: vi.fn(),
 }));
 
@@ -43,7 +46,7 @@ vi.mock("../castra/client.js", () => {
         title: req.title,
         group: req.group ?? "workers",
         branch: req.branch,
-        worktreePath: "/worktrees/manager-session",
+        worktreePath: managerWorktree.value,
       }),
     ),
     removeSession: removeSessionSpy,
@@ -103,6 +106,7 @@ const backend: SpawnBackend = {
 };
 
 const tmpDirs: string[] = [];
+const tmpCleanups: Array<() => void> = [];
 
 function makeHome(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "validator-cleanup-"));
@@ -132,16 +136,21 @@ afterEach(() => {
   while (tmpDirs.length) {
     fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   }
+  while (tmpCleanups.length) tmpCleanups.pop()!();
 });
 
 describe("runHatcherySpawn validator cleanup", () => {
   it("routes bind-mount validator rejection through launch rollback before container creation", async () => {
     const home = makeHome();
     const branch = "smithy/cut/05-us5-s3";
+    // Rollback writes Git state, so it needs a real recorded linked worktree.
+    const fixture = makeLinkedWorktree(orphanManagerBranch(branch));
+    tmpCleanups.push(fixture.cleanup);
+    managerWorktree.value = fixture.worktreePath;
 
     await expect(
       runHatcherySpawn({
-        repoPath: "/repo",
+        repoPath: fixture.repoPath,
         prompt: "do the thing",
         backend,
         agentDeckProfile: "march",
@@ -169,10 +178,10 @@ describe("runHatcherySpawn validator cleanup", () => {
       profile: "march",
     });
     expect(removeSpawnWorktreeSpy).toHaveBeenCalledTimes(1);
-    expect(removeSpawnWorktreeSpy).toHaveBeenCalledWith("/repo", {
+    expect(removeSpawnWorktreeSpy).toHaveBeenCalledWith(fixture.repoPath, {
       spawnId,
       branch: orphanManagerBranch(branch),
-      worktreePath: "/worktrees/manager-session",
+      worktreePath: fixture.worktreePath,
     });
 
     const record = loadSpawnRecord(spawnId, home);

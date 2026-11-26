@@ -12,7 +12,10 @@ import type { SpawnBackend } from "../spawn/backends.js";
 // client is NOT mocked — it talks to a stubbed global fetch — so this proves the
 // real launch-time registration path fires (#172).
 
-const castraMocks = vi.hoisted(() => ({ removeSession: vi.fn(async () => ({ removed: true })) }));
+const castraMocks = vi.hoisted(() => ({
+  removeSession: vi.fn(async () => ({ removed: true })),
+  worktreePath: { value: "/wt/ad-xyz" },
+}));
 
 vi.mock("../castra/client.js", () => {
   class CastraClientError extends Error {}
@@ -23,7 +26,7 @@ vi.mock("../castra/client.js", () => {
       title: req.title,
       group: req.group ?? "g",
       branch: req.branch,
-      worktreePath: "/wt/ad-xyz",
+      worktreePath: castraMocks.worktreePath.value,
     })),
     removeSession: castraMocks.removeSession,
     sendPrompt: vi.fn(async () => {}),
@@ -55,6 +58,7 @@ vi.mock("../spawn/snapshot-build.js", () => {
 });
 
 import { runHatcherySpawn } from "./spawn-handoff.js";
+import { makeLinkedWorktree } from "../testing/linked-worktree.js";
 import { buildSpawnImage, removeSpawnImage } from "../spawn/snapshot-build.js";
 
 const backend: SpawnBackend = {
@@ -149,16 +153,25 @@ describe("runHatcherySpawn launch-time brood registration (#172)", () => {
       }
       return new Response(JSON.stringify(body), { status: 201 });
     }) as unknown as typeof fetch);
+    // Rollback writes Git state, so it needs a real recorded linked worktree.
+    const fixture = makeLinkedWorktree("feature/smithy/cut/brood-reclaim");
+    castraMocks.worktreePath.value = fixture.worktreePath;
 
-    await expect(
-      runHatcherySpawn({
-        repoPath: "/repo",
-        prompt: "do the thing",
-        backend,
-        agentDeckProfile: "march",
-        homeDir: home,
-      }),
-    ).rejects.toThrow(/being reclaimed/);
+    try {
+      await expect(
+        runHatcherySpawn({
+          repoPath: fixture.repoPath,
+          prompt: "do the thing",
+          backend,
+          agentDeckProfile: "march",
+          branch: "smithy/cut/brood-reclaim",
+          homeDir: home,
+        }),
+      ).rejects.toThrow(/being reclaimed/);
+    } finally {
+      castraMocks.worktreePath.value = "/wt/ad-xyz";
+      fixture.cleanup();
+    }
 
     // Dispatch stops at registration: the steward session is removed, and
     // nothing further runs against the reclaimed worktree.

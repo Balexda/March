@@ -469,11 +469,20 @@ function quotedTokenLength(s: string): number {
  * filenames such as `café.txt` match the names `git diff --cached -z` stages.
  * Handles either side being quoted independently (#735 review).
  */
-function patchHeaderPaths(patch: string): string[] {
-  const paths: string[] = [];
+interface PatchFileOp {
+  readonly oldPath: string;
+  readonly newPath: string;
+  /** The block carries `copy from`/`copy to`: the old path is left unchanged. */
+  readonly copy: boolean;
+}
+
+function patchFileOps(patch: string): PatchFileOp[] {
+  const ops: PatchFileOp[] = [];
   const headerRe = /^diff --git (.+)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = headerRe.exec(patch)) !== null) {
+  const headers = [...patch.matchAll(headerRe)];
+  for (const [index, match] of headers.entries()) {
+    const blockEnd = headers[index + 1]?.index ?? patch.length;
+    const block = patch.slice(match.index, blockEnd);
     const rest = match[1];
     let oldRaw: string | null = null;
     let newRaw: string | null = null;
@@ -505,13 +514,28 @@ function patchHeaderPaths(patch: string): string[] {
         "Spawn patch has an unparseable `diff --git` header; refusing to apply.",
       );
     }
-    paths.push(oldPath, newPath);
+    ops.push({ oldPath, newPath, copy: /^copy from /m.test(block) });
   }
-  return paths;
+  return ops;
+}
+
+function patchHeaderPaths(patch: string): string[] {
+  return patchFileOps(patch).flatMap((op) => [op.oldPath, op.newPath]);
 }
 
 function patchTouchedPaths(patch: string): string[] {
   return [...new Set(patchHeaderPaths(patch))].sort();
+}
+
+/**
+ * Copy sources that `git apply --index` leaves unstaged: a copy stages only its
+ * destination, while a rename (with `--no-renames`) stages both sides. A path
+ * that is also modified by another block still counts as staged (#735 review).
+ */
+function patchUnstagedCopySources(patch: string): Set<string> {
+  const ops = patchFileOps(patch);
+  const changed = new Set(ops.flatMap((op) => (op.copy ? [op.newPath] : [op.oldPath, op.newPath])));
+  return new Set(ops.filter((op) => op.copy && !changed.has(op.oldPath)).map((op) => op.oldPath));
 }
 
 /**
@@ -1253,13 +1277,36 @@ function targetFailureReason(error: unknown): string {
   return "integration_target_unavailable";
 }
 
-function resolveStewardTarget(input: StewardTarget): string {
+interface AuthorizedStewardTarget {
+  readonly target: string;
+  readonly branchRef: string;
+}
+
+function stewardHeadRef(target: string): string {
+  return stewardGit(target, "symbolic-ref", "--quiet", "HEAD").trimEnd();
+}
+
+function resolveStewardTarget(input: StewardTarget): AuthorizedStewardTarget {
   const record = loadSpawnRecord(input.spawnId, input.homeDir);
   if (!record || record.id !== input.spawnId) throw new SpawnRecordError("missing_lifecycle_state");
   if (!record.repoPath || !record.worktreePath || !record.integrationBranch) {
     throw new Error("integration_target_unavailable");
   }
+  return authorizeLinkedCheckout(input, {
+    repoPath: record.repoPath,
+    worktreePath: record.worktreePath,
+    integrationBranch: record.integrationBranch,
+  });
+}
 
+/**
+ * The checkout must be a linked worktree (never the operator checkout) of the
+ * requested repository, at the manager path, with the exact branch checked out.
+ */
+function authorizeLinkedCheckout(
+  input: StewardTarget,
+  record: { readonly repoPath: string; readonly worktreePath: string; readonly integrationBranch: string },
+): AuthorizedStewardTarget {
   const gitPath = (cwd: string, flag: string) =>
     fs.realpathSync(stewardGit(cwd, "rev-parse", "--path-format=absolute", flag).replace(/\n$/, ""));
   const repo = gitPath(record.repoPath, "--show-toplevel");
@@ -1272,12 +1319,35 @@ function resolveStewardTarget(input: StewardTarget): string {
     target !== fs.realpathSync(input.managerWorktreePath) ||
     gitPath(target, "--git-common-dir") !== commonDir ||
     gitPath(target, "--git-dir") === commonDir ||
-    stewardGit(target, "symbolic-ref", "--quiet", "HEAD").trimEnd() !== "refs/heads/" + record.integrationBranch
+    stewardHeadRef(target) !== "refs/heads/" + record.integrationBranch
   ) {
     throw new Error("integration_target_unavailable");
   }
   stewardGit(target, "rev-parse", "--verify", "HEAD^{commit}");
-  return target;
+  return { target, branchRef: "refs/heads/" + record.integrationBranch };
+}
+
+function canAuthorizeRollback(
+  target: StewardTarget | undefined,
+  integrationBranch: string,
+): boolean {
+  if (!target) return false;
+  try {
+    if (loadSpawnRecord(target.spawnId, target.homeDir)) {
+      resolveStewardTarget(target);
+    } else {
+      // No lifecycle record was written (e.g. record_init failed): authorize the
+      // values that would have been recorded, with the same checkout checks.
+      authorizeLinkedCheckout(target, {
+        repoPath: target.repoPath,
+        worktreePath: target.managerWorktreePath,
+        integrationBranch,
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function applyStewardHandoff(input: StewardTarget & {
@@ -1291,8 +1361,14 @@ function applyStewardHandoff(input: StewardTarget & {
     new StewardApplyError({ spawnId, status: "failed", touchedPaths, diagnostic }, targetAuthorized);
 
   try {
-    const target = resolveStewardTarget(input);
+    const { target, branchRef } = resolveStewardTarget(input);
     if (handoff.spawnId !== spawnId) throw fail("patch_apply_failed");
+    const expectedStaged = touchedPaths.filter((name) => !patchUnstagedCopySources(handoff.patchText).has(name));
+    const assertOnBranch = () => {
+      // Another process could switch this clean worktree between authorization,
+      // application, and the Steward handoff (#735 review).
+      if (stewardHeadRef(target) !== branchRef) throw fail("integration_target_unavailable");
+    };
 
     targetAuthorized = true;
     const staged = () => stewardGit(target, "diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z")
@@ -1300,6 +1376,7 @@ function applyStewardHandoff(input: StewardTarget & {
     if (staged().length) throw fail("staged_paths_mismatch");
 
     let strategy: PatchApplyStrategy;
+    assertOnBranch();
     try {
       strategy = applyWithFallback(target, "-", handoff.patchText);
     } catch (error) {
@@ -1313,9 +1390,10 @@ function applyStewardHandoff(input: StewardTarget & {
     span.setAttributes({ "march.patch.strategy": strategy });
     const paths = staged();
     if (!paths.length) throw fail("empty_staged_diff");
-    if (paths.length !== touchedPaths.length || paths.some((name, i) => name !== touchedPaths[i])) {
+    if (paths.length !== expectedStaged.length || paths.some((name, i) => name !== expectedStaged[i])) {
       throw fail("staged_paths_mismatch");
     }
+    assertOnBranch();
 
     return { spawnId, status: "applied", touchedPaths, appliedAt: new Date().toISOString() };
   } catch (error) {
@@ -1528,6 +1606,10 @@ export async function runHatcherySpawn(
 
   let manager: AgentDeckManagerSession | undefined;
   let integrationBranch = orphanManagerBranch(branch);
+  // Rollback writes Git state in the manager worktree, so it only runs once the
+  // recorded target has been authorized (#735 review).
+  let stewardTarget: StewardTarget | undefined;
+  let targetAuthorized = false;
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
@@ -1560,6 +1642,11 @@ export async function runHatcherySpawn(
     stage = "record_init";
 
     integrationBranch = integrationBranchForManager(manager.worktreePath, branch);
+    // Set before the record write so a failed write can still authorize rollback.
+    const recordedTarget: StewardTarget = {
+      spawnId, repoPath: input.repoPath, managerWorktreePath: manager.worktreePath, homeDir: input.homeDir,
+    };
+    stewardTarget = recordedTarget;
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
@@ -1586,9 +1673,6 @@ export async function runHatcherySpawn(
     // and worktree instead of leaving it running unregistered (#717 review).
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
-    const stewardTarget = {
-      spawnId, repoPath: input.repoPath, managerWorktreePath: managerWorktree, homeDir: input.homeDir,
-    };
 
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
@@ -1615,7 +1699,8 @@ export async function runHatcherySpawn(
       pinSpan.setAttributes({ "march.worktree": managerWorktree });
       const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId, () => {
         try {
-          resolveStewardTarget(stewardTarget);
+          resolveStewardTarget(recordedTarget);
+          targetAuthorized = true;
         } catch (error) {
           throw new StewardApplyError({
             spawnId, status: "failed", touchedPaths: [],
@@ -1866,11 +1951,13 @@ export async function runHatcherySpawn(
         "march.patch.first_path": touchedPaths[0]?.slice(0, 256) ?? "",
       });
       try {
-        return applyStewardHandoff({
-          ...stewardTarget,
+        const applied = applyStewardHandoff({
+          ...recordedTarget,
           handoff: eligibility.handoff,
           span,
         });
+        targetAuthorized = true;
+        return applied;
       } catch (error) {
         if (error instanceof StewardApplyError) {
           const diagnostic = error.application.diagnostic ?? "patch_apply_failed";
@@ -1935,8 +2022,13 @@ export async function runHatcherySpawn(
     // seams (Docker rm, Castra removeSession, git branch -D), so it gets a
     // single span tagged with the stage that triggered it, not one span per
     // call. Best-effort throughout; never mask the original failure.
-    // A rejected target must also stay outside the Git-writing rollback path.
-    const mgr = err instanceof StewardApplyError && !err.targetAuthorized ? undefined : manager;
+    // Every Git-writing rollback below needs an authorized target, whatever
+    // failed: a failure before authorization re-checks the recorded target, and
+    // a rejected target stays outside the rollback path.
+    const rollbackAuthorized = err instanceof StewardApplyError
+      ? err.targetAuthorized
+      : targetAuthorized || canAuthorizeRollback(stewardTarget, integrationBranch);
+    const mgr = rollbackAuthorized ? manager : undefined;
     // #243: `manager.launch` failed because the dispatch branch already exists.
     // `mgr` is undefined, so the `mgr && !handedOff` rollback below cannot clean
     // it — the gap that makes the wedge self-perpetuating. Detect it here so the
