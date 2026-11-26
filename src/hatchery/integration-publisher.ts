@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { emitSpawnLog } from "../observability/logs.js";
 import { TesseraClient } from "../tessera/client.js";
 import { hatcheryGitEnv, resolveHatcheryOrigin, runScopedNetworkGit } from "./github-read.js";
 import type { StewardHandoffInput } from "./spawn-handoff.js";
@@ -35,7 +36,7 @@ export class IntegrationPublicationError extends Error {
   }
 }
 
-function git(cwd: string, args: string[], options?: { index?: string; input?: string }): string {
+function git(cwd: string, args: string[], options?: { index?: string; input?: string; raw?: boolean }): string {
   const env = {
     ...hatcheryGitEnv(),
     GIT_NO_REPLACE_OBJECTS: "1",
@@ -46,11 +47,29 @@ function git(cwd: string, args: string[], options?: { index?: string; input?: st
     GIT_COMMITTER_EMAIL: "march-steward@users.noreply.github.com",
     ...(options?.index ? { GIT_INDEX_FILE: options.index } : {}),
   };
-  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+  const output = execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     cwd, env, input: options?.input, encoding: "utf-8",
     stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     maxBuffer: 1024 * 1024, timeout: 5_000, killSignal: "SIGKILL",
-  }).trimEnd();
+  });
+  return options?.raw ? output : output.trimEnd();
+}
+
+/**
+ * The parts of a commit that define its content: parents, tree, and the exact
+ * message bytes. Author and committer metadata are excluded, so an equivalent
+ * commit recreated at another time still matches.
+ */
+function commitIdentity(cwd: string, sha: string): { parents: string[]; tree: string; message: string } {
+  const raw = git(cwd, ["cat-file", "commit", sha], { raw: true });
+  const split = raw.indexOf("\n\n");
+  const headers = (split < 0 ? raw : raw.slice(0, split)).split("\n");
+  const field = (name: string) => headers.filter((line) => line.startsWith(name + " ")).map((line) => line.slice(name.length + 1));
+  return { parents: field("parent"), tree: field("tree")[0] ?? "", message: split < 0 ? "" : raw.slice(split + 2) };
+}
+
+function sameIdentity(a: ReturnType<typeof commitIdentity>, b: ReturnType<typeof commitIdentity>): boolean {
+  return a.tree === b.tree && a.message === b.message && a.parents.join(" ") === b.parents.join(" ");
 }
 
 function message(handoff: StewardHandoffInput): string {
@@ -59,6 +78,7 @@ function message(handoff: StewardHandoffInput): string {
     "",
     `March-Spawn-Id: ${handoff.spawnId}`,
     `March-Patch-SHA256: ${handoff.patchSha256}`,
+    "",
   ].join("\n");
 }
 
@@ -95,9 +115,9 @@ function describeCommit({ target, branchRef }: Target, handoff: StewardHandoffIn
 }
 
 function equivalent(cwd: string, sha: string, handoff: StewardHandoffInput): boolean {
-  const [parents, tree, body] = git(cwd, ["show", "-s", "--format=%P%x00%T%x00%B", sha]).split("\0");
-  return !!parents && !parents.includes(" ") && body === message(handoff) &&
-    expectedTree(cwd, parents, handoff) === tree;
+  const { parents, tree, message: body } = commitIdentity(cwd, sha);
+  return parents.length === 1 && body === message(handoff) &&
+    expectedTree(cwd, parents[0], handoff) === tree;
 }
 
 function branchHead({ target, branchRef }: Target): string {
@@ -140,7 +160,7 @@ export function createIntegrationCommit(target: Target, handoff: StewardHandoffI
     const base = branchHead(target);
     const tree = expectedTree(cwd, base, handoff);
     if (tree !== git(cwd, ["write-tree"])) throw new Error("unexpected_staged_tree");
-    const sha = git(cwd, ["commit-tree", tree, "-p", base, "--no-gpg-sign"], { input: message(handoff) + "\n" });
+    const sha = git(cwd, ["commit-tree", tree, "-p", base, "--no-gpg-sign"], { input: message(handoff) });
     const commit = describeCommit(target, handoff, sha);
     if (branchHead(target) !== base) throw new Error("branch_changed");
     git(cwd, ["update-ref", "--no-deref", target.branchRef, sha, base]);
@@ -174,6 +194,23 @@ function track(target: Target, gitDir: string, local: IntegrationCommit, publish
   git(target.target, ["config", "--local", `branch.${branch}.remote`, "origin"]);
   git(target.target, ["config", "--local", `branch.${branch}.merge`, target.branchRef]);
   return published;
+}
+
+/**
+ * Remove the temporary transport without letting a cleanup failure replace the
+ * publication outcome: a published branch stays published, and a publication
+ * error keeps its local commit details. The leak is reported on its own.
+ */
+function removeTransport(dir: string, handoff: StewardHandoffInput, sliceId?: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    emitSpawnLog({
+      severity: "WARN",
+      body: `steward.push: could not remove publication transport ${dir}: ${(error as Error).message}`,
+      attributes: { "march.spawn_id": handoff.spawnId, "march.slice_id": sliceId ?? "" },
+    });
+  }
 }
 
 export async function pushIntegrationCommit(
@@ -211,13 +248,16 @@ export async function pushIntegrationCommit(
       : undefined;
     let token = request ? (await client.issueGitHubToken(request)).token : undefined;
     const run = async (beforeUrl: string[], afterUrl: string[]) => {
-      let result = await runScopedNetworkGit(gitDir, origin, beforeUrl, afterUrl, token, gitDir);
-      if (request && result.unauthorized) {
-        token = (await client.issueGitHubToken({ ...request, refresh: true })).token;
-        result = await runScopedNetworkGit(gitDir, origin, beforeUrl, afterUrl, token, gitDir);
-      }
-      if (result.timedOut) throw Object.assign(new Error("git_timeout"), { code: "ETIMEDOUT" });
-      return result;
+      const bounded = (result: Awaited<ReturnType<typeof runScopedNetworkGit>>) => {
+        if (result.timedOut) throw Object.assign(new Error("git_timeout"), { code: "ETIMEDOUT" });
+        return result;
+      };
+      // A stalled call can also have captured a 401; report the timeout rather
+      // than spending a refresh on it. A completed 401 gets one refresh.
+      const result = bounded(await runScopedNetworkGit(gitDir, origin, beforeUrl, afterUrl, token, gitDir));
+      if (!request || !result.unauthorized) return result;
+      token = (await client.issueGitHubToken({ ...request, refresh: true })).token;
+      return bounded(await runScopedNetworkGit(gitDir, origin, beforeUrl, afterUrl, token, gitDir));
     };
     if (branchHead(target) !== commit.commitSha) throw new Error("branch_changed");
     const push = await run(
@@ -236,14 +276,15 @@ export async function pushIntegrationCommit(
       ["fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance", "--"],
       [ref],
     );
-    const identity = (oid: string) => git(gitDir, ["show", "-s", "--format=%P%x00%T%x00%B", oid]);
     if (fetch.code !== 0) throw new Error("remote_fetch_failed");
     const fetched = git(gitDir, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
-    if (identity(fetched) !== identity(commit.commitSha)) throw new Error("remote_diverged");
+    if (!sameIdentity(commitIdentity(gitDir, fetched), commitIdentity(gitDir, commit.commitSha))) {
+      throw new Error("remote_diverged");
+    }
     return track(target, gitDir, commit, describeCommit({ target: gitDir, branchRef: ref }, handoff, fetched));
   } catch (error) {
     throw publicationError(target, handoff, error, commit);
   } finally {
-    if (transport) fs.rmSync(transport, { recursive: true, force: true });
+    if (transport) removeTransport(transport, handoff, options.sliceId);
   }
 }

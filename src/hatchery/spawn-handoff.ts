@@ -456,14 +456,16 @@ async function resumePreservedPublication(input: {
     spawnOutputPath: artifacts.spawnOutputPath,
     metadataPath: artifacts.metadataPath,
   });
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
-  await input.dispatch.spanAsync("steward.send", () =>
-    sendPromptToAgentDeckManager(
+  // The push is done; a prompt-write failure belongs to the handoff, so it
+  // errors the steward.send span rather than steward.push.
+  await input.dispatch.spanAsync("steward.send", () => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
+    return sendPromptToAgentDeckManager(
       { sessionId, prompt: managerPrompt, profile: input.profile, traceKey: input.traceKey },
       input.castra,
-    ),
-  );
+    );
+  });
   let metadata: { managerSession?: Partial<AgentDeckManagerSession>; exitCode?: unknown } = {};
   try {
     metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf8"));
@@ -962,8 +964,11 @@ export function buildManagerPrompt(input: {
     "",
     ...artifactGuidance,
     "Complete all review and PR steps in this turn.",
-    "1. Review the local HEAD commit, which Hatchery verified against the published branch.",
-    "   Inspect its diff for correctness and security.",
+    ...(input.commit
+      ? [`1. Review the published commit (\`git show ${input.commit.commitSha}\`), which Hatchery`,
+        "   verified against the published branch. Inspect its diff for correctness and security."]
+      : ["1. Review the local HEAD commit, which Hatchery verified against the published branch.",
+        "   Inspect its diff for correctness and security."]),
     "2. Run the smallest meaningful verification for the touched code.",
     "3. Confirm every acceptance criterion is satisfied and every matching tasks.md row",
     "   changed from `[ ]` to `[x]` in the published commit.",
@@ -2152,10 +2157,11 @@ export async function runHatcherySpawn(
       spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
       metadataPath: path.join(artifactDir, "metadata.json"),
     });
-    fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
+    // The push is done: a prompt-write failure is a handoff failure.
     stage = "steward_send";
-    await dispatch.spanAsync("steward.send", () =>
-      sendPromptToAgentDeckManager(
+    await dispatch.spanAsync("steward.send", () => {
+      fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
+      return sendPromptToAgentDeckManager(
         {
           sessionId: stewardSessionId,
           prompt: managerPrompt,
@@ -2163,8 +2169,8 @@ export async function runHatcherySpawn(
           traceKey,
         },
         castra,
-      ),
-    );
+      );
+    });
     handedOff = true;
 
     return {

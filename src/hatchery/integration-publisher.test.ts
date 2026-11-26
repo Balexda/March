@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createIntegrationCommit, findIntegrationCommit, pushIntegrationCommit } from "./integration-publisher.js";
 
 const branch = "feature/recorded/slice";
@@ -19,7 +19,7 @@ let remote: string;
 let patch: string;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function handoff() {
@@ -51,7 +51,10 @@ beforeEach(() => {
   patch = git(target.target, "diff", "--binary");
 });
 
-afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  vi.restoreAllMocks();
+  fs.rmSync(root, { recursive: true, force: true });
+});
 
 it("commits the full validated index and leaves unrelated unstaged edits alone", () => {
   const cwd = target.target;
@@ -150,4 +153,44 @@ it("refuses to reuse a commit with matching metadata and different content", () 
   ].join("\n"));
   expect(findIntegrationCommit(target, input)).toBeUndefined();
   expect(() => createIntegrationCommit(target, input)).toThrow();
+});
+
+it("treats a remote commit whose message differs only in trailing whitespace as diverged", async () => {
+  const cwd = target.target;
+  git(cwd, "add", "f");
+  const input = handoff();
+  const commit = createIntegrationCommit(target, input);
+  const raw = git(cwd, "cat-file", "commit", commit.commitSha);
+  const message = raw.slice(raw.indexOf("\n\n") + 2);
+  const parent = git(cwd, "rev-parse", "HEAD^").trim();
+  const tree = git(cwd, "write-tree").trim();
+  const padded = execFileSync("git", ["commit-tree", tree, "-p", parent], {
+    cwd, input: message.replace(/\n$/, "  \n"), encoding: "utf8",
+  }).trim();
+  git(cwd, "push", remote, padded + ":" + branchRef);
+
+  await expect(pushIntegrationCommit(target, input, commit)).rejects.toMatchObject({
+    publication: { failureReason: "push_failed", commit },
+  });
+  expect(git(remote, "rev-parse", branchRef).trim()).toBe(padded);
+});
+
+it("keeps the publication outcome when transport cleanup fails", async () => {
+  const cwd = target.target;
+  git(cwd, "add", "f");
+  const input = handoff();
+  const commit = createIntegrationCommit(target, input);
+  const rmSync = fs.rmSync;
+  vi.spyOn(fs, "rmSync").mockImplementation((dir, options) => {
+    if (String(dir).includes("march-publish-transport-")) throw new Error("EROFS: read-only file system");
+    return rmSync(dir, options);
+  });
+
+  git(cwd, "remote", "set-url", "origin", path.join(root, "missing.git"));
+  await expect(pushIntegrationCommit(target, input, commit)).rejects.toMatchObject({
+    publication: { failureReason: "push_failed", commit },
+  });
+  git(cwd, "remote", "set-url", "origin", remote);
+  await expect(pushIntegrationCommit(target, input, commit)).resolves.toEqual(commit);
+  expect(git(remote, "rev-parse", branchRef).trim()).toBe(commit.commitSha);
 });
