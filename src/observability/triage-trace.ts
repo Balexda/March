@@ -27,3 +27,14 @@ export function emitTriageNoteSelectionFailure(reason: string): void {
   span.setStatus({ code: SpanStatusCode.ERROR });
   span.end();
 }
+
+export function emitTriageNoteReadFailure(reason: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+
+  const span = otel.getTracer().startSpan("triage.note.read", {
+    attributes: { "triage.note.failure_reason": reason },
+  });
+  span.setStatus({ code: SpanStatusCode.ERROR });
+  span.end();
+}

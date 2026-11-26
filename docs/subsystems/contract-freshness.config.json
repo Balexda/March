@@ -80,7 +80,8 @@
       "name": "triage",
       "contractPath": "docs/subsystems/triage/contract.md",
       "publicSourcePaths": [
-        "src/triage/verdict.ts"
+        "src/triage/verdict.ts",
+        "src/triage/triage-note.ts"
       ]
     }
   ]

@@ -1,4 +1,5 @@
 import { emitTriageNoteSelectionFailure } from "../observability/triage-trace.js";
+import { encodeTriageNoteMarker } from "./triage-note.js";
 import { parseJsonWithUniqueKeys, validateTriageVerdict, type TriageVerdictV1 } from "./verdict.js";
 
 const MARKER_PREFIX = /<!--[ \t\r\n]*march-triage-note/g;
@@ -43,7 +44,7 @@ function markdownText(text: string): string {
 }
 
 export function renderTriageNote(evaluation: TriageNoteEvaluation): string {
-  const { rubricVersion, issueContentHash, originalVerdict, repositoryContext } = evaluation;
+  const { originalVerdict, repositoryContext } = evaluation;
   const { outcome, confidence, rationale, needsDefinition } = originalVerdict;
   const sections = [
     `**Recommended outcome:** ${outcome}\n\n**Confidence:** ${confidence}`,
@@ -56,10 +57,7 @@ export function renderTriageNote(evaluation: TriageNoteEvaluation): string {
     sections.push(`**Repository context**\n\n${repositoryContext.map((entry) => `- ${markdownText(entry)}`).join("\n")}`);
   }
 
-  const payload = Buffer.from(JSON.stringify({
-    rubricVersion, issueContentHash, originalVerdict, repositoryContext,
-  }), "utf8").toString("base64");
-  sections.push(`<!-- march-triage-note:v1 ${payload} -->`);
+  sections.push(encodeTriageNoteMarker(evaluation));
   return sections.join("\n\n");
 }
 
