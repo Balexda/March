@@ -130,6 +130,12 @@ describe("spawn-handoff", () => {
     expect(() => extractPatchFromSpawnOutput(sentinelLine(escape))).toThrow(
       /unsafe path/,
     );
+    // Git's quoted header form must not slip past the safety check (#735 review).
+    const quotedEscape =
+      'diff --git "a/../caf\\303\\251" "b/../caf\\303\\251"\n--- "a/../caf\\303\\251"\n+++ "b/../caf\\303\\251"\n';
+    expect(() => extractPatchFromSpawnOutput(sentinelLine(quotedEscape))).toThrow(
+      /unsafe path/,
+    );
   });
 
   it("manager prompt enumerates push and PR creation as separate atomic steps", () => {

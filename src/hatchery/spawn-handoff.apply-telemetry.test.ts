@@ -287,6 +287,21 @@ it("reports exactly the staged paths and preserves the operator's file and index
   expect(sendPrompt).toHaveBeenCalledTimes(1);
 });
 
+it("decodes Git-quoted header paths so a non-ASCII filename passes the staged-path check", async () => {
+  // Mixed patch: one plain name and one Git quotes by default (core.quotePath).
+  workerPatch.value =
+    ADD_PATCH.replaceAll("/new file.txt", "/regular.txt") +
+    'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\nnew file mode 100644\n' +
+    'index 0000000..deadbee\n--- /dev/null\n+++ "b/caf\\303\\251.txt"\n@@ -0,0 +1 @@\n+bonjour\n';
+
+  const result = await runFixture();
+
+  expect(result.application).toMatchObject({
+    status: "applied", touchedPaths: ["café.txt", "regular.txt"],
+  });
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
 it.each(["missing", "missing branch", "wrong branch", "detached", "other repo", "operator symlink", "operator subdirectory"])(
   "stops before staging when the target is %s",
   async (invalidTarget) => {

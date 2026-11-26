@@ -412,15 +412,106 @@ export function extractPatchFromSpawnOutput(output: string): string {
   return normalizeTrailingNewline(patch);
 }
 
-function patchTouchedPaths(patch: string): string[] {
-  const paths = new Set<string>();
-  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
+const GIT_QUOTE_ESCAPES: Readonly<Record<string, number>> = {
+  a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92,
+};
+
+/**
+ * Decode a Git C-style quoted path (`"caf\303\251.txt"`, the default
+ * `core.quotePath` form for non-ASCII or special characters). Octal escapes
+ * are raw bytes, so the result is decoded as UTF-8. Returns null when the
+ * token is not a well-formed quoted string.
+ */
+function decodeGitQuotedPath(token: string): string | null {
+  if (token.length < 2 || !token.startsWith('"') || !token.endsWith('"')) return null;
+  const bytes: number[] = [];
+  const body = token.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '"') return null;
+    if (ch !== "\\") {
+      bytes.push(...Buffer.from(ch, "utf-8"));
+      continue;
+    }
+    const next = body[++i];
+    if (next === undefined) return null;
+    if (/[0-7]/.test(next)) {
+      const octal = body.slice(i, i + 3);
+      if (!/^[0-7]{3}$/.test(octal)) return null;
+      bytes.push(parseInt(octal, 8));
+      i += 2;
+    } else if (next in GIT_QUOTE_ESCAPES) {
+      bytes.push(GIT_QUOTE_ESCAPES[next]);
+    } else {
+      return null;
+    }
+  }
+  return Buffer.from(bytes).toString("utf-8");
+}
+
+/** Strip a required `a/` or `b/` prefix from a (decoded) header path. */
+function stripDiffPrefix(path: string, prefix: "a/" | "b/"): string | null {
+  return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
+/** Length of a leading quoted token in `s` (including both quotes), or -1. */
+function quotedTokenLength(s: string): number {
+  if (!s.startsWith('"')) return -1;
+  for (let i = 1; i < s.length; i++) {
+    if (s[i] === "\\") i++;
+    else if (s[i] === '"') return i + 1;
+  }
+  return -1;
+}
+
+/**
+ * Old/new paths from every `diff --git` header, decoding Git's quoted form so
+ * filenames such as `café.txt` match the names `git diff --cached -z` stages.
+ * Handles either side being quoted independently (#735 review).
+ */
+function patchHeaderPaths(patch: string): string[] {
+  const paths: string[] = [];
+  const headerRe = /^diff --git (.+)$/gm;
   let match: RegExpExecArray | null;
   while ((match = headerRe.exec(patch)) !== null) {
-    paths.add(match[1]);
-    paths.add(match[2]);
+    const rest = match[1];
+    let oldRaw: string | null = null;
+    let newRaw: string | null = null;
+    const qa = quotedTokenLength(rest);
+    if (qa > 0) {
+      oldRaw = decodeGitQuotedPath(rest.slice(0, qa));
+      const tail = rest.slice(qa);
+      if (tail.startsWith(" ")) {
+        const b = tail.slice(1);
+        newRaw = b.startsWith('"') ? decodeGitQuotedPath(b) : b;
+      }
+    } else if (rest.endsWith('"')) {
+      const split = rest.lastIndexOf(' "b/');
+      if (split > 0) {
+        oldRaw = rest.slice(0, split);
+        newRaw = decodeGitQuotedPath(rest.slice(split + 1));
+      }
+    } else {
+      const plain = /^(a\/.+?) (b\/.+)$/.exec(rest);
+      if (plain) {
+        oldRaw = plain[1];
+        newRaw = plain[2];
+      }
+    }
+    const oldPath = oldRaw === null ? null : stripDiffPrefix(oldRaw, "a/");
+    const newPath = newRaw === null ? null : stripDiffPrefix(newRaw, "b/");
+    if (oldPath === null || newPath === null) {
+      throw new HatcherySpawnError(
+        "Spawn patch has an unparseable `diff --git` header; refusing to apply.",
+      );
+    }
+    paths.push(oldPath, newPath);
   }
-  return [...paths].sort();
+  return paths;
+}
+
+function patchTouchedPaths(patch: string): string[] {
+  return [...new Set(patchHeaderPaths(patch))].sort();
 }
 
 /**
@@ -459,16 +550,12 @@ function lastPatchSentinel(output: string): string | null {
  * outside the manager worktree.
  */
 function assertPatchPathsSafe(patch: string): void {
-  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = headerRe.exec(patch)) !== null) {
-    for (const candidate of [match[1], match[2]]) {
-      if (candidate.startsWith("/") || candidate.split("/").includes("..")) {
-        throw new HatcherySpawnError(
-          `Spawn patch references an unsafe path "${candidate}" ` +
-            "(absolute or parent-directory escape); refusing to apply.",
-        );
-      }
+  for (const candidate of patchHeaderPaths(patch)) {
+    if (candidate.startsWith("/") || candidate.split("/").includes("..")) {
+      throw new HatcherySpawnError(
+        `Spawn patch references an unsafe path "${candidate}" ` +
+          "(absolute or parent-directory escape); refusing to apply.",
+      );
     }
   }
 }
