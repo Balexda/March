@@ -130,8 +130,10 @@ Tessera credential scoped to the origin repository. The Steward receives the
 review and PR prompt only after the recorded remote branch is published or
 verified equivalent. A publication failure preserves a verified local commit
 and its checkout for retry. A later dispatch of the slice that collides with
-that preserved branch at manager launch resumes it: Hatchery re-verifies the
-commit against the prior spawn's recorded extraction, then pushes it and hands
+that preserved branch at manager launch resumes it, but only when the prior
+spawn record's `admittedWork` (slice id, prompt sha256, backend) matches the
+current dispatch. Hatchery re-verifies the commit against the prior spawn's
+recorded extraction, then pushes it and hands
 the existing Steward the prompt instead of launching a replacement. A
 successful push records the branch as the checkout's upstream, and the Steward
 opens the PR with an explicit `--head`. Git phases are bounded and traced on the slice,

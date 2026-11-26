@@ -337,7 +337,14 @@ it("resumes a preserved publication when a retry collides at manager launch", as
   gitAt(target, "remote", "set-url", "origin", remote);
   launchCollision.value = true;
   const spans = captureSpans();
-  const result = await runHatcherySpawn({ repoPath, branch, prompt: "retry", backend, homeDir, sliceId });
+  // A different request naming the same branch must not inherit the publication.
+  await expect(runHatcherySpawn({ repoPath, branch, prompt: "other work", backend, homeDir, sliceId }))
+    .rejects.toThrow(/already exists|diverged|manager/i);
+  await expect(runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId: "other-slice" }))
+    .rejects.toThrow(/already exists|diverged|manager/i);
+  expect(gitAt(remote, "for-each-ref", "refs/heads/feature/" + branch).trim()).toBe("");
+  sendPrompt.mockClear();
+  const result = await runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId });
 
   expect(result.spawnId).toBe((failure as { spawnId: string }).spawnId);
   expect(result.commit.commitSha).toBe(preserved);

@@ -55,8 +55,10 @@ import {
   updateSpawnRecordImageId,
   updateSpawnRecordExtractionResult,
   updateSpawnRecordPrompt,
+  updateSpawnRecordAdmittedWork,
   updateSpawnRecordStewardSession,
   writeInitialSpawnRecord,
+  type AdmittedWork,
 } from "../brood/spawn-record.js";
 import {
   type DispatchSpanHandle,
@@ -376,7 +378,10 @@ async function selfHealManagerLaunchCollision(input: {
  * same slice collides at `manager.launch`, and self-heal refuses to remove
  * the unmerged commit. Resumption needs the recorded checkout for the prior
  * spawn, still on its recorded branch, with an equivalent commit for that
- * spawn's persisted extraction at the tip. It then pushes that commit and hands
+ * spawn's persisted extraction at the tip, and the prior spawn must have been
+ * admitted for the same slice, request, and backend as this dispatch, so a
+ * different request that names the same branch never inherits another spawn's
+ * publication. It then pushes that commit and hands
  * the prior Steward the review prompt without launching a replacement. Returns
  * undefined when the colliding branch is not a preserved publication.
  */
@@ -400,6 +405,11 @@ async function resumePreservedPublication(input: {
     readonly handoff: StewardHandoffInput;
     readonly commit: IntegrationCommit;
   };
+  if (!input.sliceId) return undefined;
+  const expected = admittedWork(input.sliceId, input.prompt, input.backend);
+  const sameWork = (recorded: AdmittedWork | undefined) =>
+    !!recorded && recorded.sliceId === expected.sliceId &&
+    recorded.promptSha256 === expected.promptSha256 && recorded.backend === expected.backend;
   const locate = (candidate: string): Preserved | undefined => {
     const worktreePath = findWorktreePathForBranch(input.repoPath, candidate);
     if (!worktreePath) return undefined;
@@ -408,6 +418,7 @@ async function resumePreservedPublication(input: {
     if (!spawnId) return undefined;
     const record = loadSpawnRecord(spawnId, input.homeDir);
     if (!record || record.integrationBranch !== candidate || !record.stewardSessionId) return undefined;
+    if (!sameWork(record.admittedWork)) return undefined;
     const eligibility = evaluateStewardHandoffEligibility({ spawnId, homeDir: input.homeDir });
     if (!eligibility.eligible) return undefined;
     const target = resolveStewardTarget({
@@ -764,6 +775,11 @@ function extractionSuccessResult(input: {
     },
     extractedAt: new Date().toISOString(),
   };
+}
+
+/** The identity a dispatch must share with a spawn to resume its publication. */
+function admittedWork(sliceId: string, prompt: string, backend: string): AdmittedWork {
+  return { sliceId, promptSha256: cryptoHash(prompt), backend };
 }
 
 function cryptoHash(text: string): string {
@@ -1794,6 +1810,7 @@ export async function runHatcherySpawn(
       backend: input.backend.name,
     }, input.homeDir);
     updateSpawnRecordPrompt(spawnId, spawnPrompt, input.homeDir);
+    updateSpawnRecordAdmittedWork(spawnId, admittedWork(sliceId, input.prompt, input.backend.name), input.homeDir);
     // Record the steward<->spawn link so Brood (and a standalone
     // `march brood teardown`) can address the steward during teardown.
     updateSpawnRecordStewardSession(spawnId, manager.sessionId, input.homeDir);
