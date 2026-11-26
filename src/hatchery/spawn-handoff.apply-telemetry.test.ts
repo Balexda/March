@@ -457,3 +457,15 @@ it("fails when the worktree leaves the integration branch while the patch is app
   });
   expect(sendPrompt).not.toHaveBeenCalled();
 });
+
+it("keeps a literal supplementary character beside an escape in a quoted path", async () => {
+  // core.quotePath=false style: literal emoji, but the tab is still escaped.
+  workerPatch.value =
+    'diff --git "a/\u{1F600}\\t.txt" "b/\u{1F600}\\t.txt"\nnew file mode 100644\n' +
+    'index 0000000..deadbee\n--- /dev/null\n+++ "b/\u{1F600}\\t.txt"\n@@ -0,0 +1 @@\n+hi\n';
+
+  const result = await runFixture();
+
+  expect(result.application).toMatchObject({ status: "applied", touchedPaths: ["\u{1F600}\t.txt"] });
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+});

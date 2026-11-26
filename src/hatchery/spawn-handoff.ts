@@ -427,10 +427,14 @@ function decodeGitQuotedPath(token: string): string | null {
   const bytes: number[] = [];
   const body = token.slice(1, -1);
   for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
+    // Read whole code points: with core.quotePath=false a literal supplementary
+    // character (e.g. an emoji) sits beside escapes, and encoding its UTF-16
+    // surrogates separately would corrupt it (#735 review).
+    const ch = String.fromCodePoint(body.codePointAt(i)!);
     if (ch === '"') return null;
     if (ch !== "\\") {
       bytes.push(...Buffer.from(ch, "utf-8"));
+      i += ch.length - 1;
       continue;
     }
     const next = body[++i];
@@ -464,11 +468,6 @@ function quotedTokenLength(s: string): number {
   return -1;
 }
 
-/**
- * Old/new paths from every `diff --git` header, decoding Git's quoted form so
- * filenames such as `café.txt` match the names `git diff --cached -z` stages.
- * Handles either side being quoted independently (#735 review).
- */
 interface PatchFileOp {
   readonly oldPath: string;
   readonly newPath: string;
@@ -476,6 +475,11 @@ interface PatchFileOp {
   readonly copy: boolean;
 }
 
+/**
+ * Old/new paths from every `diff --git` header, decoding Git's quoted form so
+ * filenames such as `café.txt` match the names `git diff --cached -z` stages.
+ * Handles either side being quoted independently (#735 review).
+ */
 function patchFileOps(patch: string): PatchFileOp[] {
   const ops: PatchFileOp[] = [];
   const headerRe = /^diff --git (.+)$/gm;
