@@ -41,13 +41,16 @@
 
 ## Specification Debt
 
-_None — no specification debt was recorded._
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-002 | inherited from spec: The exact persistence owner for `PrIntegrationResult` must be confirmed against the live Brood registry and any Herald projection expectations before implementation tasks are cut. | Domain & Data Model | Medium | Medium | inherited | US3 returns `IntegrationCommit` to its caller and records no persisted state. Durable recording of the full outcome remains US5 scope. |
+| SD-003 | inherited from spec: The exact verification commands to run before PR creation are not specified here; implementation planning must decide whether to run repository defaults, spec-provided checks, or no verification in the initial slice. | Functional Scope | Medium | Medium | inherited | US3 publishes the branch without choosing a pre-PR verification policy. The decision moves to US4, which consumes the published head. |
 
 ## Open Implementation Questions
 
 | ID | Question | Slice | Settled By | Origin |
 |----|----------|-------|------------|--------|
-| IQ-001 | Which existing handoff interface can carry commit and push outcomes to the later persistence owner? | S1 | reading code | spec:SD-002 |
+| IQ-001 | Which existing handoff interface can carry commit and push outcomes back to the integration caller without committing to a persistence owner? | S1 | reading code plus a check of the live Brood registry and Herald projection expectations | spec:SD-002 |
 
 ## Dependency Order
 
