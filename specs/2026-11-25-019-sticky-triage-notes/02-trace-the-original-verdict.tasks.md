@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Encode and validate evaluation provenance**
+- [x] **Encode and validate evaluation provenance**
 
   Build the marker codec in `src/triage/` from the note format and marker payload contracts. Reuse the validator in `src/triage/verdict.ts` when reading the original verdict for AS 2.1 and AS 2.2.
 
@@ -27,7 +27,7 @@
   - Reject unsupported versions, invalid Base64 or UTF-8 JSON, and payloads that violate the marker data model or verdict contract.
   - Verify deterministic encoding and exact round-trips for Unicode context, empty context, and all needs-definition grades. Recover the original recommendation and hash after edits to live labels or issue text.
 
-- [ ] **Identify the trusted note and report owned conflicts**
+- [x] **Identify the trusted note and report owned conflicts**
 
   Apply the note selection contract to the complete issue comment set and expected writer identity for AS 2.3. Expose the comment identity and decoded provenance for a valid owned note and document the mapped interface in `docs/subsystems/triage/contract.md`.
 

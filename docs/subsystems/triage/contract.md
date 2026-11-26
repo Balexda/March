@@ -22,6 +22,19 @@ Recommender execution and calibration belong to the recommender milestone.
   text. It returns `{ ok: true, verdict }` for an eligible `TriageVerdictV1`, or
   `{ ok: false, diagnostic }`. The diagnostic contains a code and a field path,
   with `$` identifying the whole document.
+- `encodeTriageNoteMarker(provenance)` in `src/triage/triage-note.ts` encodes
+  the rubric revision, evaluated issue hash, validated verdict, and ordered
+  publishable repository context as a standalone v1 HTML comment. Place
+  the marker on the final line of the note.
+- `decodeTriageNoteMarker(marker)` validates a standalone marker and returns
+  its provenance or a failure code. The payload uses padded standard Base64
+  of UTF-8 JSON.
+- `readTriageNote(comments, writerId)` receives the complete issue comment set
+  as `{ id, authorId, body }` entries (the same shape `selectTriageNote` takes)
+  and the trusted writer's numeric GitHub account ID. It compares `authorId` to
+  that ID and returns `absent`, `found` with the comment ID and provenance, or
+  an explicit failure code without a replacement target. Reading uses only the stored marker and issues no
+  comment writes.
 - `resolveTriageDestination(verdict: TriageVerdictV1)` reads a validated verdict.
   It returns `smithy.spark`, `smithy.ignite`, `smithy.render`, `smithy.mark`, or
   `smithy.strike` for the matching build outcome, and `undefined` otherwise.
@@ -29,7 +42,8 @@ Recommender execution and calibration belong to the recommender milestone.
   name the wire schema and the rubric revision.
 - `renderTriageNote(evaluation)` renders a validated verdict, rubric version,
   evaluated issue content hash, and publishable repository context as a
-  deterministic comment body with one final v1 marker.
+  deterministic comment body with one final v1 marker produced by
+  `encodeTriageNoteMarker`.
 - `selectTriageNote(comments, writerId, proposedBody)` takes the complete issue
   comment set and the trusted writer's numeric GitHub account ID. It proposes
   a comment creation or replacement, returns unchanged, or reports a selection
@@ -103,3 +117,8 @@ Note selection returns `{ kind: "failure", reason }` for an invalid owned marker
 or multiple owned candidates. With tracing enabled it also emits an errored
 `triage.note.select` span carrying only the failure reason.
 [Operating philosophy rule 3](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)
+
+Note reads report `malformed-marker`, `unsupported-version`,
+`invalid-payload`, `multiple-markers`, or `multiple-candidates`.
+When telemetry is enabled, a failed read emits an errored `triage.note.read`
+span carrying only the failure reason.
