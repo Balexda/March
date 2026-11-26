@@ -66,7 +66,7 @@ _None — no specification debt was recorded._
 |----|-------|------------|----------|
 | F1 | Versioned Triage Verdicts | — | specs/2026-11-21-015-versioned-triage-verdicts/ |
 | F2 | GitHub Triage Labels and Signals | F1 | specs/2026-11-23-018-github-triage-labels-and-signals/ |
-| F3 | Sticky Triage Notes | F1 | — |
+| F3 | Sticky Triage Notes | F1, F2 | specs/2026-11-25-019-sticky-triage-notes/ |
 
 ## Cross-Milestone Dependencies
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->

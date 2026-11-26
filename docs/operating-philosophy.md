@@ -98,4 +98,6 @@ Specs and feature maps that explicitly invoke this philosophy:
 
 - `specs/2026-11-23-018-github-triage-labels-and-signals/github-triage-labels-and-signals.spec.md` — FR-002 applies rules 2 and 3 to repository-scoped label provisioning and bounded failure reporting.
 
+- `specs/2026-11-25-019-sticky-triage-notes/sticky-triage-notes.spec.md` — FR-004. Applies rule 3 (clean exits): malformed or ambiguous March-owned triage notes surface as explicit failures with no proposed change.
+
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
