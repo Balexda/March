@@ -16,3 +16,14 @@ export function startTriageProvisionSpan() {
   const otel = getActiveOtel();
   return otel.enabled ? otel.getTracer().startSpan("triage.labels.provision") : undefined;
 }
+
+export function emitTriageNoteSelectionFailure(reason: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+
+  const span = otel.getTracer().startSpan("triage.note.select", {
+    attributes: { "triage.note.failure_reason": reason },
+  });
+  span.setStatus({ code: SpanStatusCode.ERROR });
+  span.end();
+}

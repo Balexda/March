@@ -27,6 +27,14 @@ Recommender execution and calibration belong to the recommender milestone.
   `smithy.strike` for the matching build outcome, and `undefined` otherwise.
 - `TRIAGE_SCHEMA_VERSION` (`1`) and `TRIAGE_RUBRIC_REVISION` (`baseline-1`)
   name the wire schema and the rubric revision.
+- `renderTriageNote(evaluation)` renders a validated verdict, rubric version,
+  evaluated issue content hash, and publishable repository context as a
+  deterministic comment body with one final v1 marker.
+- `selectTriageNote(comments, writerId, proposedBody)` takes the complete issue
+  comment set and the trusted writer's numeric GitHub account ID. It proposes
+  a comment creation or replacement, returns unchanged, or reports a selection
+  failure. A replacement carries the existing comment ID.
+  [Sticky note contract](../../../specs/2026-11-25-019-sticky-triage-notes/sticky-triage-notes.contracts.md)
 - `TRIAGE_LABEL_CATALOG` in `src/triage/labels.ts` defines the shared GitHub
   [label names and groups](../../../specs/2026-11-23-018-github-triage-labels-and-signals/github-triage-labels-and-signals.contracts.md#label-catalog).
   Outcome and confidence values come from the v1 verdict vocabulary. Acceptance
@@ -90,3 +98,8 @@ Provisioning returns `{ ok: false, operation, reason }` if it cannot confirm
 full coverage. It includes the repository, profile, or label when available.
 It also marks the `triage.labels.provision` span as errored when tracing is
 enabled. A retry reads the current catalog and fills the remaining gaps.
+
+Note selection returns `{ kind: "failure", reason }` for an invalid owned marker
+or multiple owned candidates. With tracing enabled it also emits an errored
+`triage.note.select` span carrying only the failure reason.
+[Operating philosophy rule 3](../../operating-philosophy.md#3-failures-are-clean-exits-not-hangs)

@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Render the public note and its marker**
+- [x] **Render the public note and its marker**
 
   Add deterministic rendering under `src/triage/` using the validated verdict vocabulary in `src/triage/verdict.ts` and the supplied evaluation metadata. Follow the Note Format and Published Tone Standard for AS 1.1 and AS 1.2.
 
@@ -28,7 +28,7 @@
   - Identical inputs yield byte-identical bodies. Free text renders as inert Markdown, including inputs containing mention or marker syntax.
   - The body ends with exactly one standalone hidden marker using the contracted v1 format and payload.
 
-- [ ] **Select a change using the trusted writer identity**
+- [x] **Select a change using the trusted writer identity**
 
   Use the complete comment set for one issue and the expected writer identity to select a note change in `src/triage/`. Apply the Note Selection contract for AS 1.1 and AS 1.3. Reuse the verdict validator when checking marker validity and follow March’s [clean failure rule](../../docs/operating-philosophy.md#3-failures-are-clean-exits-not-hangs).
 
