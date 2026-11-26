@@ -33,6 +33,7 @@
   _Acceptance criteria:_
 
   - Match open PRs by target repository and exact source repository and head. Return the existing record on retry, including after a concurrent creation or ambiguous response.
+  - Count a matched open PR as reused only when its base equals the resolved base. A matched PR on any other base must not be returned as a successful publication. It yields a defined non-success outcome that carries the existing PR's number and base (SD-004).
   - If only closed PRs exist, attempt a fresh PR. Use the configured base or the repository's authoritative default. An unresolved base prevents creation.
   - Return the contract's PR record on success. Auth, permission, network, and timeout failures return a stable terminal reason, pushed branch, commit, and bounded redacted diagnostic.
   - Bound lookup and creation without prompts. Emit deterministic slice child spans, errored on failure. Update affected subsystem contracts.
@@ -47,6 +48,7 @@
 |----|-------|-----------------|--------|------------|--------|
 | SD-002 | Terminal outcome persistence owner | Domain & Data Model | Medium | Medium | spec:SD-002 |
 | SD-003 | Pre-PR verification policy | Functional Scope | Medium | Medium | spec:SD-003 |
+| SD-004 | Outcome when an open PR on the same head targets a different base (terminal failure, or retarget). FR-011 and the contracts key reuse on the head branch alone | Data Integrity & Integration | Medium | Medium | local |
 
 ## Open Implementation Questions
 
