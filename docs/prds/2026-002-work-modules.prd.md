@@ -57,7 +57,7 @@ The coupling is concrete in the repo. The legate runs a fixed, order-dependent h
 
 - [Critical Assumption] The problem is structural coupling. Each kind of work has its discovery, prompts, merge rules and babysitting spread across legate internals, so adding or changing a flow means editing the core. Triage makes it urgent, because it ends in a verdict rather than a PR and needs a report back to its origin.
 - [Critical Assumption] Producers own no landing policy. The per-Smithy-verb merge rules and Dependabot's own gate, labels and pacing move to the GitHub-repo destination's per-repository configuration, matched on the item kind the producer declares.
-- [Critical Assumption] Behaviors split in two. The destination raises the signal as one of a few generic groups (checks, comments, approvals) and the producer supplies the responder (`/smithy.fix`). The core pairs them and arbitrates, so each steward gets at most one action per tick. The core never knows which reviewer wrote a comment or which check failed. Asking for a fresh review is part of the destination's land gate, not a responder.
+- [Critical Assumption] Behaviors split in two. The destination raises the signal as one of a few generic groups (checks, comments, approvals) and the producer supplies the responder (`/smithy.fix`). The core pairs them and arbitrates, so each steward gets at most one action per tick. The core never knows which reviewer wrote a comment or which check failed. Asking for a review or a fresh review is part of the destination's land stage, not a responder, and each is a setting of the destination module.
 - [Critical Assumption] The safety invariants stay in the core. Modules use only a closed vocabulary of steps and can never make a destructive step automatic. Recovery, teardown, spawn caps, dispatch idempotency and tracing stay core-owned, and module work nests under the existing per-item trace.
 - [Critical Assumption] No workflow engine or agent platform replaces March's core. This restructures an engine that already exists. Renovate is a possible future producer, and merge-queue tools cover only the land stage.
 - A work item carries an origin (what caused it, such as an issue) and a destination (where its artifact lands). The two can be different modules. For an issue-originated PR, the GitHub-repo destination lands the PR and reports it landed, and the module serving the origin (the GitHub-issues destination) performs the close-out by closing the issue. Each item has exactly one owner for close-out: the module serving its origin.
@@ -69,15 +69,15 @@ The coupling is concrete in the repo. The legate runs a fixed, order-dependent h
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Title | Source Category | Impact | Confidence | Origin |
-|----|-------|-----------------|--------|------------|--------|
-| SD-007 | re-review-without-approval-gate | Solution Intent | Medium | Medium | local |
-
-### SD-007 — re-review-without-approval-gate
-
-Asking for a fresh review lives in the destination's land gate, because that gate is approval (SD-002). Unresolved choice for a destination, or an item kind, that does not require approval, such as a profile that relaxes approval for `forge`. Option (a): the land stage still asks for a fresh review whenever the item is waiting on reviewer feedback. Option (b): no fresh review is requested, and the comment signals alone decide whether the item can land. Under (b), a PR with outstanding review could wait for feedback nobody asks for.
+_None — no specification debt was recorded._
 
 ### Resolved
+
+#### SD-007 — re-review-without-approval-gate
+
+**Question:** Does the land stage still ask for a fresh review when the destination, or the item kind, does not require approval?
+
+**Answer:** Asking for a review and asking for a re-review are settings of the destination module, not behavior built into March's core. Each is configured on its own, per destination instance, whether or not approval is required. For example, a repository whose reviewer re-reviews automatically, such as CodeRabbit with automatic re-review on, turns the module's re-review request off. The RFC sets the defaults and keeps today's Smithy behavior during migration. Decided by the operator in PR review, 2026-11-26.
 
 #### SD-001 — private-module-loading-in-first-cut
 
@@ -118,4 +118,4 @@ Asking for a fresh review lives in the destination's land gate, because that gat
 ## Open Questions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-- SD-007: does the land stage still ask for a fresh review when the destination does not require approval? This can be settled in `smithy.ignite`, and does not block expanding the PRD into an RFC.
+None at this time — ready for `smithy.ignite` to expand into an RFC.
