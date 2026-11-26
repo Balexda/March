@@ -57,7 +57,7 @@ As a maintainer, I want to recover the verdict and the inputs it was based on so
 | ID | Title | Depends On | Artifact |
 |---|---|---|---|
 | US1 | Read One Actionable Triage Note | — | specs/2026-11-25-019-sticky-triage-notes/01-read-one-actionable-triage-note.tasks.md |
-| US2 | Trace the Original Verdict | — | — |
+| US2 | Trace the Original Verdict | — | specs/2026-11-25-019-sticky-triage-notes/02-trace-the-original-verdict.tasks.md |
 
 ## Requirements
 <!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: recommended -->
