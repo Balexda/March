@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Persist a typed terminal result in Brood**
+- [x] **Persist a typed terminal result in Brood**
 
   Extend Brood’s durable lifecycle registry and typed client with current integration outcomes by spawn ID (AS 5.1, AS 5.2, AS 5.5).
 
@@ -27,7 +27,7 @@
   - Retain a readable terminal failure for a known attempt whose lifecycle row is missing. Avoid creating a synthetic session that teardown could mistake for a real one.
   - Cover persistence across restart, legacy records, and retried or out-of-order writes. Update the Brood contract.
 
-- [ ] **Finalize Hatchery integration with bounded work and diagnostics**
+- [x] **Finalize Hatchery integration with bounded work and diagnostics**
 
   At the Hatchery handoff boundary, map validated extraction, application, commit, push, and PR publication outcomes into the Brood contract (AS 5.1–5.4).
 
@@ -39,7 +39,7 @@
   - Bound Brood calls and retries. Reconcile lost acknowledgements idempotently. Return typed persistence failures with available artifacts.
   - Reuse deterministic slice trace IDs across processes and mark failure spans errored. Cover success, gate rejection, missing lifecycle, conflict, commit and push failure, PR failure, timeout, and post-publication persistence failure.
 
-- [ ] **Read terminal outcomes through the orchestration boundary**
+- [x] **Read terminal outcomes through the orchestration boundary**
 
   Wire Hatchery job completion and Legate's existing dispatch completion path to the typed outcome. Expose the same durable outcome to Herald through a typed Brood read. When Brood confirms it has no outcome, Herald uses Legate's terminal failure event from its own event log (AS 5.5).
 

@@ -20,6 +20,12 @@
  * All effects route through {@link DispatchIoDeps}; the pure id/prompt helpers are
  * imported directly. Each op unit-tests against fakes.
  */
+import { randomUUID } from "node:crypto";
+import { parseIntegrationOutcome } from "../../../brood/service/integration.js";
+import type { AgentFailureReason } from "../../../observability/agent-output.js";
+import type { PrIntegrationResult } from "../../../brood/service/types.js";
+import type { JobRecord } from "../../../hatchery/service/types.js";
+import { emitLoopSpan } from "../../../observability/loop-spans.js";
 import type { DispatchIoDeps } from "./dispatch-io.js";
 import {
   actionArguments,
@@ -146,6 +152,20 @@ async function adoptOpenPrOnCollision(
   };
 }
 
+/** Raised before the spawn request leaves Legate, so Hatchery never saw it. */
+class DispatchRejectedError extends Error {}
+
+/**
+ * True when Hatchery cannot have accepted the spawn: Legate failed before
+ * sending it, or Hatchery answered with a 4xx. A transport failure, timeout,
+ * or 5xx stays ambiguous because the job may exist.
+ */
+function dispatchDefinitelyRejected(err: unknown): boolean {
+  if (err instanceof DispatchRejectedError) return true;
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
 // Launch a codex spawn through the Hatchery SERVICE. POSTs the spawn request via
 // the async Hatchery client and returns the server job id;
 // completePendingHatcheryDispatches polls that id with getJob() across ticks
@@ -154,10 +174,12 @@ async function adoptOpenPrOnCollision(
 // the tick. repoPath must be valid INSIDE the hatchery container — it bind-mounts
 // the repo + worktree-parent at the identical absolute path. Telemetry is owned
 // by the service; the dispatch trace is correlated server-side via sliceId.
-export async function launchHatcheryDispatch(item: any, sliceId: string, deps: DispatchIoDeps): Promise<{ jobId: string }> {
+export async function launchHatcheryDispatch(item: any, sliceId: string, deps: DispatchIoDeps,
+  attempt?: { attemptId: string; stewardDeadline: string },
+): Promise<{ jobId: string }> {
   const repoPath = deps.meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
-    throw new Error("repo path is missing");
+    throw new DispatchRejectedError("repo path is missing");
   }
   const dispatchIdent = dispatchIdentity(item);
   const spawnRequest = {
@@ -177,6 +199,7 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
     // Use the caller's slice id so the spawn, the in-memory slice, and the emitted
     // transitions all correlate under one id (single source of truth).
     sliceId,
+    ...attempt,
   };
   const created = await deps.postSpawn(spawnRequest);
   // postSpawn's parseJsonBody yields {} on an empty/invalid 202 body, so the id
@@ -209,11 +232,14 @@ async function cullOrphanedSteward(
   errorText: string,
   ts: string,
   deps: DispatchIoDeps,
+  attemptId?: string,
 ): Promise<any | null> {
   if (!deps.cullStewardForSlice) return null;
   if (/already exists/i.test(errorText)) return null;
   try {
-    const res = await deps.cullStewardForSlice(sliceId, branch);
+    const res = attemptId === undefined
+      ? await deps.cullStewardForSlice(sliceId, branch)
+      : await deps.cullStewardForSlice(sliceId, branch, attemptId);
     if (res?.culled) {
       return {
         action: "steward-cull",
@@ -242,7 +268,8 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
   // truly fresh dispatch has no prior slice, so this is null and behavior is
   // unchanged. Without this, re-creating the slice with pr:null would clobber the
   // observation before the collision is seen and adoption could never fire.
-  const observedPr = state.slices?.[sliceId]?.pr ?? null;
+  const previous = state.slices?.[sliceId];
+  const observedPr = previous?.pr ?? null;
   try {
     state.slices[sliceId] = {
       kind: "smithy",
@@ -260,8 +287,40 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       last_action: ts,
       last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
     };
-    const launched = await launchHatcheryDispatch(item, sliceId, deps);
-    state.slices[sliceId].hatchery.job_id = launched.jobId;
+    const attempt = deps.integration && {
+      attemptId: randomUUID(), stewardDeadline: deps.integration.stewardDeadline(),
+    };
+    if (attempt && deps.integration) {
+      try {
+        await deps.integration.appendTransition({
+          type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: attempt.attemptId,
+          ...dispatchActionKeyFields(item), ...attempt,
+        });
+      } catch {
+        emitLoopSpan({ name: "legate.integration.dispatch", traceKey: sliceId, root: false, error: true });
+        if (previous) state.slices[sliceId] = previous;
+        else delete state.slices[sliceId];
+        return { actions, failures, mutated: true, notifications };
+      }
+      Object.assign(state.slices[sliceId].hatchery, {
+        job_id: attempt.attemptId, attempt_id: attempt.attemptId, steward_deadline: attempt.stewardDeadline,
+      });
+    }
+    const integration = deps.integration;
+    const launched = attempt && integration
+      ? await launchHatcheryDispatch(item, sliceId, deps, attempt).catch(async (err: unknown) => {
+          emitLoopSpan({ name: "legate.integration.dispatch", traceKey: sliceId, root: false, error: true });
+          // An accepted request can lose its acknowledgement. Keep polling by the
+          // ID recorded before POST so Brood can settle the attempt after restart.
+          if (!dispatchDefinitelyRejected(err)) return { jobId: attempt.attemptId };
+          // A definite rejection fails now, once Brood fences the attempt so no
+          // later write from it can publish. Without the fence, keep polling.
+          const confirmed = await integration.confirmFailure(sliceId, attempt.attemptId).catch(() => undefined);
+          if (!confirmed?.fenced || confirmed.outcome) return { jobId: attempt.attemptId };
+          throw err;
+        })
+      : await launchHatcheryDispatch(item, sliceId, deps);
+    state.slices[sliceId].hatchery.job_id = attempt?.attemptId ?? launched.jobId;
     actions.push({
       action: "dispatch",
       sliceId,
@@ -271,7 +330,7 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
     // Persist the job id in the fold so the completion poll survives a restart
     // (rebuildWorkingState restores slice.hatchery.job_id from slice.dispatched).
     // The action key rides along (#653) so a rebuild can tell sibling rows apart.
-    deps.emitTransition({
+    if (!attempt) deps.emitTransition({
       type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: launched.jobId,
       ...dispatchActionKeyFields(item),
     });
@@ -391,11 +450,49 @@ export async function recoverDispatch(
   return out;
 }
 
-// Drain in-flight Hatchery dispatches: poll each hatchery-pending slice's job and
-// either promote it to `implementing` (success) or escalate it for judgement
-// (failure). Non-terminal jobs and transient lookup failures just wait for the
-// next tick. A failed spawn — for ANY reason (patch error, session collision,
-// branch collision, …) — escalates: the legate no longer auto-recovers.
+/**
+ * A job failure or elapsed deadline supplies a fallback only if Brood's atomic
+ * read finds no result and fences the attempt against a later write.
+ */
+async function resolveIntegrationCompletion(
+  deps: DispatchIoDeps,
+  integration: NonNullable<DispatchIoDeps["integration"]>,
+  sliceId: string,
+  attemptId: string,
+  jobId: string,
+  deadline: string,
+  ts: string,
+): Promise<{ job: JobRecord | undefined; outcome: PrIntegrationResult } | undefined> {
+  const job: JobRecord | undefined = await deps.getJob(jobId).catch(() => undefined);
+  const candidate = parseIntegrationOutcome(job?.integrationOutcome);
+  const jobFailed = candidate?.status === "failed";
+  const expired = Date.parse(ts) >= Date.parse(deadline);
+  const observed = expired || job?.status === "failed" || jobFailed
+    ? undefined : await integration.readAttempt(sliceId, attemptId);
+  if (observed?.outcome?.status === "succeeded") return { job, outcome: observed.outcome };
+  if (observed && !observed.outcome) return undefined;
+
+  const confirmed = await integration.confirmFailure(sliceId, attemptId);
+  if (confirmed.outcome) return { job, outcome: confirmed.outcome };
+  if (!confirmed.fenced) return undefined;
+  const jobFailure = jobFailed && (confirmed.spawnId === null || confirmed.spawnId === candidate.spawnId)
+    ? candidate : undefined;
+  return {
+    job,
+    outcome: {
+      ...jobFailure,
+      spawnId: confirmed.spawnId ?? jobFailure?.spawnId ?? null,
+      status: "failed",
+      failureReason: expired ? "timeout" : jobFailure?.failureReason ?? "persistence",
+      completedAt: jobFailure?.completedAt ?? ts,
+      diagnostic: expired ? "Steward deadline expired."
+        : jobFailure?.diagnostic ?? "Hatchery returned no durable integration outcome.",
+    },
+  };
+}
+
+// Drain pending dispatches into the Steward handoff or existing recovery policy.
+// Dispatches persisted before integration tracking retain their job-only path.
 export async function completePendingHatcheryDispatches(state: any, ts: string, deps: DispatchIoDeps): Promise<DispatchOutcome> {
   const actions: any[] = [];
   const failures: any[] = [];
@@ -403,14 +500,19 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
   let mutated = false;
   const slices: Record<string, any> = state?.slices && typeof state.slices === "object" ? state.slices : {};
 
-  const escalate = async (slice: any, sliceId: string, errorText: string) => {
+  const escalate = async (
+    slice: any, sliceId: string, errorText: string,
+    integrationFailure?: Extract<PrIntegrationResult, { status: "failed" }>,
+    agentFailureReason?: AgentFailureReason,
+    publicationPreserved = Boolean(integrationFailure?.commit || integrationFailure?.pullRequest),
+  ) => {
     slice.stage = "escalated";
     // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
     // re-dispatch this slice; survives a restart via rebuildWorkingState.
     slice.escalated_reason = "hatchery_dispatch_failed";
     slice.last_action = ts;
     slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
-    deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
+    if (!integrationFailure) deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
     // #460: schedule this slice's next exponential-backoff window + AIMD-decrease
     // the recovery rate, so the loop keeps re-dispatching indefinitely but ever
     // further apart and without stampeding after a burst.
@@ -418,10 +520,22 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // The spawn failed before reaching a useful steward; cull the session it may
     // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
     // rollback can't reach) so it does not leak or hold a budget slot.
-    const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
-    if (culled) actions.push(culled);
+    // An integration failure culls only its own attempt's session, and only
+    // before a commit or PR exists, so a preserved publication stays resumable.
+    const attemptId = slice.hatchery?.attempt_id;
+    if (!integrationFailure) {
+      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
+      if (culled) actions.push(culled);
+    } else if (typeof attemptId === "string" && !publicationPreserved) {
+      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, attemptId);
+      if (culled) actions.push(culled);
+    }
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
-    failures.push({ slice_id: sliceId, command: commandLine, error: errorText });
+    failures.push({
+      slice_id: sliceId, command: commandLine, error: errorText,
+      ...(integrationFailure && { failure_reason: integrationFailure.failureReason }),
+      ...(agentFailureReason && { agent_failure_reason: agentFailureReason }),
+    });
     // Only escalate to the operator once auto-recovery is out of budget. Within
     // budget the loop re-dispatches this slice itself (#211) on this same tick, so
     // a judgement request here fires before recovery runs and would prompt the
@@ -450,47 +564,91 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // id here is a defensive skip, not a strand.
     if (typeof jobId !== "string" || jobId.length === 0) continue;
     let job;
-    try {
-      job = await deps.getJob(jobId);
-    } catch (err: any) {
-      // A network blip is transient — the Hatchery client prefixes those with
-      // "Could not reach …" — so wait and re-poll next tick rather than escalating
-      // a healthy in-flight spawn. Any other failure is a real lookup failure
-      // (e.g. a 404 because a Hatchery restart lost the job, or a persistent
-      // non-200); that would otherwise strand the slice in hatchery-pending
-      // forever, so escalate it for judgement.
-      const message = String(err?.message || "");
-      if (message.startsWith("Could not reach")) continue;
-      await escalate(slice, sliceId, "Hatchery job lookup failed: " + (message || "unknown error"));
-      continue;
-    }
-    if (job.status !== "succeeded" && job.status !== "failed") {
-      // Still pending/running — wait for the next tick.
-      continue;
-    }
-    if (job.status === "failed" || job.result?.error) {
-      const errorText = String(job.status === "failed" ? (job.error?.message || "hatchery spawn failed") : job.result.error).trim();
-      // #173: a background spawn that failed because the branch already has this
-      // slice's open PR is an adopt, not an escalate. The async service model
-      // surfaces the collision here (the spawn runs after POST /spawns' 202), so
-      // the same forge-truth check that guards the launch path guards this one.
-      const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps);
-      if (adopted) {
-        actions.push(adopted);
-        mutated = true;
+    let outcome: PrIntegrationResult | undefined;
+    const attemptId = slice.hatchery?.attempt_id;
+    const deadline = slice.hatchery?.steward_deadline;
+    if (deps.integration && typeof attemptId === "string" && typeof deadline === "string") {
+      try {
+        const completion = await resolveIntegrationCompletion(deps, deps.integration, sliceId, attemptId, jobId, deadline, ts);
+        if (!completion) continue;
+        ({ job, outcome } = completion);
+        if (outcome.status === "failed") {
+          const observed = outcome;
+          const stored = await deps.integration.appendTransition({ type: "slice.integration.failed", sliceId, attemptId, outcome });
+          // A retried append returns the event Herald kept from the first write.
+          // Its outcome is the recorded one, so escalate with it.
+          const storedOutcome = (stored as { type?: unknown; outcome?: unknown } | undefined)?.type === "slice.integration.failed"
+            ? parseIntegrationOutcome((stored as { outcome?: unknown }).outcome) : undefined;
+          if (storedOutcome?.status === "failed") outcome = storedOutcome;
+          emitLoopSpan({
+            name: "legate.integration.complete", traceKey: sliceId, root: false, error: true,
+            attributes: { "march.failure_reason": outcome.failureReason },
+          });
+          slice.integration_outcome = outcome;
+          // The cleanup decision keeps the newest observation: a commit or PR
+          // seen after the first stored failure still protects its checkout.
+          await escalate(
+            slice, sliceId, outcome.failureReason + ": " + outcome.diagnostic, outcome, job?.error?.agentFailureReason,
+            Boolean(outcome.commit || outcome.pullRequest || observed.commit || observed.pullRequest),
+          );
+          continue;
+        }
+        await deps.integration.appendTransition({
+          type: "slice.stage.changed", sliceId, stage: "implementing", attemptId,
+          spawnId: outcome.spawnId, branch: outcome.commit.branch,
+          worktreePath: outcome.worktreePath ?? job?.result?.managerSession?.worktreePath,
+          sessionId: outcome.stewardSessionId ?? job?.result?.managerSession?.sessionId,
+        });
+        emitLoopSpan({ name: "legate.integration.complete", traceKey: sliceId, root: false });
+        slice.integration_outcome = outcome;
+      } catch {
+        emitLoopSpan({ name: "legate.integration.complete", traceKey: sliceId, root: false, error: true });
         continue;
       }
-      await escalate(slice, sliceId, errorText);
-      continue;
+    } else {
+      try {
+        job = await deps.getJob(jobId);
+      } catch (err: any) {
+        // A network blip is transient — the Hatchery client prefixes those with
+        // "Could not reach …" — so wait and re-poll next tick rather than escalating
+        // a healthy in-flight spawn. Any other failure is a real lookup failure
+        // (e.g. a 404 because a Hatchery restart lost the job, or a persistent
+        // non-200); that would otherwise strand the slice in hatchery-pending
+        // forever, so escalate it for judgement.
+        const message = String(err?.message || "");
+        if (message.startsWith("Could not reach")) continue;
+        await escalate(slice, sliceId, "Hatchery job lookup failed: " + (message || "unknown error"));
+        continue;
+      }
+      if (job.status !== "succeeded" && job.status !== "failed") {
+        // Still pending/running — wait for the next tick.
+        continue;
+      }
+      if (job.status === "failed" || job.result?.error) {
+        const errorText = String(job.status === "failed" ? (job.error?.message || "hatchery spawn failed") : job.result.error).trim();
+        // #173: a background spawn that failed because the branch already has this
+        // slice's open PR is an adopt, not an escalate. The async service model
+        // surfaces the collision here (the spawn runs after POST /spawns' 202), so
+        // the same forge-truth check that guards the launch path guards this one.
+        const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps);
+        if (adopted) {
+          actions.push(adopted);
+          mutated = true;
+          continue;
+        }
+        await escalate(slice, sliceId, errorText);
+        continue;
+      }
     }
     // Success: hand off to the manager session Hatchery launched.
-    const result: any = job.result || {};
+    const result = job?.result || {};
     const manager = result.managerSession || {};
+    const sessionId = outcome?.stewardSessionId ?? manager.sessionId ?? null;
     const artifacts = result.artifacts || {};
-    slice.worker_session_id = manager.sessionId || null;
+    slice.worker_session_id = sessionId;
     slice.worker_title = manager.title || slice.worker_title;
-    slice.branch = result.branch || manager.branch || slice.branch;
-    slice.worktree_path = manager.worktreePath || null;
+    slice.branch = outcome?.commit?.branch || result.branch || manager.branch || slice.branch;
+    slice.worktree_path = outcome?.worktreePath ?? manager.worktreePath ?? null;
     slice.stage = "implementing";
     // Stable handoff timestamp so stranded-steward detection measures elapsed time
     // without being reset by later last_action updates.
@@ -499,9 +657,9 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
     slice.hatchery = {
       ...(slice.hatchery || {}),
-      spawn_id: result.spawnId,
+      spawn_id: outcome?.spawnId ?? result.spawnId,
       backend: result.backend || "codex",
-      artifacts_dir: artifacts.dir || null,
+      artifacts_dir: outcome?.artifactsDir || artifacts.dir || null,
       patch_path: artifacts.patchPath || null,
       spawn_output_path: artifacts.spawnOutputPath || null,
       metadata_path: artifacts.metadataPath || null,
@@ -510,7 +668,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // slice→session link (#210). Without it Herald's PR-discovery gate skips the
     // steward forever, leaving real PRs stranded in an endless nudge loop. A
     // restart's rebuild keeps the link too. Complements the Hatchery push (#213).
-    deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing", sessionId: manager.sessionId || undefined });
+    if (!outcome) deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing", sessionId: sessionId || undefined });
     // Clear any transient retry counters for this slice — it cleanly transitioned
     // to implementing, so prior transient failures no longer matter. The fold has
     // no clear event, so emit a durable retry.counted(0) per cleared key; without
@@ -538,7 +696,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     actions.push({
       action: "dispatch-complete",
       sliceId,
-      sessionId: manager.sessionId || null,
+      sessionId,
       detail: "Hatchery codex spawn completed for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }),
     });
     mutated = true;

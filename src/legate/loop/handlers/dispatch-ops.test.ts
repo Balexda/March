@@ -330,3 +330,207 @@ describe("recoverDispatch (#211 bounded auto-recovery)", () => {
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
   });
 });
+
+describe("durable integration completion", () => {
+  const deadline = "2026-11-27T12:00:00.000Z";
+  const beforeDeadline = "2026-11-27T11:59:00.000Z";
+  const spawnId = "artifact-spawn";
+  const result = {
+    spawnId, status: "succeeded", completedAt: beforeDeadline,
+    stewardSessionId: "steward", worktreePath: "/worktree",
+    application: { spawnId, status: "applied", touchedPaths: ["README.md"] },
+    commit: { spawnId, branch: "branch", commitSha: "sha", patchSha256: "digest", committedAt: beforeDeadline },
+    pullRequest: {
+      provider: "github", repository: "a/b", number: 1, url: "https://github.com/a/b/pull/1",
+      headBranch: "branch", baseBranch: "main", state: "open", observedAt: beforeDeadline,
+    },
+  } as const;
+  const pending = () => ({
+    slices: { s: { stage: "hatchery-pending", hatchery: {
+      job_id: "attempt", attempt_id: "attempt", steward_deadline: deadline,
+    } } },
+  });
+  const attempt = { attemptId: "attempt", spawnId, stewardDeadline: deadline, fenced: false, outcome: null };
+  const io = (over: Partial<NonNullable<DispatchIoDeps["integration"]>> = {}) => ({
+    stewardDeadline: () => deadline,
+    appendTransition: vi.fn(async () => {}),
+    readAttempt: vi.fn(async () => attempt),
+    confirmFailure: vi.fn(async () => ({ ...attempt, fenced: true })),
+    ...over,
+  });
+
+  it("records the attempt and deadline before submitting the same identity to Hatchery", async () => {
+    const state = { slices: {} };
+    const integration = io();
+    const postSpawn = vi.fn(async (request) => {
+      expect(integration.appendTransition).toHaveBeenCalledWith(expect.objectContaining({
+        type: "slice.dispatched", sliceId: "s", attemptId: request.attemptId,
+        jobId: request.attemptId, stewardDeadline: deadline,
+      }));
+      throw new Error("acknowledgement lost");
+    });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(state.slices).toMatchObject({ s: { stage: "hatchery-pending", hatchery: { steward_deadline: deadline } } });
+  });
+
+  const rejected = () => Object.assign(new Error("invalid spawn request"), { status: 400 });
+
+  it("fails a dispatch Hatchery rejected once Brood fences the attempt", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    const out = await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(integration.confirmFailure).toHaveBeenCalledWith("s", expect.any(String));
+    expect(state.slices.s).toMatchObject({ stage: "escalated", escalated_reason: "hatchery_dispatch_failed" });
+    expect(out.failures).toHaveLength(1);
+  });
+
+  it("fails a dispatch that never left Legate", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const meta = { profile: "prof", worker_group: "wg", repo: {}, processor_name: "proc", paired_legate: "leg" };
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, meta } as any));
+    expect(integration.confirmFailure).toHaveBeenCalledOnce();
+    expect(state.slices.s.stage).toBe("escalated");
+  });
+
+  it("keeps polling a rejected dispatch when Brood cannot fence it", async () => {
+    const state: any = { slices: {} };
+    const integration = io({ confirmFailure: vi.fn(async () => { throw new Error("Brood down"); }) });
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
+  it("keeps polling when the attempt already has an outcome", async () => {
+    const state: any = { slices: {} };
+    const integration = io({ confirmFailure: vi.fn(async () => ({ ...attempt, fenced: true, outcome: result })) });
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
+  it("keeps polling a server error without fencing", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const postSpawn = vi.fn(async () => { throw Object.assign(new Error("boom"), { status: 503 }); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(integration.confirmFailure).not.toHaveBeenCalled();
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
+  it("recovers published success when the Hatchery job is gone", async () => {
+    const state = pending();
+    const integration = io({ readAttempt: async () => ({ ...attempt, outcome: result }) });
+    const getJob = async () => { throw new Error("job not found"); };
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob }));
+    expect(state.slices.s).toMatchObject({
+      stage: "implementing", worker_session_id: "steward", branch: "branch", integration_outcome: result,
+    });
+    expect(integration.confirmFailure).not.toHaveBeenCalled();
+  });
+
+  it("lets the durable outcome win over a persistence failure reported by Hatchery", async () => {
+    const state = pending();
+    const integration = io({ confirmFailure: async () => ({ ...attempt, outcome: result }) });
+    const getJob = async () => ({ status: "failed", integrationOutcome: { status: "failed", failureReason: "persistence" } });
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob }));
+    expect(state.slices.s.stage).toBe("implementing");
+    expect(integration.appendTransition).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      type: "slice.stage.changed", attemptId: "attempt", branch: "branch", worktreePath: "/worktree", spawnId,
+    }));
+  });
+
+  it("records a persistence failure only after Brood fences an empty lookup", async () => {
+    const state = pending();
+    const integration = io();
+    const outcome = {
+      spawnId, status: "failed", failureReason: "persistence", completedAt: beforeDeadline,
+      diagnostic: "Brood could not confirm the integration outcome.",
+      commit: result.commit, pullRequest: result.pullRequest,
+    };
+    const getJob = async () => ({ status: "failed", integrationOutcome: outcome });
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob }));
+    expect(integration.confirmFailure).toHaveBeenCalledWith("s", "attempt");
+    expect(integration.appendTransition).toHaveBeenCalledExactlyOnceWith({
+      type: "slice.integration.failed", sliceId: "s", attemptId: "attempt", outcome,
+    });
+    expect(state.slices.s.stage).toBe("escalated");
+  });
+
+  it("escalates with the outcome Herald kept when a retried failure append returns the first write", async () => {
+    const state: any = pending();
+    const stored = {
+      spawnId, status: "failed", failureReason: "persistence", completedAt: beforeDeadline,
+      diagnostic: "Brood could not confirm the integration outcome.",
+    } as const;
+    const integration = io({
+      appendTransition: vi.fn(async () => ({ type: "slice.integration.failed", sliceId: "s", attemptId: "attempt", outcome: stored })),
+    });
+    const completion = await completePendingHatcheryDispatches(state, deadline, deps({ integration }));
+    expect(state.slices.s.integration_outcome).toEqual(stored);
+    expect(completion.failures).toEqual([expect.objectContaining({ failure_reason: "persistence" })]);
+  });
+
+  it("culls only the attempt's own session when an integration failure has no commit or PR", async () => {
+    const state: any = pending();
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true, sessionId: "late" }));
+    const completion = await completePendingHatcheryDispatches(state, deadline, deps({ integration: io(), cullStewardForSlice }));
+    expect(cullStewardForSlice).toHaveBeenCalledWith("s", undefined, "attempt");
+    expect(completion.actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: "steward-cull", sessionId: "late" })]));
+  });
+
+  it("keeps the Steward of an integration failure that preserved a commit", async () => {
+    const state: any = pending();
+    const failed = {
+      spawnId, status: "failed", failureReason: "push_failed", completedAt: beforeDeadline,
+      diagnostic: "The integration commit could not be pushed.", commit: result.commit,
+    } as const;
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true }));
+    const integration = io({ confirmFailure: async () => ({ ...attempt, fenced: true, outcome: failed }) });
+    const getJob = async () => ({ status: "failed", integrationOutcome: failed });
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob, cullStewardForSlice }));
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(cullStewardForSlice).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Steward when the stored failure lacks the commit a later observation carries", async () => {
+    const state: any = pending();
+    const observed = {
+      spawnId, status: "failed", failureReason: "push_failed", completedAt: beforeDeadline,
+      diagnostic: "The integration commit could not be pushed.", commit: result.commit,
+    } as const;
+    const stored = {
+      spawnId, status: "failed", failureReason: "timeout", completedAt: beforeDeadline,
+      diagnostic: "The integration attempt timed out.",
+    } as const;
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true }));
+    const integration = io({
+      confirmFailure: async () => ({ ...attempt, fenced: true, outcome: observed }),
+      appendTransition: vi.fn(async () => ({ type: "slice.integration.failed", sliceId: "s", attemptId: "attempt", outcome: stored })),
+    });
+    const getJob = async () => ({ status: "failed", integrationOutcome: observed });
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob, cullStewardForSlice }));
+    expect(state.slices.s.integration_outcome).toEqual(stored);
+    expect(cullStewardForSlice).not.toHaveBeenCalled();
+  });
+
+  it("leaves an expired dispatch pending when Brood is unavailable and records timeout after fencing", async () => {
+    const state = pending();
+    const confirmFailure = vi.fn()
+      .mockRejectedValueOnce(new Error("Brood down"))
+      .mockResolvedValueOnce({ ...attempt, fenced: true });
+    const integration = io({ confirmFailure });
+    await completePendingHatcheryDispatches(state, deadline, deps({ integration }));
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+    expect(integration.appendTransition).not.toHaveBeenCalled();
+    const completion = await completePendingHatcheryDispatches(state, deadline, deps({ integration }));
+    expect(confirmFailure).toHaveBeenLastCalledWith("s", "attempt");
+    expect(integration.appendTransition).toHaveBeenCalledWith({
+      type: "slice.integration.failed", sliceId: "s", attemptId: "attempt",
+      outcome: expect.objectContaining({ status: "failed", spawnId, failureReason: "timeout" }),
+    });
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(completion.failures).toEqual([expect.objectContaining({ failure_reason: "timeout" })]);
+  });
+});

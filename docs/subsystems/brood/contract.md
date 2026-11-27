@@ -109,6 +109,45 @@ teardown archive. A mismatch with the registry adds the warning
 `registry extraction patch digest mismatch` and keeps any patch already
 archived. A mismatch after the archive is written fails the archive step.
 
+### Terminal PR integration
+
+`POST /integration-attempts` binds `attemptId` to the actual integration
+`spawnId` and its absolute ISO-8601 `stewardDeadline`. Every integration
+timestamp must carry `Z` or a `±hh:mm` offset; one without a timezone is
+rejected as invalid. It returns 200 with
+`IntegrationAttemptState`. Repeating the same binding returns its current
+state. Registering a new attempt for the same spawn supersedes the previous
+owner and fences it before the new attempt starts. A fenced attempt or a
+changed binding returns 409.
+
+`GET /integration-attempts/:attemptId` returns the binding, its deadline,
+`fenced` and an `outcome`. An unbound attempt has null `spawnId` and
+`stewardDeadline`. A pending or unknown result has a null `outcome`.
+
+`PUT /integration-attempts/:attemptId/outcome` persists a
+`PrIntegrationResult` and returns it with 200. Repeating a write with the same
+result returns the persisted result. Different terminal results, unbound or
+fenced attempts, and late results other than a timeout return 409. Success
+requires a tracked spawn, the application result, the exact Git branch and
+commit SHA, and the PR record. A failure includes `completedAt`,
+`failureReason`, a redacted diagnostic of at most 500 characters, and any
+available artifact identifiers. Stable reasons are `extraction_rejected`,
+`missing_lifecycle`, `patch_conflict`, `commit_failed`, `push_failed`,
+`pr_failed`, `timeout`, and `persistence`.
+
+`POST /integration-attempts/:attemptId/confirm-failure` returns the attempt
+state after an atomic decision. An existing outcome wins. Otherwise Brood
+records a durable fence, including for an unknown attempt, so a delayed
+registration or result cannot replace the confirmed absence of an outcome.
+
+`GET /sessions/:id/integration-outcome` returns 200 with `{ outcome }` for
+the current attempt for that spawn. A null outcome represents absence of
+a current terminal result. Reads by attempt still return historical outcomes
+after a new attempt supersedes them. The integration tables retain terminal
+failures even when the lifecycle row is absent and keep those IDs out of the
+session registry and teardown. Binding and outcome validation failures return
+400 with `{ error: string }`.
+
 ### List consumers
 
 `BroodClient.listViews({ kind?, status?, reconcile? })` returns the service's

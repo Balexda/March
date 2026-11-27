@@ -40,6 +40,19 @@ function slice(over: Partial<SliceState> & { sliceId: string }): SliceState {
 describe("senseFromHerald (Stage 1, Herald-backed)", () => {
   const prevRaw = () => ({ repo: { path: "/repo" }, slices: {}, archived_slices: {} });
 
+  it("restores a durably recorded dispatch missing from warm state after a lost acknowledgement", async () => {
+    const deadline = "2026-05-20T00:01:00.000Z";
+    const sys = foldedState({ slices: { s1: slice({
+      sliceId: "s1", branch: "work", stage: "hatchery-pending", jobId: "attempt",
+      attemptId: "attempt", stewardDeadline: deadline,
+    }) } });
+    const state = await senseFromHerald(deps(), { consume: async () => sys }, prevRaw());
+    expect(state.slices.s1).toMatchObject({
+      stage: "hatchery-pending",
+      hatchery: { attempt_id: "attempt", job_id: "attempt", steward_deadline: deadline },
+    });
+  });
+
   it("maps the folded projection (sessions/workers/perSlice) into the LoopState", async () => {
     const sys = foldedState({
       sessions: {

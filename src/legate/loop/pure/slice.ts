@@ -952,3 +952,9 @@ export function countStrandedSlices(
   }
   return stranded;
 }
+
+/** A tracked dispatch needs a successful outcome before PR handling can proceed. */
+export function awaitingSuccessfulIntegration(slice: any): boolean {
+  return !!slice.hatchery?.attempt_id &&
+    (slice.stage === "hatchery-pending" || slice.integration_outcome?.status === "failed");
+}

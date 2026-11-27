@@ -30,6 +30,8 @@
 #                     repository-scoped app/read entitlement over HTTPS — no ssh
 #                     client / key / agent and no ambient GH_TOKEN is used.
 #   MARCH_TESSERA_URL Tessera base URL (default http://tessera:9477 on `march`).
+#   MARCH_BROOD_URL   Brood base URL for integration outcomes (default
+#                     http://brood:9748 on `march`).
 #   MARCH_HERALD_ADMIN_TOKEN
 #                     break-glass operator token for POST /admin/events (#265).
 #                     LEAVE UNSET in prod — while unset the admin route 404s and is
@@ -76,6 +78,7 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       # Herald observes the same deployment as the legate; reuse its meta.
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
+      - MARCH_BROOD_URL=${MARCH_BROOD_URL:-http://brood:9748}
       # Tessera (scoped GitHub reads + the default-branch sync, #300/#601):
       # Herald requests app/read per profile repository with its OWN client key.
       # No ambient GH_TOKEN/GITHUB_TOKEN is forwarded and there is no fallback.

@@ -12,6 +12,8 @@ import {
   stewardReportClassification,
 } from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
+import { BroodClient } from "../../brood/service/client.js";
+import { parseIntegrationOutcome } from "../../brood/service/integration.js";
 import { selfBotLogin } from "../profiles/merge-policy.js";
 import { reviewWaitMs } from "../profiles/review-config.js";
 import type { ProfileStore } from "../profiles/store.js";
@@ -41,27 +43,26 @@ export interface RoutesOptions {
    * process environment.
    */
   readonly env?: NodeJS.ProcessEnv;
+  readonly brood?: Pick<BroodClient, "readIntegrationAttempt">;
 }
 
 /** Env var gating the break-glass `POST /admin/events` endpoint (#265). */
 export const HERALD_ADMIN_TOKEN_ENV = "MARCH_HERALD_ADMIN_TOKEN";
 
 /** The Legate operator token (#593). When set on Herald too, `POST /events`
- *  requires it as a bearer for the operator-request event types below. */
+ *  requires it as a bearer for the protected transition types below. */
 export const OPERATOR_TOKEN_ENV = "MARCH_LEGATE_OPERATOR_TOKEN";
 
 /**
- * Event types that ask the legate to act (#593): an operator request, or the
- * legate's own recovery-ladder transitions of the same type. Merge-now skips the
- * review and CI gates, so these must not be writable by anyone who can reach
- * Herald when the operator token is configured. Only the legate writes them, and
- * its Herald client sends the token on every append.
+ * Operator requests and Legate transitions that require the operator bearer
+ * when configured. The Legate client sends the token on each append.
  */
 export const OPERATOR_REQUEST_TYPES: ReadonlySet<string> = new Set([
   "slice.merge.requested",
   "slice.relaunch.requested",
   "slice.requeue.requested",
   "slice.recovery.requested",
+  "slice.integration.failed",
   "dispatch.paused",
   "dispatch.resumed",
   "legate.tick.requested",
@@ -91,6 +92,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "smithy.queue.changed",
   "repo.sync.changed",
   "slice.dispatched",
+  "slice.integration.failed",
   "slice.steward.attached",
   "slice.stage.changed",
   "slice.archived",
@@ -115,6 +117,7 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.pr.changed",
   "slice.output.changed",
   "slice.dispatched",
+  "slice.integration.failed",
   "slice.steward.attached",
   "slice.stage.changed",
   "slice.archived",
@@ -205,6 +208,30 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
   if (SLICE_TYPES.has(type) && (typeof body.sliceId !== "string" || body.sliceId.length === 0)) {
     return { ok: false, error: `event "${type}" requires a non-empty sliceId.` };
   }
+  if (type === "slice.dispatched" || type === "slice.integration.failed") {
+    const nonEmpty = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+    if ((body.attemptId !== undefined || type === "slice.integration.failed") && !nonEmpty(body.attemptId)) {
+      return { ok: false, error: `event "${type}" requires a non-empty attemptId when tracking integration.` };
+    }
+    if (type === "slice.dispatched") {
+      if (body.jobId !== undefined && !nonEmpty(body.jobId)) {
+        return { ok: false, error: 'event "slice.dispatched" jobId must be a non-empty string.' };
+      }
+      if (body.attemptId !== undefined || body.stewardDeadline !== undefined) {
+        const deadline = body.stewardDeadline;
+        if (body.attemptId === undefined || typeof deadline !== "string" ||
+            !Number.isFinite(Date.parse(deadline)) || new Date(deadline).toISOString() !== deadline) {
+          return { ok: false, error: 'event "slice.dispatched" integration requires an attemptId and UTC stewardDeadline.' };
+        }
+      }
+    } else {
+      const outcome = parseIntegrationOutcome(body.outcome);
+      if (outcome?.status !== "failed") {
+        return { ok: false, error: 'event "slice.integration.failed" requires a valid integration failure outcome.' };
+      }
+      body.outcome = outcome;
+    }
+  }
   // Transition events carry the steward sessionId so Herald's fold learns the
   // slice→session link PR discovery is gated on (#210). It is optional, but when
   // present it must be a non-empty (non-whitespace) string across every type that
@@ -220,6 +247,14 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
   // optional like the SESSION_ID_TYPES transitions above.
   if (type === "slice.steward.attached" && (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0)) {
     return { ok: false, error: `event "slice.steward.attached" requires a non-empty sessionId.` };
+  }
+  if (type === "slice.stage.changed") {
+    for (const key of ["attemptId", "branch", "worktreePath", "spawnId"]) {
+      const value = body[key];
+      if (value !== undefined && (typeof value !== "string" || value.trim().length === 0)) {
+        return { ok: false, error: `event "slice.stage.changed" ${key} must be a non-empty string.` };
+      }
+    }
   }
   if (type === "slice.stage.changed" && body.handledFeedback !== undefined) {
     const feedback = body.handledFeedback as
@@ -349,6 +384,7 @@ export async function registerRoutes(
 ): Promise<void> {
   const { store } = opts;
   const env = opts.env ?? process.env;
+  const brood = opts.brood ?? new BroodClient({ env, timeoutMs: 5_000 });
   const waitMs = reviewWaitMs(env, (message) => app.log.warn(message));
   const selfLogin = selfBotLogin(env);
   const getObserveStatus =
@@ -431,7 +467,7 @@ export async function registerRoutes(
       reply.code(400);
       return { error: validation.error };
     }
-    // Operator requests need the operator bearer when the token is set (#593).
+    // Protected transitions need the operator bearer when the token is set.
     // Read per request, like the admin gate, so it tracks the live env.
     const operatorToken = env[OPERATOR_TOKEN_ENV]?.trim();
     if (operatorToken && OPERATOR_REQUEST_TYPES.has(String(validation.input.type))) {
@@ -441,6 +477,13 @@ export async function registerRoutes(
       }
     }
     const event = store.append(validation.input, undefined, validation.attribution);
+    if (event.type === "slice.integration.failed") {
+      startHeraldSpan({
+        name: "herald.integration.failed",
+        dispatchKey: event.sliceId,
+        attributes: { "march.integration.failure_reason": event.outcome.failureReason },
+      }).end({ error: true });
+    }
     reply.code(201);
     return event;
   });
@@ -586,6 +629,31 @@ export async function registerRoutes(
     }
     return project(profile ?? store.defaultProfile);
   });
+
+  app.get<{ Params: { sliceId: string }; Querystring: { profile?: string } }>(
+    "/state/integration/:sliceId",
+    async (request, reply) => {
+      const { sliceId } = request.params;
+      const requestedProfile = request.query.profile;
+      const profile = typeof requestedProfile === "string" && requestedProfile.length > 0
+        ? requestedProfile : store.defaultProfile;
+      const state = store.projectionFor(profile);
+      const slice = Object.hasOwn(state.slices, sliceId) ? state.slices[sliceId] : undefined;
+      if (!slice?.attemptId) return { outcome: null };
+
+      const span = startHeraldSpan({ name: "herald.integration.read", dispatchKey: sliceId });
+      try {
+        const attempt = await brood.readIntegrationAttempt(slice.attemptId);
+        const outcome = attempt.outcome ?? slice.integrationFailure ?? null;
+        span.end({ error: outcome?.status === "failed" });
+        return { outcome };
+      } catch {
+        span.end({ error: true });
+        reply.code(503);
+        return { error: "Brood integration outcome unavailable." };
+      }
+    },
+  );
 
   // The events that moved state from `from` to `to` (default `to` = latest).
   app.get("/state/delta", async (request, reply) => {

@@ -1,23 +1,46 @@
 /**
  * @l1 @deterministic @ci
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { OPERATOR_REQUEST_TYPES, registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";
+import type { IntegrationAttemptState } from "../../brood/service/types.js";
+import { OPERATOR_REQUEST_TYPES, registerRoutes, validateEvent, type ObserveStatus, type RoutesOptions } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { EventStore } from "./store.js";
+
+const stewardDeadline = "2026-11-27T12:00:00.000Z";
+const integrationFailure = {
+  type: "slice.integration.failed", sliceId: "s1", attemptId: "attempt-1",
+  outcome: {
+    status: "failed", failureReason: "timeout", diagnostic: "Steward deadline elapsed",
+    completedAt: stewardDeadline, spawnId: "spawn-1",
+  },
+} as const;
 
 async function buildApp(
   getObserveStatus?: () => ObserveStatus,
   env?: NodeJS.ProcessEnv,
+  brood?: RoutesOptions["brood"],
 ): Promise<{ app: FastifyInstance; store: EventStore }> {
   const store = new EventStore({ dbPath: ":memory:" });
   const app = Fastify();
-  await registerRoutes(app, { store, getObserveStatus, env });
+  await registerRoutes(app, { store, getObserveStatus, env, brood });
   return { app, store };
 }
 
 describe("validateEvent", () => {
+  it("validates integration attempt identity, deadline and terminal failure", () => {
+    const launch = { type: "slice.dispatched", sliceId: "s1", attemptId: "attempt-1" };
+    expect(validateEvent(launch).ok).toBe(false);
+    expect(validateEvent({ ...launch, stewardDeadline }).ok).toBe(true);
+    expect(validateEvent({ ...launch, stewardDeadline: "tomorrow" }).ok).toBe(false);
+    expect(validateEvent({ ...integrationFailure, attemptId: "" }).ok).toBe(false);
+    expect(validateEvent({ ...integrationFailure, outcome: { status: "succeeded" } }).ok).toBe(false);
+    expect(validateEvent({
+      ...integrationFailure,
+      outcome: { ...integrationFailure.outcome, diagnostic: "token=private" },
+    })).toMatchObject({ ok: true, input: { outcome: { diagnostic: "[redacted]" } } });
+  });
   it("rejects an unknown type", () => {
     expect(validateEvent({ type: "nope" })).toMatchObject({ ok: false });
   });
@@ -254,6 +277,54 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect((await app.inject({ method: "GET", url: "/state?at=-1" })).statusCode).toBe(400);
   });
 
+  it("reads the current attempt from Brood before consulting the durable fallback", async () => {
+    const readIntegrationAttempt = vi.fn<(attemptId: string) => Promise<IntegrationAttemptState>>()
+      .mockImplementation(async (attemptId) => ({
+        attemptId, spawnId: "spawn-1", stewardDeadline, fenced: true, outcome: null,
+      }));
+    const { app, store } = await buildApp(undefined, {}, { readIntegrationAttempt });
+    close = async () => { await app.close(); store.close(); };
+    const launch = {
+      type: "slice.dispatched", sliceId: "s1", profile: "other", attemptId: "attempt-1", stewardDeadline,
+    };
+    const post = (payload: object) => app.inject({ method: "POST", url: "/events", payload });
+    const read = () => app.inject({ method: "GET", url: "/state/integration/s1?profile=other" });
+    expect((await post(launch)).statusCode).toBe(201);
+    expect((await read()).json()).toEqual({ outcome: null });
+    expect(readIntegrationAttempt).toHaveBeenLastCalledWith("attempt-1");
+    expect((await post({ ...integrationFailure, profile: "other" })).statusCode).toBe(201);
+    store.writeSnapshot();
+    expect(store.stateAtFor("other", store.lastSeq()).slices.s1).toMatchObject({
+      attemptId: "attempt-1", stewardDeadline, integrationFailure: integrationFailure.outcome,
+      stage: "escalated", escalatedReason: "hatchery_dispatch_failed",
+    });
+    expect((await read()).json()).toEqual({ outcome: integrationFailure.outcome });
+
+    const durable = {
+      status: "succeeded", spawnId: "spawn-1", completedAt: stewardDeadline,
+      application: { status: "applied", spawnId: "spawn-1", touchedPaths: ["README.md"], appliedAt: stewardDeadline },
+      commit: { spawnId: "spawn-1", branch: "test", commitSha: "a".repeat(40), patchSha256: "b".repeat(64), committedAt: stewardDeadline },
+      pullRequest: {
+        provider: "github", repository: "org/repo", state: "open", number: 1,
+        url: "https://github.com/org/repo/pull/1", headBranch: "test", baseBranch: "main", observedAt: stewardDeadline,
+      },
+    } satisfies NonNullable<IntegrationAttemptState["outcome"]>;
+    readIntegrationAttempt.mockResolvedValueOnce({
+      attemptId: "attempt-1", spawnId: "spawn-1", stewardDeadline, fenced: false, outcome: durable,
+    });
+    expect((await read()).json()).toEqual({ outcome: durable });
+    readIntegrationAttempt.mockRejectedValueOnce(new Error("offline"));
+    expect((await read()).statusCode).toBe(503);
+
+    expect((await post({ ...launch, attemptId: "attempt-2" })).statusCode).toBe(201);
+    expect((await post({ ...integrationFailure, profile: "other" })).statusCode).toBe(201);
+    expect(store.projectionFor("other").slices.s1.stage).toBe("hatchery-pending");
+    expect((await read()).json()).toEqual({ outcome: null });
+    expect(readIntegrationAttempt).toHaveBeenLastCalledWith("attempt-2");
+    expect((await app.inject({ method: "GET", url: "/state/integration/s1" })).json()).toEqual({ outcome: null });
+    expect(readIntegrationAttempt).toHaveBeenLastCalledWith("attempt-2");
+  });
+
   it("GET /state/delta returns (from,to] events and 400 on from>to", async () => {
     const { app, store } = await buildApp();
     close = async () => { await app.close(); store.close(); };
@@ -334,6 +405,7 @@ describe.skipIf(!sqliteAvailable)("POST /admin/events (#265)", () => {
       { type: "slice.relaunch.requested", profile: "march", sliceId: "s1" },
       { type: "slice.requeue.requested", profile: "march", sliceId: "s1", closePr: false },
       { type: "slice.recovery.requested", profile: "march", sliceId: "s1" },
+      { ...integrationFailure, profile: "march" },
       { type: "dispatch.paused", profile: "march" },
       { type: "dispatch.resumed", profile: "march" },
       { type: "legate.tick.requested", profile: "march" },

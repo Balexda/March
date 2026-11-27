@@ -1,3 +1,4 @@
+import { awaitingSuccessfulIntegration } from "../pure/slice.js";
 import { pendingTeardowns, recordTeardownOutcome } from "../state/pending-teardown.js";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
@@ -38,7 +39,7 @@ export function assess(state: LoopState): CleanupDecision[] {
   if (!state.statePresent) return out;
   const pending = new Map(pendingTeardowns(state, "cleanup").map((entry) => [entry.traceKey, entry.sessionId]));
   for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
-    if (!slice || typeof slice !== "object") continue;
+    if (!slice || typeof slice !== "object" || awaitingSuccessfulIntegration(slice)) continue;
     const priorAttempt = pending.get(sliceId);
     const sessionId = priorAttempt ?? String(slice.worker_session_id || "");
     if (!sessionId) continue;

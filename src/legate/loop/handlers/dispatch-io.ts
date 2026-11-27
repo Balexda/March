@@ -1,3 +1,6 @@
+import type { IntegrationAttemptState } from "../../../brood/service/types.js";
+import type { TransitionEvent } from "../clients/herald.js";
+
 /**
  * Injected I/O seams for the dispatch ops (#144 phase 3).
  *
@@ -31,6 +34,15 @@ export interface DispatchIoDeps {
   postSpawn: (request: any) => Promise<{ id?: string }>;
   /** Poll a Hatchery job by id; resolves to the job (status/result/error). */
   getJob: (jobId: string) => Promise<any>;
+  /** Durable integration coordination for new dispatches. */
+  integration?: {
+    stewardDeadline: () => string;
+    /** Resolves to the event Herald stored, which is the first write for a
+     *  retried attempt event (its id is `${type}:${attemptId}`). */
+    appendTransition: (event: TransitionEvent) => Promise<unknown>;
+    readAttempt: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
+    confirmFailure: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
+  };
   /** Best-effort cull of the orphaned steward a *failed* spawn left behind.
    *
    *  A spawn that fails AFTER Castra created the manager session — most often a
@@ -43,6 +55,11 @@ export interface DispatchIoDeps {
    *  orphan, so the legate culls it directly via Castra (the only place it lives).
    *
    *  Resolves `{ culled, sessionId }`; `culled:false` when none matched. Absent
-   *  when Castra isn't configured for this container — the `?.` call then no-ops. */
-  cullStewardForSlice?: (sliceId: string, branch: string | undefined) => Promise<{ culled: boolean; sessionId?: string }>;
+   *  when Castra isn't configured for this container — the `?.` call then no-ops.
+   *
+   *  With `attemptId`, it removes only sessions stamped with that integration
+   *  attempt, so a preserved Steward checkout from another attempt is kept. */
+  cullStewardForSlice?: (
+    sliceId: string, branch: string | undefined, attemptId?: string,
+  ) => Promise<{ culled: boolean; sessionId?: string }>;
 }

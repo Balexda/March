@@ -59,7 +59,9 @@ and the Hatchery dispatch entrypoint that composes them:
   and remove the image during cleanup.
 - Container launch helpers create, start, wait for, log, and remove the spawn
   container. They expose typed launch input and wait-result shapes plus bounded
-  launch diagnostics. Stage 4 launch validates the fully composed Docker argv
+  launch diagnostics. Managed callers can pass a remaining time budget to image
+  build and container create, copy, start, and wait. Container wait uses the
+  smaller of the caller budget and the configured spawn limit. Stage 4 launch validates the fully composed Docker argv
   against the selected backend's declared credential mounts before container
   creation, rejecting undeclared host bind mounts as `LaunchError`s per the F4
   US5 contract in

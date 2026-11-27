@@ -54,6 +54,14 @@ export function validateSpawnRequest(
     return { ok: false, error: "baseBranch must be a non-empty branch name." };
   }
 
+  if (body.attemptId !== undefined || body.stewardDeadline !== undefined) {
+    if (typeof body.attemptId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.attemptId) ||
+        typeof body.stewardDeadline !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(body.stewardDeadline) ||
+        !Number.isFinite(Date.parse(body.stewardDeadline))) {
+      return { ok: false, error: "attemptId and an ISO UTC stewardDeadline are required together." };
+    }
+  }
+
   // Validate the toolchain at the HTTP boundary against the same allow-list the
   // CLI/profile route use. Untrusted input reaches resolveToolchain() server-
   // side, where a non-string would throw on `override?.trim()`; a typo string
@@ -84,6 +92,7 @@ export function validateSpawnRequest(
       taskType: body.taskType,
       taskName: body.taskName,
       sliceId: body.sliceId,
+      ...(body.attemptId && { attemptId: body.attemptId, stewardDeadline: body.stewardDeadline }),
       toolchain,
     },
   };

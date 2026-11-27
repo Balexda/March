@@ -384,6 +384,12 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         metadata?: Record<string, string>;
       };
       const sliceId = sliceIdFrom(request);
+      // A caller that gives up (deadline or client timeout) closes the request
+      // before Castra answers. It never learns the session, so remove it here.
+      let abandoned = false;
+      reply.raw.once("close", () => {
+        if (!reply.raw.writableFinished) abandoned = true;
+      });
       const session = await withCastraSpanAsync(
         {
           op: "launch",
@@ -416,6 +422,27 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             },
             "castra session launched",
           );
+          if (abandoned) {
+            try {
+              await withCastraSpanAsync(
+                {
+                  op: "launch.abandoned_remove",
+                  traceKey: traceKeyFor(request),
+                  attributes: { "march.profile": body.profile, "castra.session_id": launched.sessionId, ...sliceAttr(sliceId) },
+                },
+                () => Promise.resolve(adapter.remove({ profile: body.profile, sessionId: launched.sessionId, pruneWorktree: false })),
+              );
+              request.log.info(
+                { "castra.op": "launch", "castra.session_id": launched.sessionId, ...sliceAttr(sliceId) },
+                "removed castra session whose launch request was abandoned",
+              );
+            } catch (err) {
+              request.log.warn(
+                { "castra.op": "launch", "castra.session_id": launched.sessionId, err: (err as Error).message, ...sliceAttr(sliceId) },
+                "could not remove abandoned castra session",
+              );
+            }
+          }
           return launched;
         },
       );

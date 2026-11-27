@@ -107,7 +107,10 @@ group for its whole window, from before its before-list until its after-list
 is read: it first waits for those already running, and any that arrive meanwhile
 wait for it to finish. After a launch, Castra enables session `auto-mode` only when that
 command's full timeout still fits in the launch budget; otherwise it skips it
-and logs a warning, and the launch still succeeds.
+and logs a warning, and the launch still succeeds. If the caller closes the
+request before the launch returns, Castra removes the session it created
+(keeping the worktree) so an abandoned launch leaves no Steward behind. The removal
+runs in a `castra.launch.abandoned_remove` span, errored when removal fails.
 
 Castra provisions the host steward's credential shims at serve startup.
 Each launch, including attachment to an existing worktree, passes an
@@ -215,7 +218,9 @@ re-read `GET /v1/sessions` to see whether the session exists before retrying,
 but only once the operation's budget (240s for launch, 10s for remove) has
 passed since it sent the request: before that the step may still be running,
 and a list without the session does not show it is absent. `CastraClient`
-already waits past each budget.
+already waits past each budget by default. An optional client abort signal can
+end the caller's wait sooner for session removal. The server's operation budget
+still applies.
 A timed-out send stays unknown: the session list looks the same whether or not
 the prompt was typed, so it cannot decide whether to resend; only a separate
 sign of delivery (such as the steward acting on the prompt) can.

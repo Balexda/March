@@ -7,7 +7,8 @@ const POLL_INTERVAL_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 3_900_000;
 
 export class HatcheryClientError extends Error {
-  constructor(message: string) {
+  /** HTTP status when Hatchery answered; undefined for a transport failure. */
+  constructor(message: string, readonly status?: number) {
     super(message);
     this.name = "HatcheryClientError";
   }
@@ -67,6 +68,7 @@ export async function postSpawn(
   if (res.status !== 202) {
     throw new HatcheryClientError(
       bodyError(body, `hatchery POST /spawns failed with status ${res.status}`),
+      res.status,
     );
   }
   return body as CreatedJob;

@@ -151,6 +151,22 @@ describe("reduce / fold", () => {
     expect(recovered.slices.s1.escalatedReason).toBeUndefined();
   });
 
+  it("ignores superseded integration handoffs and restores the current checkout", () => {
+    const stewardDeadline = "2026-05-20T00:01:00.000Z";
+    const pending = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", jobId: "new", attemptId: "new", stewardDeadline }),
+      ev({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", attemptId: "old", branch: "old" }),
+    ]);
+    expect(pending.slices.s1).toMatchObject({ stage: "hatchery-pending", attemptId: "new" });
+    const working = foldEvents([ev({
+      type: "slice.stage.changed", sliceId: "s1", stage: "implementing", attemptId: "new",
+      branch: "actual", spawnId: "spawn", worktreePath: "/worktree", sessionId: "steward",
+    })], pending);
+    expect(working.slices.s1).toMatchObject({
+      stage: "implementing", branch: "actual", spawnId: "spawn", worktreePath: "/worktree", sessionId: "steward",
+    });
+  });
+
   it("folds slice.pr.changed onto an escalated (not recovered) slice — the #173 adopt-from-fold path", () => {
     seq = 0;
     // An escalated slice whose branch Herald observed an open PR on. The reducer
