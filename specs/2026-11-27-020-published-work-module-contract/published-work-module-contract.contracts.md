@@ -11,7 +11,7 @@
 
 | Surface | Inputs | Outputs | Failure |
 |---------|--------|---------|---------|
-| Versioned subpath of `@balexda/march` | Same import specifier for in-tree and installed consumers | Contract version and public roles, facets, work-item, signal, intent, and report declarations | A consumer depending on private March imports is outside the published contract. |
+| Versioned subpath `@balexda/march/modules/v0`, declared in the package `exports` map | Same import specifier for in-tree and installed consumers. The path segment carries the contract major, and a new major publishes a new subpath such as `modules/v1`. | Contract version and public roles, facets, work-item, signal, intent, and report declarations | A consumer depending on private March imports is outside the published contract. |
 | Contract compatibility | Host and module contract versions, independent of npm package versions | Compatible if majors match and, for major zero, minors also match. Patch differences do not affect compatibility. | Invalid or incompatible versions are refused by the host integration. The host loader owns startup enforcement and diagnostics. |
 
 For a host declaring `0.2.0`, `0.2.1` is compatible and `0.3.0` and `1.0.0` are incompatible. For a host declaring `1.2.0`, `1.3.0` is compatible and `2.0.0` is incompatible. Mark the pre-1.0 contract unstable until Dependabot migrates.

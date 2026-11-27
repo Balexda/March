@@ -88,7 +88,7 @@ As a maintainer, I want the compatibility and execution rules documented so that
 
 ### Functional Requirements
 
-- **FR-001** (US1) — Publish the versioned contract through one subpath of the open package for all modules. Define the observe facet for Herald and the act facet for Legate, with producer, destination and responder interfaces.
+- **FR-001** (US1) — Publish the versioned contract through one subpath of the open package, `@balexda/march/modules/v0`, for all modules. Define the observe facet for Herald and the act facet for Legate, with producer, destination and responder interfaces.
 - **FR-002** (US1) — Represent work with a producer-namespaced kind, origin, destination, entry stage and exactly one close-out owner serving the origin. Preserve the origin and owner in handoff and retain the existing bare Smithy verbs as aliases.
 - **FR-003** (US1, US2) — Define correlated landed and close-out reports. An actual landing triggers delivery to the origin owner and participating producers. Only the owner may propose close-out, and first-artifact close-out applies once per origin.
 - **FR-004** (US2) — Define checks, comments and approvals, with mandatory *not possible* and *not permitted* platform checks separate from user checks. Core arbitration follows the declared rank without interpreting provider check names or reviewer identities. Unpaired signals escalate to needs-human.
