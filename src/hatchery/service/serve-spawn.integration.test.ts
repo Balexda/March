@@ -12,6 +12,7 @@ import { buildServer } from "./server.js";
 import type { JobRecord } from "./types.js";
 import { buildServer as buildBroodServer } from "../../brood/service/server.js";
 import { BroodClient } from "../../brood/service/client.js";
+import { sqliteAvailable } from "../../brood/service/sqlite.js";
 import { buildServer as buildCastraServer } from "../../castra/server.js";
 import { createAgentDeckAdapter } from "../../castra/adapter.js";
 import type { FastifyInstance } from "fastify";
@@ -45,7 +46,9 @@ const silentLogger = {
   },
 } as never;
 
-describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/docker)", () => {
+// Each spawn now registers its integration attempt with a real Brood, whose
+// registry needs node:sqlite (Node >= 22.5).
+describe.skipIf(!sqliteAvailable)("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/docker)", () => {
   const tmpDirs: string[] = [];
   // Mutate (never reassign) process.env: workers copy the real environment, and
   // reassigning process.env to a plain object detaches those writes from it.
