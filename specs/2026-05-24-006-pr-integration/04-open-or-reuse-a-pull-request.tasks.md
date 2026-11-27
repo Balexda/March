@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Build bounded review metadata from the validated handoff**
+- [x] **Build bounded review metadata from the validated handoff**
 
   Extend the handoff in `src/hatchery/spawn-handoff.ts` and preserve the summary and validation sections in the Steward PR skill (AS 4.4).
 
@@ -26,7 +26,7 @@
   - Use validated handoff facts and available verification outcomes. Report unavailable verification explicitly. Exclude raw output and redact credentials from published text.
   - Coverage exercises oversized metadata, sensitive input, and absent verification results.
 
-- [ ] **Open or reuse the PR through the Steward**
+- [x] **Open or reuse the PR through the Steward**
 
   Extend the existing Castra-driven Steward handoff and PR skill to publish after US3 confirms the pushed commit. Return the publisher outcome to the integration caller (AS 4.1, AS 4.2, AS 4.3, AS 4.5).
 

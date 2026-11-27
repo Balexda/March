@@ -11,6 +11,8 @@ import type { SpawnBackend } from "../spawn/backends.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { traceIdForDispatch } from "../observability/trace-ids.js";
 import { removeSpawnWorktree } from "../brood/worktree.js";
+import { TesseraClient } from "../tessera/client.js";
+import * as branchPublisher from "./integration-publisher.js";
 
 // Issue #244 acceptance: a steward.apply failure must produce a span carrying the
 // slice/spawn/worktree/patch diagnostics AND a trace-correlated log. This drives
@@ -19,10 +21,11 @@ import { removeSpawnWorktree } from "../brood/worktree.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath, sendPrompt, workerPatch, recordedState, launchCollision } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, sessionOutput, workerPatch, recordedState, launchCollision } = vi.hoisted(() => ({
   launchCollision: { value: false },
   worktreePath: { value: "" },
   sendPrompt: vi.fn(async () => {}),
+  sessionOutput: vi.fn<() => Promise<string>>(),
   workerPatch: { value: "" },
   recordedState: { paths: undefined as string[] | undefined, unavailable: false },
 }));
@@ -68,6 +71,7 @@ vi.mock("../castra/client.js", () => {
     ),
     removeSession: vi.fn(async () => ({ removed: true })),
     sendPrompt,
+    sessionOutput,
   });
   return { CastraClient, CastraClientError, createCastraClientFromEnv };
 });
@@ -165,6 +169,7 @@ beforeEach(() => {
   worktreePath.value = makeWorktree();
   workerPatch.value = CONFLICTING_PATCH;
   sendPrompt.mockClear();
+  sessionOutput.mockReset();
   launchCollision.value = false;
   recordedState.paths = undefined;
   recordedState.unavailable = false;
@@ -296,6 +301,63 @@ it("reports exactly the staged paths and preserves the operator's file and index
   expect(fs.readFileSync(path.join(repoPath, ".git", "index"))).toEqual(indexBefore);
   expect(fs.existsSync(path.join(repoPath, "new file.txt"))).toBe(false);
   expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+it("publishes after the exact pushed commit receives its Castra review receipt", async () => {
+  workerPatch.value = ADD_PATCH;
+  const homeDir = makeHome();
+  const sliceId = "pr-publication-slice";
+  const repo = "team/project";
+  const pushedBranch = "feature/" + branch;
+  const remote = gitAt(repoPath, "remote", "get-url", "origin").trim();
+  const pushLocally = branchPublisher.pushIntegrationCommit;
+  vi.spyOn(branchPublisher, "pushIntegrationCommit").mockImplementation(async (target, handoff, commit, options) => {
+    const result = await pushLocally(target, handoff, commit, options);
+    options?.onPushed?.(repo);
+    return result;
+  });
+  fs.mkdirSync(path.join(homeDir, ".march", "steward"), { recursive: true });
+  fs.writeFileSync(path.join(homeDir, ".march", "steward", "tessera-client-key"), "fake-client-key");
+  vi.stubEnv("MARCH_TESSERA_URL", "http://tessera.test");
+  vi.spyOn(TesseraClient.prototype, "issueGitHubToken").mockResolvedValue({ token: "fake-token" } as
+    Awaited<ReturnType<TesseraClient["issueGitHubToken"]>>);
+  sessionOutput.mockImplementation(async () => {
+    const [{ prompt }] = sendPrompt.mock.lastCall as unknown as [{ prompt: string }];
+    const id = /Review receipt ID: ([\w-]+)/.exec(prompt)?.[1];
+    return `Review complete.\nREVIEW ${id} passed\n`;
+  });
+  let publishedCommit: string | undefined;
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/branches/release")) return Response.json({ name: "release" });
+    expect(url.pathname).toBe(`/repos/${repo}/pulls`);
+    if (init?.method === "GET") return Response.json([]);
+    expect(sessionOutput).toHaveBeenCalledTimes(1);
+    publishedCommit = gitAt(remote, "rev-parse", "refs/heads/" + pushedBranch).trim();
+    const payload = JSON.parse(String(init?.body));
+    expect(payload).toMatchObject({ base: "release", head: "team:" + pushedBranch });
+    expect(payload.body).toContain("Steward verification passed.");
+    expect(payload.body).toContain("new file.txt");
+    return Response.json({
+      state: "open", number: 42, html_url: `https://github.com/${repo}/pull/42`,
+      head: { ref: pushedBranch, repo: { full_name: repo } },
+      base: { ref: "release", repo: { full_name: repo } },
+    }, { status: 201 });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const spans = captureSpans();
+
+  const result = await runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, baseBranch: "release", homeDir, sliceId,
+  });
+
+  expect(result.commit.commitSha).toBe(publishedCommit);
+  expect(result.pullRequestPublication).toMatchObject({
+    status: "succeeded", pullRequest: { number: 42, headBranch: pushedBranch, baseBranch: "release" },
+  });
+  for (const name of ["steward.pr.publish", "steward.pr.lookup", "steward.pr.create"]) {
+    expect(spans.find((span) => span.name === name)?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
+  }
 });
 
 it("gates Steward handoff on publication and preserves the retryable local commit", async () => {

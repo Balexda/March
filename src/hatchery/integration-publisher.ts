@@ -217,7 +217,7 @@ export async function pushIntegrationCommit(
   target: Target,
   handoff: StewardHandoffInput,
   commit: IntegrationCommit,
-  options: { homeDir?: string; sliceId?: string } = {},
+  options: { homeDir?: string; sliceId?: string; onPushed?: (repository?: string) => void } = {},
 ): Promise<IntegrationCommit> {
   let transport: string | undefined;
   try {
@@ -264,14 +264,19 @@ export async function pushIntegrationCommit(
       ["push", "--no-follow-tags", "--no-verify", "--recurse-submodules=no", "--"],
       [commit.commitSha + ":" + ref],
     );
-    if (push.code === 0) return track(target, gitDir, commit, commit);
+    const finish = (published: IntegrationCommit) => {
+      const tracked = track(target, gitDir, commit, published);
+      options.onPushed?.(origin.repo);
+      return tracked;
+    };
+    if (push.code === 0) return finish(commit);
 
     const lookup = await run(["ls-remote", "--exit-code", "--refs", "--"], [ref]);
     const [sha, remoteRef] = lookup.stdout.trim().split("\t");
     if (lookup.code !== 0 || remoteRef !== ref || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
       throw new Error("remote_ref_unavailable");
     }
-    if (sha === commit.commitSha) return track(target, gitDir, commit, commit);
+    if (sha === commit.commitSha) return finish(commit);
     const fetch = await run(
       ["fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance", "--"],
       [ref],
@@ -281,7 +286,7 @@ export async function pushIntegrationCommit(
     if (!sameIdentity(commitIdentity(gitDir, fetched), commitIdentity(gitDir, commit.commitSha))) {
       throw new Error("remote_diverged");
     }
-    return track(target, gitDir, commit, describeCommit({ target: gitDir, branchRef: ref }, handoff, fetched));
+    return finish(describeCommit({ target: gitDir, branchRef: ref }, handoff, fetched));
   } catch (error) {
     throw publicationError(target, handoff, error, commit);
   } finally {

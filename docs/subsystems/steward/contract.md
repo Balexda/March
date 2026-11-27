@@ -43,7 +43,8 @@ an unusual URL spelling or an `ssh_config` host alias resolved with `ssh -G`.
 It passes other hosts to the operator's `GIT_SSH_COMMAND`, `GIT_SSH` or
 `ssh`; a repository `core.sshCommand` is not used. The `ext::` transport is
 disabled.
-The bot authenticates the push and opens the PR.
+Hatchery uses the same repository-scoped Steward entitlement for the verified
+push and deterministic GitHub PR publication.
 
 ### Role Boundary
 
@@ -69,13 +70,19 @@ The target worktree, target branch, spawn id, and slice id remain correlated for
 
 ### Castra Client Surface
 
-`src/hatchery/spawn-handoff.ts` drives the Steward handoff through the Castra client in `src/castra/client.ts`, consuming the `launch`, `send`, and `remove` methods. The `output` method is the bounded read used by the observation path (`src/observe/sense-io.ts`) rather than by the handoff itself; it is named here because reading a launched Steward session's output is part of the same Castra client surface:
+`src/hatchery/spawn-handoff.ts` drives the Steward handoff through the Castra
+client in `src/castra/client.ts`. To create a PR, Hatchery sends the Steward the
+verified commit, pushed branch and a fresh review receipt ID. The Steward
+reviews the commit and reports `REVIEW <receipt ID> <passed|unavailable|failed>`
+on a separate line. The receipt carries verification status. Hatchery
+publishes from validated handoff facts after an approving receipt and returns
+the typed GitHub outcome to the caller.
 
 | Consumer verb | Client method | Consumer | Steward use |
 |---------------|---------------|----------|-------------|
 | `launch` | `launchSession` | `spawn-handoff.ts` | Starts the Castra-hosted manager session for the target worktree, branch, profile/session metadata, and slice/spawn correlation. |
 | `send` | `sendPrompt` | `spawn-handoff.ts` | Sends the Steward role prompt context to the launched session. |
-| `output` | `sessionOutput` | `observe/sense-io.ts` | Reads bounded session output for diagnostics or handoff observation. |
+| `output` | `sessionOutput` | `spawn-handoff.ts`, `observe/sense-io.ts` | Reads bounded session output for the current review receipt or observation. |
 | `remove` | `removeSession` | `spawn-handoff.ts` | Removes the hosted interactive session when the handoff boundary needs teardown. |
 
 This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface for the launch handoff and bounded output observation.

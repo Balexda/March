@@ -85,6 +85,7 @@ Spawn request body:
 | `managerGroup` | string | No | Manager group metadata. |
 | `title` | string | No | Human-readable job title. |
 | `branch` | string | No | Branch metadata. |
+| `baseBranch` | string | No | Preferred GitHub PR base. If absent or missing on GitHub, resolve the repository's default branch. |
 | `profile` | string | No | Deployment profile metadata. |
 | `taskType` | string | No | Smithy task type metadata. |
 | `taskName` | string | No | Smithy task name metadata. |
@@ -118,6 +119,7 @@ Job record response:
 | `result.summary` | string | Spawn summary. |
 | `result.application` | object | Verified patch application with `spawnId`, `status: "applied"`, `touchedPaths`, and `appliedAt`. |
 | `result.commit` | object | Published `IntegrationCommit` with `spawnId`, exact `branch`, `commitSha`, `patchSha256`, and `committedAt`. |
+| `result.pullRequestPublication` | object | Terminal PR result. `succeeded` carries a GitHub `pullRequest` record. `failed` carries `failureReason`, the pushed `branch` and `commit`, and a bounded `diagnostic`. Base failures may also carry `existingPullRequest`. |
 | `error.publication` | object | Bounded `commit_failed`, `push_failed`, or `timeout` with the spawn ID, recorded branch, patch digest, and local commit when available. |
 | `error.message` | string | Present when execution fails. |
 | `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. |
@@ -133,12 +135,18 @@ and its checkout for retry. A later dispatch of the slice that collides with
 that preserved branch at manager launch resumes it, but only when the prior
 spawn record's `admittedWork` (slice id, prompt sha256, backend) matches the
 current dispatch. Hatchery re-verifies the commit against the prior spawn's
-recorded extraction, then pushes it and hands
-the existing Steward the prompt instead of launching a replacement. A
-successful push records the branch as the checkout's upstream, and the Steward
-opens the PR with an explicit `--head`. Git phases are bounded and traced on the slice,
-following the [March vision](../../vision.md) and
-[operating philosophy](../../operating-philosophy.md).
+recorded extraction and pushes it again using the existing Steward session.
+A successful push records the branch as the checkout's upstream and binds PR
+publication to that same GitHub origin. Hatchery reuses an open PR only when
+both repositories, the exact source branch and the resolved base match. A
+different base yields `base_mismatch`, while an unresolved base yields
+`base_unresolved`. Closed PRs do not block a fresh PR. A fresh PR requires a
+bounded review receipt from the Castra Steward. Hatchery uses validated spawn
+facts and receipt status for the body, and rechecks the exact open PR identity
+after an ambiguous creation response. The result reports PR failure even
+when the spawn job itself completes with a pushed commit. Git and PR phases
+are bounded and traced on the slice. [March vision](../../vision.md) ·
+[Operating philosophy](../../operating-philosophy.md).
 
 ## Invariants
 

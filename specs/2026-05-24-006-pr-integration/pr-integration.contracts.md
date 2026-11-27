@@ -168,18 +168,17 @@ publishIntegrationBranch(input: {
 
 **Purpose**: Open or reuse a GitHub pull request for the pushed integration branch.
 **Consumers**: PR Integration Runner.
-**Providers**: GitHub integration boundary.
+**Providers**: Castra-hosted Steward review and the GitHub API under the repository-scoped Steward entitlement.
 
 #### Signature
 
 ```typescript
 openOrReusePullRequest(input: {
   repository: string;
-  headBranch: string;
-  baseBranch: string;
-  title: string;
-  body: string;
-}): PullRequestRecord
+  commit: IntegrationCommit;
+  baseBranch?: string;
+  metadata: PullRequestMetadata | (() => Promise<PullRequestMetadata | "review_failed" | "timeout">);
+}): Promise<PullRequestPublication>
 ```
 
 #### Inputs
@@ -187,12 +186,15 @@ openOrReusePullRequest(input: {
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `repository` | string | Yes | GitHub repository receiving the PR. |
-| `headBranch` | string | Yes | Pushed integration branch. |
-| `baseBranch` | string | Yes | Target branch. |
-| `title` | string | Yes | Bounded PR title. |
-| `body` | string | Yes | Bounded PR body with spawn traceability and diagnostics. |
+| `commit` | IntegrationCommit | Yes | Verified pushed commit and exact integration branch. Its source repository is the pushed origin. |
+| `baseBranch` | string | No | Preferred target branch. Fall back to the authoritative repository default when the preferred branch is absent. |
+| `metadata` | PullRequestMetadata or review callback | Yes | Bounded title and body with validated spawn traceability. A fresh PR in the Hatchery flow requires an approving Steward receipt. |
 
 #### Outputs
+
+`PullRequestPublication` is `succeeded` with a `pullRequest` record or
+`failed` with a stable `failureReason`, pushed `branch` and `commit`,
+and a bounded `diagnostic`. Base failures can include `existingPullRequest`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -209,11 +211,12 @@ openOrReusePullRequest(input: {
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Existing open PR | Reused record | Return the existing PR for the same head branch. |
-| Existing closed PR only | Publisher error or new PR | Behavior must be explicit in implementation tasks before coding. |
-| Base branch unknown | Publisher error | Do not guess a target branch. |
-| GitHub auth failure | Publisher error | No PR can be created or queried. |
-| GitHub network failure | Publisher error | No PR can be created or queried. |
+| Existing open PR | Reused record | Match the target repository, source repository, exact head, and resolved base. |
+| Existing closed PR only | New PR | Attempt creation after resolving the base and obtaining metadata. |
+| Open PR has a different base | `base_mismatch` | Return the mismatched record when no open PR matches the resolved base. |
+| Base branch unknown | `base_unresolved` | Return any matched open PR for context. Skip creation. |
+| GitHub auth or permission failure | `unauthorized` or `forbidden` | Return a bounded failure. |
+| GitHub network failure or timeout | `network` or `timeout` | Recheck for an exact open PR if creation may have succeeded. |
 
 ## Events / Hooks
 

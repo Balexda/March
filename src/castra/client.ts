@@ -200,13 +200,13 @@ export class CastraClient {
   }
 
   /** GET /v1/sessions/:id/output — recent session output. */
-  async sessionOutput(profile: string, sessionId: string, lines?: number): Promise<string> {
+  async sessionOutput(profile: string, sessionId: string, lines?: number, signal?: AbortSignal): Promise<string> {
     const qs = new URLSearchParams({ profile });
     if (lines !== undefined) qs.set("lines", String(lines));
     const body = await this.request(
       "GET",
       `/v1/sessions/${encodeURIComponent(sessionId)}/output?${qs.toString()}`,
-      { expectStatus: 200 },
+      { expectStatus: 200, signal },
     );
     const output = (body as { output?: unknown }).output;
     return typeof output === "string" ? output : "";

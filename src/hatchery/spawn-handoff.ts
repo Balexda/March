@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   formatMissingBackendAuthError,
   missingCredentialMounts,
@@ -35,6 +36,13 @@ import {
   pushIntegrationCommit,
   type IntegrationCommit,
 } from "./integration-publisher.js";
+import {
+  buildPullRequestMetadata,
+  openOrReusePullRequest,
+  pullRequestFailure,
+  type PullRequestMetadata,
+  type PullRequestPublication,
+} from "./pr-publisher.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -116,6 +124,7 @@ export interface HatcherySpawnOptions {
   readonly managerGroup?: string;
   readonly title?: string;
   readonly branch?: string;
+  readonly baseBranch?: string;
   readonly homeDir?: string;
   /**
    * Deployment profile for telemetry tagging — the Legate deployment's profile,
@@ -210,6 +219,7 @@ export interface HatcherySpawnResult {
   readonly summary: string;
   readonly application: PatchApplicationResult;
   readonly commit: IntegrationCommit;
+  readonly pullRequestPublication?: PullRequestPublication;
 }
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
@@ -390,6 +400,7 @@ async function resumePreservedPublication(input: {
   readonly branch: string;
   readonly homeDir?: string;
   readonly prompt: string;
+  readonly baseBranch?: string;
   readonly backend: string;
   readonly profile: string;
   readonly traceKey: string;
@@ -442,6 +453,7 @@ async function resumePreservedPublication(input: {
   const { spawnId, sessionId, worktreePath, target, handoff } = preserved;
   input.dispatch.setAttributes({ "march.resumed_spawn_id": spawnId });
 
+  let repository: string | undefined;
   const commit = await input.dispatch.spanAsync("steward.push", async (span) => {
     span.setAttributes({
       "march.spawn_id": spawnId,
@@ -449,7 +461,9 @@ async function resumePreservedPublication(input: {
       "march.commit_sha": preserved.commit.commitSha,
       "march.resumed": true,
     });
-    return pushIntegrationCommit(target, handoff, preserved.commit, { homeDir: input.homeDir, sliceId: input.sliceId });
+    return pushIntegrationCommit(target, handoff, preserved.commit, {
+      homeDir: input.homeDir, sliceId: input.sliceId, onPushed: (repo) => { repository = repo; },
+    });
   });
 
   const dir = hatcherySpawnLogDir(spawnId, input.homeDir);
@@ -460,22 +474,8 @@ async function resumePreservedPublication(input: {
     managerPromptPath: path.join(dir, "manager-prompt.md"),
     metadataPath: path.join(dir, "metadata.json"),
   };
-  const managerPrompt = buildManagerPrompt({
-    commit,
-    operatorPrompt: input.prompt,
-    patchPath: artifacts.patchPath,
-    spawnOutputPath: artifacts.spawnOutputPath,
-    metadataPath: artifacts.metadataPath,
-  });
-  // The push is done; a prompt-write failure belongs to the handoff, so it
-  // errors the steward.send span rather than steward.push.
-  await input.dispatch.spanAsync("steward.send", () => {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
-    return sendPromptToAgentDeckManager(
-      { sessionId, prompt: managerPrompt, profile: input.profile, traceKey: input.traceKey },
-      input.castra,
-    );
+  const pullRequestPublication = await reviewAndPublish({
+    ...input, commit, repository, handoff, sessionId, artifacts,
   });
   let metadata: { managerSession?: Partial<AgentDeckManagerSession>; exitCode?: unknown } = {};
   try {
@@ -503,9 +503,11 @@ async function resumePreservedPublication(input: {
       appliedAt: preserved.commit.committedAt,
     },
     commit,
+    pullRequestPublication,
     exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : 0,
     summary: [
       `Hatchery resumed publication for spawn ${spawnId} and handed off to manager session ${sessionId}.`,
+      publicationSummary(pullRequestPublication),
       `Branch: ${input.branch}`,
       `Worktree: ${worktreePath}`,
       `Patch: ${artifacts.patchPath}`,
@@ -953,6 +955,7 @@ export function buildManagerPrompt(input: {
   readonly spawnOutputPath?: string;
   readonly metadataPath?: string;
   readonly commit?: IntegrationCommit;
+  readonly reviewId?: string;
 }): string {
   const artifactGuidance =
     input.patchPath || input.metadataPath || input.spawnOutputPath
@@ -973,13 +976,13 @@ export function buildManagerPrompt(input: {
   return [
     "You are the March Hatchery management session for a completed spawn.",
     "",
-    "Review the published commit, then open a PR.",
+    "Review the published commit for publication as a PR.",
     ...(input.commit ? [`Published commit: ${input.commit.commitSha} on ${input.commit.branch}.`] : []),
     "",
     `Original request:\n${input.operatorPrompt.trimEnd()}`,
     "",
     ...artifactGuidance,
-    "Complete all review and PR steps in this turn.",
+    "Complete the review in this turn.",
     ...(input.commit
       ? [`1. Review the published commit (\`git show ${input.commit.commitSha}\`), which Hatchery`,
         "   verified against the published branch. Inspect its diff for correctness and security."]
@@ -988,12 +991,103 @@ export function buildManagerPrompt(input: {
     "2. Run the smallest meaningful verification for the touched code.",
     "3. Confirm every acceptance criterion is satisfied and every matching tasks.md row",
     "   changed from `[ ]` to `[x]` in the published commit.",
-    "4. If corrections are needed, report NEED: <problem> — <next action> and stop.",
+    "4. If corrections are needed, report NEED: <problem> — <next action>.",
     "   Leave the published commit and branch intact. Do not edit, commit, or push.",
-    "5. Open the PR for the exact published branch (pass it to `gh pr create --head`)",
-    "   using the `march-steward:steward-pr` skill.",
-    "6. Report the PR URL on the final line as `PR: <url>`. Escalate failures via NEED:.",
+    "5. Use the march-steward:steward-pr skill to report your review for the exact published branch.",
+    "   Hatchery uses this result to open or reuse the PR. Do not call GitHub to publish it yourself.",
+    ...(input.reviewId ? [
+      `Review receipt ID: ${input.reviewId}`,
+      "On a separate line report REVIEW <receipt ID> <passed|unavailable|failed>.",
+      "Use passed only for successful checks, unavailable if you approved but could not run checks,",
+      "and failed if corrections are needed. Include the receipt even when escalating via NEED:.",
+    ] : []),
   ].join("\n");
+}
+
+function publicationSummary(result: PullRequestPublication): string {
+  return result.status === "succeeded"
+    ? `PR: ${result.pullRequest.url}`
+    : `PR publication failed (${result.failureReason}). ${result.diagnostic}`;
+}
+
+async function reviewAndPublish(input: {
+  commit: IntegrationCommit;
+  repository?: string;
+  handoff: StewardHandoffInput;
+  baseBranch?: string;
+  homeDir?: string;
+  sliceId?: string;
+  prompt: string;
+  profile: string;
+  sessionId: string;
+  traceKey: string;
+  artifacts: HatcherySpawnArtifacts;
+  dispatch: DispatchTrace;
+  castra: CastraClient;
+}): Promise<PullRequestPublication> {
+  const { commit, repository, artifacts, handoff, dispatch } = input;
+  const reviewId = crypto.randomUUID();
+  const managerPrompt = buildManagerPrompt({
+    commit, operatorPrompt: input.prompt, reviewId,
+    patchPath: artifacts.patchPath,
+    spawnOutputPath: artifacts.spawnOutputPath,
+    metadataPath: artifacts.metadataPath,
+  });
+  return dispatch.spanAsync("steward.pr.publish", async (span) => {
+    span.setAttributes({ "march.spawn_id": commit.spawnId, "march.branch": commit.branch,
+      "march.commit_sha": commit.commitSha });
+    const sendReview = () => dispatch.spanAsync("steward.send", () => {
+      fs.mkdirSync(artifacts.dir, { recursive: true });
+      fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
+      return sendPromptToAgentDeckManager({
+        sessionId: input.sessionId, prompt: managerPrompt, profile: input.profile, traceKey: input.traceKey,
+      }, input.castra);
+    });
+    const review = async (): Promise<PullRequestMetadata | "review_failed" | "timeout"> => {
+      try {
+        await sendReview();
+      } catch {
+        return "review_failed";
+      }
+      const signal = AbortSignal.timeout(300_000);
+      const receipt = new RegExp(`^REVIEW ${reviewId} (passed|unavailable|failed)$`);
+      try {
+        while (!signal.aborted) {
+          const output = await input.castra.sessionOutput(input.profile, input.sessionId, 100, signal);
+          // The prompt contains the ID and the syntax on separate lines.
+          for (const line of output.split("\n")) {
+            const verification = receipt.exec(line.trim())?.[1];
+            if (verification === "failed") return "review_failed";
+            if (verification === "passed" || verification === "unavailable") {
+              return buildPullRequestMetadata({
+                commit, backend: handoff.backend, touchedPaths: handoff.touchedPaths, verification,
+              });
+            }
+          }
+          await delay(2_000, undefined, { signal });
+        }
+      } catch {
+        return signal.aborted ? "timeout" : "review_failed";
+      }
+      return "timeout";
+    };
+    const result = repository
+      ? await openOrReusePullRequest({
+        repository, commit, baseBranch: input.baseBranch, homeDir: input.homeDir, sliceId: input.sliceId,
+        dispatch, metadata: review,
+      })
+      : await sendReview().then(
+        () => pullRequestFailure(commit, "unsupported_origin"),
+        () => pullRequestFailure(commit, "review_failed"),
+      );
+    if (result.status === "failed") {
+      span.setAttributes({ "march.failure_reason": result.failureReason });
+      span.setError(result.diagnostic);
+    } else {
+      span.setAttributes({ "march.pr_number": result.pullRequest.number });
+    }
+    return result;
+  });
 }
 
 export function createHatcherySpawnArtifacts(input: {
@@ -2068,7 +2162,6 @@ export async function runHatcherySpawn(
       throw new HatcherySpawnError(eligibility.diagnostic);
     }
 
-    const artifactDir = hatcherySpawnLogDir(spawnId, input.homeDir);
     const artifacts = createHatcherySpawnArtifacts({
       spawnId,
       homeDir: input.homeDir,
@@ -2156,6 +2249,7 @@ export async function runHatcherySpawn(
     integrationCommit = recovered ?? commitPhase("steward.commit", (target) => createIntegrationCommit(target, handoff));
     const localCommit = integrationCommit;
     stage = "integration_push";
+    let repository: string | undefined;
     const commit = await dispatch.spanAsync("steward.push", async (span) => {
       span.setAttributes({ "march.spawn_id": spawnId, "march.branch": integrationBranch,
         "march.commit_sha": localCommit.commitSha });
@@ -2165,28 +2259,14 @@ export async function runHatcherySpawn(
       } catch (error) {
         throw publicationError(publishTarget, handoff, error, localCommit);
       }
-      return pushIntegrationCommit(target, handoff, localCommit, { homeDir: input.homeDir, sliceId });
+      return pushIntegrationCommit(target, handoff, localCommit, {
+        homeDir: input.homeDir, sliceId, onPushed: (repo) => { repository = repo; },
+      });
     });
-    const managerPrompt = buildManagerPrompt({
-      commit,
-      operatorPrompt: input.prompt,
-      patchPath: path.join(artifactDir, "patch.diff"),
-      spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
-      metadataPath: path.join(artifactDir, "metadata.json"),
-    });
-    // The push is done: a prompt-write failure is a handoff failure.
     stage = "steward_send";
-    await dispatch.spanAsync("steward.send", () => {
-      fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
-      return sendPromptToAgentDeckManager(
-        {
-          sessionId: stewardSessionId,
-          prompt: managerPrompt,
-          profile: agentDeckProfile,
-          traceKey,
-        },
-        castra,
-      );
+    const pullRequestPublication = await reviewAndPublish({
+      ...input, commit, repository, handoff, sessionId: stewardSessionId, artifacts,
+      profile: agentDeckProfile, traceKey, sliceId, dispatch, castra,
     });
     handedOff = true;
 
@@ -2198,9 +2278,11 @@ export async function runHatcherySpawn(
       artifacts,
       application,
       commit,
+      pullRequestPublication,
       exitCode: waitResult.exitCode,
       summary: [
         `Hatchery spawn ${spawnId} handed off to manager session ${manager.sessionId}.`,
+        publicationSummary(pullRequestPublication),
         `Branch: ${branch}`,
         `Worktree: ${manager.worktreePath}`,
         `Patch: ${artifacts.patchPath}`,
@@ -2218,6 +2300,7 @@ export async function runHatcherySpawn(
         branch,
         homeDir: input.homeDir,
         prompt: input.prompt,
+        baseBranch: input.baseBranch,
         backend: input.backend.name,
         profile: agentDeckProfile,
         traceKey,
