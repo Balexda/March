@@ -288,16 +288,18 @@ export async function openOrReusePullRequest(input: {
     // and does not is reported as a failed publication, never as a success.
     const labelled = async (result: PullRequestPublication, labels: readonly string[]): Promise<PullRequestPublication> => {
       if (result.status !== "succeeded" || labels.length === 0) return result;
-      return phase("steward.pr.label", async () => {
-        try {
+      // The failure is converted outside the phase so the rejected callback marks
+      // the `steward.pr.label` span errored.
+      try {
+        return await phase("steward.pr.label", async () => {
           // Create the label with its colour on first use; it may already exist.
           await request("/labels", { name: NEEDS_STEERING_LABEL, ...NEEDS_STEERING_LABEL_SPEC }).catch(() => undefined);
           await request(`/issues/${result.pullRequest.number}/labels`, { labels });
           return result;
-        } catch {
-          return failed("steering_label_failed", result.pullRequest);
-        }
-      });
+        });
+      } catch {
+        return failed("steering_label_failed", result.pullRequest);
+      }
     };
     const reused = compare(existing);
     if (reused) {
