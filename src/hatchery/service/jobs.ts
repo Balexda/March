@@ -1,3 +1,5 @@
+import { stewardDeadlineFromNow } from "../integration-deadline.js";
+import { IntegrationOutcomeError } from "../integration-outcome.js";
 import { IntegrationPublicationError } from "../integration-publisher.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -104,15 +106,21 @@ export class JobStore {
 
   /** Create a pending job and start executing it (no await). */
   create(request: SpawnRequest): JobRecord {
+    const id = request.attemptId ?? randomUUID();
+    const existing = this.jobs.get(id);
+    if (existing) return existing;
     const record: JobRecord = {
-      id: randomUUID(),
+      id,
       status: "pending",
       createdAt: new Date().toISOString(),
     };
     this.jobs.set(record.id, record);
     // Defer so create() returns a "pending" record (the 202 response value is
     // captured before execution flips it to "running").
-    queueMicrotask(() => void this.execute(record, request));
+    const execution = !request.attemptId
+      ? { ...request, attemptId: id, stewardDeadline: stewardDeadlineFromNow() }
+      : request;
+    queueMicrotask(() => void this.execute(record, execution));
     return record;
   }
 
@@ -138,6 +146,7 @@ export class JobStore {
     this.logger?.info(fields, "spawn job started");
     try {
       record.result = await this.executor(request);
+      record.integrationOutcome = record.result.integrationOutcome;
       record.status = "succeeded";
       this.logger?.info(
         { ...fields, spawn_id: record.result.spawnId },
@@ -156,14 +165,16 @@ export class JobStore {
         }
       }
     } catch (err) {
+      if (err instanceof IntegrationOutcomeError) record.integrationOutcome = err.outcome;
       record.error = {
         message: errorMessage(err),
+        ...(err instanceof IntegrationOutcomeError && err.agentFailureReason && { agentFailureReason: err.agentFailureReason }),
         ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
         ...(err instanceof StewardApplyError ? { application: err.application } : {}),
       };
       record.status = "failed";
       this.logger?.error({ ...fields, err: errorMessage(err) }, "spawn job failed");
-      const reason = dispatchReasonCode(err);
+      const reason = err instanceof IntegrationOutcomeError ? err.outcome.failureReason : dispatchReasonCode(err);
       this.recordDispatch(request, "failure", reason);
       this.spawnWindow.record(false, reason);
     } finally {

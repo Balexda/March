@@ -89,6 +89,7 @@ services:
       - MARCH_HERALD_URL=${MARCH_HERALD_URL:-http://herald:8818}
       - MARCH_BROOD_URL=${MARCH_BROOD_URL:-http://brood:9748}
       - MARCH_HATCHERY_URL=${MARCH_HATCHERY_URL:-http://hatchery:8080}
+      - MARCH_STEWARD_TIMEOUT_MS=${MARCH_STEWARD_TIMEOUT_MS:-3900000}
       - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
       - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must match the castra service token}
       # GitHub forge actions run ONLY with Tessera-issued entitlements (app/write

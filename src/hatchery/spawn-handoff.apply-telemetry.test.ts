@@ -11,6 +11,8 @@ import type { SpawnBackend } from "../spawn/backends.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { traceIdForDispatch } from "../observability/trace-ids.js";
 import { removeSpawnWorktree } from "../brood/worktree.js";
+import { BroodClient } from "../brood/service/client.js";
+import type { IntegrationAttemptState } from "../brood/service/types.js";
 import { TesseraClient } from "../tessera/client.js";
 import * as branchPublisher from "./integration-publisher.js";
 
@@ -21,10 +23,11 @@ import * as branchPublisher from "./integration-publisher.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath, sendPrompt, sessionOutput, workerPatch, recordedState, launchCollision } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, sessionOutput, workerPatch, recordedState, launchCollision, removeSession } = vi.hoisted(() => ({
   launchCollision: { value: false },
   worktreePath: { value: "" },
   sendPrompt: vi.fn(async () => {}),
+  removeSession: vi.fn(async () => ({ removed: true })),
   sessionOutput: vi.fn<() => Promise<string>>(),
   workerPatch: { value: "" },
   recordedState: { paths: undefined as string[] | undefined, unavailable: false },
@@ -69,7 +72,7 @@ vi.mock("../castra/client.js", () => {
         };
       },
     ),
-    removeSession: vi.fn(async () => ({ removed: true })),
+    removeSession,
     sendPrompt,
     sessionOutput,
   });
@@ -169,6 +172,7 @@ beforeEach(() => {
   worktreePath.value = makeWorktree();
   workerPatch.value = CONFLICTING_PATCH;
   sendPrompt.mockClear();
+  removeSession.mockClear();
   sessionOutput.mockReset();
   launchCollision.value = false;
   recordedState.paths = undefined;
@@ -303,10 +307,22 @@ it("reports exactly the staged paths and preserves the operator's file and index
   expect(sendPrompt).toHaveBeenCalledTimes(1);
 });
 
-it("publishes after the exact pushed commit receives its Castra review receipt", async () => {
+it.each(["success", "ack lost", "persistence unavailable", "late review"] as const)("handles %s after publishing the exact reviewed commit", async (mode) => {
   workerPatch.value = ADD_PATCH;
   const homeDir = makeHome();
   const sliceId = "pr-publication-slice";
+  const brood = integrationFixture();
+  if (mode === "ack lost") {
+    const write = brood.write.getMockImplementation()!;
+    brood.write.mockImplementation(async (...args) => {
+      await write(...args);
+      throw new Error("lost acknowledgement");
+    });
+  }
+  if (mode === "persistence unavailable") {
+    brood.write.mockRejectedValue(new Error("unavailable"));
+    brood.read.mockRejectedValue(new Error("unavailable"));
+  }
   const repo = "team/project";
   const pushedBranch = "feature/" + branch;
   const remote = gitAt(repoPath, "remote", "get-url", "origin").trim();
@@ -324,6 +340,7 @@ it("publishes after the exact pushed commit receives its Castra review receipt",
   sessionOutput.mockImplementation(async () => {
     const [{ prompt }] = sendPrompt.mock.lastCall as unknown as [{ prompt: string }];
     const id = /Review receipt ID: ([\w-]+)/.exec(prompt)?.[1];
+    if (mode === "late review") vi.spyOn(Date, "now").mockReturnValue(Date.parse(brood.request.stewardDeadline) + 1);
     return `Review complete.\nREVIEW ${id} passed\n`;
   });
   let publishedCommit: string | undefined;
@@ -347,11 +364,32 @@ it("publishes after the exact pushed commit receives its Castra review receipt",
   vi.stubGlobal("fetch", fetch);
   const spans = captureSpans();
 
-  const result = await runHatcherySpawn({
-    repoPath, branch, prompt: "do the thing", backend, baseBranch: "release", homeDir, sliceId,
+  const completion = runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, baseBranch: "release", homeDir, sliceId, ...brood.request,
   });
+  if (mode === "persistence unavailable") {
+    await expect(completion).rejects.toMatchObject({
+      outcome: { status: "failed", failureReason: "persistence", pullRequest: { number: 42 } },
+    });
+    expect(publishedCommit).toMatch(/^[a-f0-9]{40}$/);
+    return;
+  }
+  if (mode === "late review") {
+    await expect(completion).rejects.toMatchObject({
+      outcome: { status: "failed", failureReason: "timeout", commit: { commitSha: expect.any(String) } },
+    });
+    expect(publishedCommit).toBeUndefined();
+    expect(removeSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ad-xyz", pruneWorktree: false }));
+    return;
+  }
+  const result = await completion;
 
   expect(result.commit.commitSha).toBe(publishedCommit);
+  expect(result.integrationOutcome).toMatchObject({
+    status: "succeeded", spawnId: result.spawnId, commit: { commitSha: publishedCommit },
+    pullRequest: { number: 42 }, stewardSessionId: "ad-xyz",
+  });
+  expect(brood.write).toHaveBeenCalledWith(brood.request.attemptId, result.integrationOutcome);
   expect(result.pullRequestPublication).toMatchObject({
     status: "succeeded", pullRequest: { number: 42, headBranch: pushedBranch, baseBranch: "release" },
   });
@@ -608,4 +646,114 @@ it("keeps a literal supplementary character beside an escape in a quoted path", 
 
   expect(result.application).toMatchObject({ status: "applied", touchedPaths: ["\u{1F600}\t.txt"] });
   expect(sendPrompt).toHaveBeenCalledTimes(1);
+});
+
+
+function integrationFixture() {
+  const request = { attemptId: "tracked-attempt", stewardDeadline: new Date(Date.now() + 60_000).toISOString() };
+  vi.spyOn(BroodClient.prototype, "register").mockImplementation(async (session) => ({ ...session, status: session.status ?? "created", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  let state: IntegrationAttemptState = { ...request, spawnId: null, fenced: false, outcome: null };
+  const bind = vi.spyOn(BroodClient.prototype, "registerIntegrationAttempt").mockImplementation(async (binding) => {
+    state = { ...state, ...binding };
+    return state;
+  });
+  const read = vi.spyOn(BroodClient.prototype, "readIntegrationAttempt").mockImplementation(async () => state);
+  const lifecycle = vi.spyOn(BroodClient.prototype, "get").mockImplementation(async (id) =>
+    ({ id, kind: "spawn", status: "created", backend: "codex", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  const write = vi.spyOn(BroodClient.prototype, "writeIntegrationOutcome").mockImplementation(async (_, outcome) => {
+    state = { ...state, outcome };
+    return outcome;
+  });
+  return { request, bind, read, lifecycle, write };
+}
+
+function runTracked(request: ReturnType<typeof integrationFixture>["request"]) {
+  return runHatcherySpawn({
+    ...request, repoPath, branch, prompt: "do the thing", backend, homeDir: makeHome(), sliceId: "tracked-slice",
+  });
+}
+
+it.each([
+  ["extraction_rejected", "extraction"],
+  ["missing_lifecycle", "lifecycle"],
+  ["patch_conflict", "patch"],
+  ["commit_failed", "commit"],
+  ["push_failed", "push"],
+  ["pr_failed", "pr"],
+  ["timeout", "timeout"],
+] as const)("durably reports %s through the live handoff", async (failureReason, fault) => {
+  const brood = integrationFixture();
+  workerPatch.value = fault === "patch" ? CONFLICTING_PATCH : ADD_PATCH;
+  if (fault === "extraction") workerPatch.value = "";
+  if (fault === "lifecycle") brood.lifecycle.mockResolvedValue(undefined);
+  if (fault === "commit") vi.spyOn(branchPublisher, "createIntegrationCommit").mockImplementation(() => {
+    throw new Error("opaque credential from git");
+  });
+  if (fault === "push") gitAt(repoPath, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  if (fault === "timeout") brood.request.stewardDeadline = new Date(Date.now() - 1).toISOString();
+  const spans = captureSpans();
+  await expect(runTracked(brood.request)).rejects.toMatchObject({ outcome: { failureReason, status: "failed" } });
+  const outcome = brood.write.mock.calls[0][1];
+  expect(outcome).toMatchObject({ failureReason, spawnId: brood.bind.mock.calls[0][0].spawnId });
+  expect(JSON.stringify(outcome)).not.toContain("opaque credential");
+  expect(spans.find(({ name }) => name === "steward.integration.persist")?.status.code).toBe(2);
+  if (fault === "push" || fault === "pr") expect(outcome.commit?.commitSha).toMatch(/^[a-f0-9]{40}$/);
+  if (fault === "pr") expect(sendPrompt).toHaveBeenCalledTimes(1);
+  else expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("fails before extraction or publication when the Brood lookup cannot be confirmed", async () => {
+  const brood = integrationFixture();
+  brood.bind.mockRejectedValue(new Error("unavailable"));
+  brood.read.mockRejectedValue(new Error("unavailable"));
+  await expect(runTracked(brood.request)).rejects.toMatchObject({ outcome: { failureReason: "persistence" } });
+  expect(brood.lifecycle).not.toHaveBeenCalled();
+  expect(brood.write).not.toHaveBeenCalled();
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it("returns a typed persistence failure with the pushed artifact if Brood is unavailable", async () => {
+  const brood = integrationFixture();
+  workerPatch.value = ADD_PATCH;
+  brood.write.mockRejectedValue(new Error("secret in failed write"));
+  brood.read.mockRejectedValue(new Error("secret in failed read"));
+  await expect(runTracked(brood.request)).rejects.toMatchObject({
+    outcome: { failureReason: "persistence", commit: { commitSha: expect.any(String) }, diagnostic: expect.not.stringContaining("secret") },
+  });
+});
+
+it("reads the committed outcome when Brood drops the write acknowledgement", async () => {
+  const brood = integrationFixture();
+  workerPatch.value = ADD_PATCH;
+  const write = brood.write.getMockImplementation()!;
+  brood.write.mockImplementation(async (...args) => {
+    await write(...args);
+    throw new Error("lost acknowledgement");
+  });
+  await expect(runTracked(brood.request)).rejects.toMatchObject({ outcome: { failureReason: "pr_failed" } });
+  expect(brood.read).toHaveBeenCalledOnce();
+  expect(brood.write).toHaveBeenCalledOnce();
+});
+
+
+it("binds resumed publication to the original artifact-producing spawn", async () => {
+  workerPatch.value = ADD_PATCH;
+  const remote = gitAt(repoPath, "remote", "get-url", "origin").trim();
+  gitAt(repoPath, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const homeDir = makeHome();
+  const original = integrationFixture();
+  const input = { repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId: "tracked-resume" };
+  await expect(runHatcherySpawn({ ...input, ...original.request })).rejects.toMatchObject({
+    outcome: { failureReason: "push_failed" },
+  });
+  const prior = original.write.mock.calls[0][1];
+  gitAt(repoPath, "remote", "set-url", "origin", remote);
+  launchCollision.value = true;
+  const resumed = integrationFixture();
+  resumed.request.attemptId = "another-attempt";
+  await expect(runHatcherySpawn({ ...input, ...resumed.request })).rejects.toMatchObject({
+    outcome: { failureReason: "pr_failed", spawnId: prior.spawnId, commit: prior.commit },
+  });
+  expect(resumed.bind).toHaveBeenLastCalledWith({ ...resumed.request, spawnId: prior.spawnId });
+  expect(gitAt(remote, "rev-parse", "refs/heads/feature/" + branch).trim()).toBe(prior.commit?.commitSha);
 });

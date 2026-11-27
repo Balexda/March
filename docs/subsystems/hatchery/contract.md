@@ -90,6 +90,8 @@ Spawn request body:
 | `taskType` | string | No | Smithy task type metadata. |
 | `taskName` | string | No | Smithy task name metadata. |
 | `sliceId` | string | No | Smithy slice correlation id. |
+| `attemptId` | string | No | Dispatch attempt ID and Hatchery job ID. Supply it with `stewardDeadline`. |
+| `stewardDeadline` | ISO UTC timestamp string | No | Absolute integration deadline. Supply it with `attemptId`. |
 | `toolchain` | string | No | Toolchain selection. `auto` or absent lets Hatchery detect the stack; explicit values must be in Hatchery's allow-list. |
 
 ### `GET /spawns/:id`
@@ -120,6 +122,8 @@ Job record response:
 | `result.application` | object | Verified patch application with `spawnId`, `status: "applied"`, `touchedPaths`, and `appliedAt`. |
 | `result.commit` | object | Published `IntegrationCommit` with `spawnId`, exact `branch`, `commitSha`, `patchSha256`, and `committedAt`. |
 | `result.pullRequestPublication` | object | Terminal PR result. `succeeded` carries a GitHub `pullRequest` record. `failed` carries `failureReason`, the pushed `branch` and `commit`, and a bounded `diagnostic`. Base failures may also carry `existingPullRequest`. |
+| `integrationOutcome` | `PrIntegrationResult` | Terminal success or failure, with an available application, exact commit, PR, or artifact identifiers. A `persistence` failure means the job could not confirm the Brood write. |
+| `error.agentFailureReason` | string | Validated agent failure category when available. |
 | `error.publication` | object | Bounded `commit_failed`, `push_failed`, or `timeout` with the spawn ID, recorded branch, patch digest, and local commit when available. |
 | `error.message` | string | Present when execution fails. |
 | `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. |
@@ -145,9 +149,19 @@ different base yields `base_mismatch`, while an unresolved base yields
 branch) is treated as absent, so the repository default is used. Closed PRs do not block a fresh PR. A fresh PR requires a
 bounded review receipt from the Castra Steward. Hatchery uses validated spawn
 facts and receipt status for the body, and rechecks the exact open PR identity
-after an ambiguous creation response. The result reports PR failure even
-when the spawn job itself completes with a pushed commit. Git and PR phases
-are bounded and traced on the slice. [March vision](../../vision.md) ·
+after an ambiguous creation response. A managed job fails if PR publication
+fails, including when the pushed commit remains available for retry.
+
+Hatchery binds each attempt to the actual artifact-producing spawn and its
+absolute deadline in Brood before extracting a new patch or resuming
+publication. A retained job is returned when the caller repeats a POST with its
+attempt ID. If the request omits the attempt ID and deadline, Hatchery generates
+both using `MARCH_STEWARD_TIMEOUT_MS` (3,900,000 ms by default). Hatchery checks
+the lifecycle row and validated extraction before applying or publishing.
+Expiry stops active review and prevents the job from accepting a late result.
+Git and PR phases are bounded and traced on the slice.
+Brood remains the authority on the terminal integration outcome after Hatchery
+restarts or evicts its job. [March vision](../../vision.md) ·
 [Operating philosophy](../../operating-philosophy.md).
 
 ## Invariants

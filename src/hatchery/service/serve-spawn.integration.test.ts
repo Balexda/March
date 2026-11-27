@@ -10,6 +10,8 @@ import path from "node:path";
 import { FINDER_BIN } from "../../shared/deps.js";
 import { buildServer } from "./server.js";
 import type { JobRecord } from "./types.js";
+import { buildServer as buildBroodServer } from "../../brood/service/server.js";
+import { BroodClient } from "../../brood/service/client.js";
 import { buildServer as buildCastraServer } from "../../castra/server.js";
 import { createAgentDeckAdapter } from "../../castra/adapter.js";
 import type { FastifyInstance } from "fastify";
@@ -53,6 +55,8 @@ describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/
     "CODEX_HOME",
     "MARCH_OTEL",
     "MARCH_HATCHERY_WORKER_ENTRY",
+    "MARCH_BROOD_URL",
+    "MARCH_HATCHERY_PARK_FAILED",
     "CASTRA_URL",
     "CASTRA_API_TOKEN",
   ] as const;
@@ -60,6 +64,7 @@ describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/
   let basePath: string;
   let app: FastifyInstance | undefined;
   let castraApp: FastifyInstance | undefined;
+  let brood: Awaited<ReturnType<typeof buildBroodServer>> | undefined;
 
   beforeEach(() => {
     savedKeys = {};
@@ -72,6 +77,9 @@ describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/
     app = undefined;
     await castraApp?.close();
     castraApp = undefined;
+    await brood?.app.close();
+    brood?.store.close();
+    brood = undefined;
     for (const key of MANAGED_KEYS) {
       const value = savedKeys[key];
       if (value === undefined) delete process.env[key];
@@ -242,6 +250,7 @@ exit 0
     process.env.HOME = env.home;
     process.env.CODEX_HOME = env.codexHome;
     process.env.MARCH_OTEL = "0";
+    delete process.env.MARCH_HATCHERY_PARK_FAILED;
     process.env.MARCH_HATCHERY_WORKER_ENTRY = CLI_PATH;
   }
 
@@ -274,6 +283,8 @@ exit 0
   }
 
   async function submit(repoRoot: string, extra: Record<string, string> = {}): Promise<string> {
+    brood = await buildBroodServer({ logger: silentLogger, storeOptions: { dbPath: ":memory:" } });
+    process.env.MARCH_BROOD_URL = await brood.app.listen({ port: 0, host: "127.0.0.1" });
     const built = await buildServer({ logger: silentLogger });
     app = built.app;
     const res = await app.inject({
@@ -285,7 +296,7 @@ exit 0
     return (res.json() as { id: string }).id;
   }
 
-  it("launches a manager, captures patch artifacts, and sends the manager prompt", async () => {
+  it("retains the commit and a typed terminal failure when a local origin cannot publish a PR", async () => {
     const repoRoot = makeRealRepo();
     const home = makeTmpDir();
     const codexHome = path.join(home, "codex-home");
@@ -303,12 +314,15 @@ exit 0
 
     const id = await submit(repoRoot, { title: "manager title", branch: "smithy/cut/generated" });
     const job = await poll(id);
-    expect(job.status).toBe("succeeded");
-    expect(job.result?.application).toEqual({
-      spawnId: job.result?.spawnId,
-      status: "applied",
-      touchedPaths: ["generated.txt"],
-      appliedAt: expect.any(String),
+    expect(job.status).toBe("failed");
+    expect(job.integrationOutcome).toMatchObject({
+      status: "failed", failureReason: "pr_failed",
+      application: { status: "applied", touchedPaths: ["generated.txt"], appliedAt: expect.any(String) },
+      commit: { branch: "smithy/cut/generated", commitSha: expect.any(String) },
+    });
+    expect(await new BroodClient().readIntegrationAttempt(id)).toMatchObject({
+      spawnId: job.integrationOutcome?.spawnId,
+      outcome: job.integrationOutcome,
     });
 
     // Castra prefixes every agent-deck invocation with `-p <profile>`; the
@@ -378,7 +392,7 @@ exit 0
     const id = await submit(repoRoot);
     const job = await poll(id);
     expect(job.status).toBe("failed");
-    expect(job.error?.message).toContain("no committed patch");
+    expect(job.integrationOutcome).toMatchObject({ status: "failed", failureReason: "extraction_rejected" });
 
     const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
     const handoffDir = path.join(logsRoot, fs.readdirSync(logsRoot)[0]);

@@ -81,9 +81,9 @@ the typed GitHub outcome to the caller.
 | Consumer verb | Client method | Consumer | Steward use |
 |---------------|---------------|----------|-------------|
 | `launch` | `launchSession` | `spawn-handoff.ts` | Starts the Castra-hosted manager session for the target worktree, branch, profile/session metadata, and slice/spawn correlation. |
-| `send` | `sendPrompt` | `spawn-handoff.ts` | Sends the Steward role prompt context to the launched session. |
+| `send` | `sendPrompt` | `spawn-handoff.ts` | Sends the Steward role prompt context to the launched session using the integration deadline. |
 | `output` | `sessionOutput` | `spawn-handoff.ts`, `observe/sense-io.ts` | Reads bounded session output for the current review receipt or observation. |
-| `remove` | `removeSession` | `spawn-handoff.ts` | Removes the hosted interactive session when the handoff boundary needs teardown. |
+| `remove` | `removeSession` | `spawn-handoff.ts` | Removes the hosted interactive session for teardown or on integration timeout. The timeout path preserves its checkout. |
 
 This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface for the launch handoff and bounded output observation.
 

@@ -1,3 +1,6 @@
+import type { IntegrationAttemptState } from "../../../brood/service/types.js";
+import type { TransitionEvent } from "../clients/herald.js";
+
 /**
  * Injected I/O seams for the dispatch ops (#144 phase 3).
  *
@@ -31,6 +34,13 @@ export interface DispatchIoDeps {
   postSpawn: (request: any) => Promise<{ id?: string }>;
   /** Poll a Hatchery job by id; resolves to the job (status/result/error). */
   getJob: (jobId: string) => Promise<any>;
+  /** Durable integration coordination for new dispatches. */
+  integration?: {
+    stewardDeadline: () => string;
+    appendTransition: (event: TransitionEvent) => Promise<void>;
+    readAttempt: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
+    confirmFailure: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
+  };
   /** Best-effort cull of the orphaned steward a *failed* spawn left behind.
    *
    *  A spawn that fails AFTER Castra created the manager session — most often a

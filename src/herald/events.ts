@@ -15,6 +15,8 @@
  * the fold on cold start. Keep `EventType` low-cardinality (it is a metric label).
  */
 
+import type { PrIntegrationResult } from "../brood/service/types.js";
+
 /** Operator slice levers that leave a durable request in the fold (#593). */
 export type OperatorSliceAction = "merge" | "relaunch";
 
@@ -106,7 +108,18 @@ export type EventBody =
   // ── Transition events (legate; emitted from PR2) ────────────────────────
   /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
    *  id, persisted so the legate's completion poll survives a restart. */
-  | ({ type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string } & SliceActionKey)
+  | ({
+      type: "slice.dispatched";
+      sliceId: string;
+      branch?: string;
+      worktreePath?: string;
+      sessionId?: string;
+      jobId?: string;
+      attemptId?: string;
+      stewardDeadline?: string;
+    } & SliceActionKey)
+  /** Legate confirmed a failure by fencing the dispatch attempt in Brood. */
+  | { type: "slice.integration.failed"; sliceId: string; attemptId: string; outcome: Extract<PrIntegrationResult, { status: "failed" }> }
   /**
    * Hatchery launched the steward and learned the slice↔session↔spawn pairing
    * (#213). Hatchery is the single integration point that holds all three ids, so
@@ -120,7 +133,7 @@ export type EventBody =
    *  steward `sessionId` on the implementing handoff so the fold learns the
    *  slice→session link Herald's PR discovery is gated on (#210) and a restart's
    *  rebuild keeps it (the latent #210 regression). */
-  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string; handledFeedback?: HandledFeedback }
+  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string; branch?: string; worktreePath?: string; spawnId?: string; attemptId?: string; handledFeedback?: HandledFeedback }
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
@@ -310,6 +323,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.pr.changed":
     case "slice.output.changed":
     case "slice.dispatched":
+    case "slice.integration.failed":
     case "slice.steward.attached":
     case "slice.stage.changed":
     case "slice.archived":
@@ -386,6 +400,11 @@ export interface SliceState extends SliceActionKey {
   /** Hatchery job id from `slice.dispatched`; lets the legate's completion poll
    *  resume after a restart (a `hatchery-pending` slice needs its job id). */
   jobId?: string;
+  /** Durable Brood lookup key and absolute deadline for the current dispatch. */
+  attemptId?: string;
+  stewardDeadline?: string;
+  /** Fallback for the current attempt when Brood confirms it has no outcome. */
+  integrationFailure?: Extract<PrIntegrationResult, { status: "failed" }>;
   /** Observed PR/CI/review state (the `queryPrForBabysit` shape). */
   pr?: unknown;
   handledFeedback?: Partial<Record<HandledFeedback["kind"], string[]>>;
@@ -664,8 +683,18 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // bounded auto-recovery no longer sees as escalated). The inner
       // slice.dispatched sets the stage once the job id exists.
       if (event.type === "slice.dispatched") {
-        slice.stage = "hatchery-pending";
-        delete slice.escalatedReason;
+        if (event.attemptId !== slice.attemptId || event.attemptId === undefined) {
+          delete slice.integrationFailure;
+        }
+        if (event.attemptId && event.attemptId !== slice.attemptId) delete slice.jobId;
+        if (event.attemptId !== undefined) slice.attemptId = event.attemptId;
+        else delete slice.attemptId;
+        if (event.stewardDeadline !== undefined) slice.stewardDeadline = event.stewardDeadline;
+        else delete slice.stewardDeadline;
+        if (!slice.integrationFailure) {
+          slice.stage = "hatchery-pending";
+          delete slice.escalatedReason;
+        }
       }
       if (event.branch !== undefined) slice.branch = event.branch;
       if ("worktreePath" in event && event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
@@ -681,6 +710,15 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       delete slice.recoveryRung; // …and ends any graduated-recovery walk (#412)
       break;
     }
+    case "slice.integration.failed": {
+      const slice = Object.hasOwn(state.slices, event.sliceId) ? state.slices[event.sliceId] : undefined;
+      if (slice?.attemptId === event.attemptId && !slice.integrationFailure) {
+        slice.integrationFailure = event.outcome;
+        slice.stage = "escalated";
+        slice.escalatedReason = "hatchery_dispatch_failed";
+      }
+      break;
+    }
     case "slice.steward.attached": {
       const slice = sliceOf(state, event.sliceId);
       slice.sessionId = event.sessionId;
@@ -693,7 +731,14 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       break;
     }
     case "slice.stage.changed": {
+      if (event.attemptId !== undefined &&
+          (!Object.hasOwn(state.slices, event.sliceId) ||
+            state.slices[event.sliceId]?.attemptId !== event.attemptId ||
+            state.slices[event.sliceId]?.integrationFailure)) break;
       const slice = sliceOf(state, event.sliceId);
+      if (event.branch !== undefined) slice.branch = event.branch;
+      if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
+      if (event.spawnId !== undefined) slice.spawnId = event.spawnId;
       slice.stage = event.stage;
       // A merge (operator-requested or the auto-merge gate) settles any pending
       // operator merge request (#593).

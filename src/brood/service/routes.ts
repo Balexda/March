@@ -15,6 +15,7 @@ import {
   type ContainerObserver,
 } from "./container-observer.js";
 import { parseExtractionResult } from "./extraction.js";
+import { registerIntegrationRoutes } from "./integration-routes.js";
 import { workspaceReclaimActive } from "./teardown-deadline.js";
 import { WORKSPACE_RECLAIMING_CODE } from "./types.js";
 import { extractionReadiness } from "./extraction-readiness.js";
@@ -349,6 +350,7 @@ export async function registerRoutes(
   });
 
   app.get("/healthz", async () => ({ status: "ok" }));
+  registerIntegrationRoutes(app, store.integration);
 
   app.get("/readyz", async (_request, reply) => {
     const finder = isFinderAvailable();

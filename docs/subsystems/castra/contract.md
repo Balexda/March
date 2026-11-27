@@ -215,7 +215,9 @@ re-read `GET /v1/sessions` to see whether the session exists before retrying,
 but only once the operation's budget (240s for launch, 10s for remove) has
 passed since it sent the request: before that the step may still be running,
 and a list without the session does not show it is absent. `CastraClient`
-already waits past each budget.
+already waits past each budget by default. An optional client abort signal can
+end the caller's wait sooner for session removal. The server's operation budget
+still applies.
 A timed-out send stays unknown: the session list looks the same whether or not
 the prompt was typed, so it cannot decide whether to resend; only a separate
 sign of delivery (such as the steward acting on the prompt) can.

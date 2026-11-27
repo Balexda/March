@@ -1,3 +1,5 @@
+import type { PrIntegrationFailure, PrIntegrationResult } from "../../brood/service/types.js";
+import type { AgentFailureReason } from "../../observability/agent-output.js";
 import type { PublicationFailure } from "../integration-publisher.js";
 import type { HatcherySpawnResult, PatchApplicationResult } from "../spawn-handoff.js";
 
@@ -21,6 +23,8 @@ export interface SpawnRequest {
   readonly taskType?: string;
   readonly taskName?: string;
   readonly sliceId?: string;
+  readonly attemptId?: string;
+  readonly stewardDeadline?: string;
   /** Per-profile worker toolchain override (issue #287); `auto`/undefined → detect. */
   readonly toolchain?: string;
 }
@@ -29,6 +33,7 @@ export type JobStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface JobError {
   readonly message: string;
+  readonly agentFailureReason?: Exclude<AgentFailureReason, "none">;
   readonly application?: PatchApplicationResult;
   readonly publication?: PublicationFailure;
 }
@@ -41,13 +46,14 @@ export interface JobRecord {
   startedAt?: string;
   finishedAt?: string;
   result?: HatcherySpawnResult;
+  integrationOutcome?: PrIntegrationResult;
   error?: JobError;
 }
 
 /** Message posted from the spawn worker thread back to the service. */
 export type SpawnWorkerMessage =
   | { readonly ok: true; readonly result: HatcherySpawnResult }
-  | { readonly ok: false; readonly error: string; readonly application?: PatchApplicationResult; readonly publication?: PublicationFailure };
+  | { readonly ok: false; readonly error: string; readonly integrationOutcome?: PrIntegrationFailure; readonly agentFailureReason?: JobError["agentFailureReason"]; readonly application?: PatchApplicationResult; readonly publication?: PublicationFailure };
 
 /** workerData passed into the spawn worker thread. */
 export interface SpawnWorkerData {

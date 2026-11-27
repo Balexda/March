@@ -1,9 +1,13 @@
 import { broodPort } from "../config.js";
+import { parseIntegrationAttemptState, parseIntegrationOutcome } from "./integration.js";
 import type { SweepResult } from "./steward-removal.js";
 import type {
   BroodReadView,
   ListSessionsFilter,
   ExtractionReadiness,
+  IntegrationAttemptState,
+  PrIntegrationResult,
+  RegisterIntegrationAttempt,
   SessionLogResponse,
   RegisterSessionInput,
   SessionRecord,
@@ -85,7 +89,7 @@ async function parseJsonBody(res: Response): Promise<unknown> {
 }
 
 function bodyError(body: unknown, fallback: string): string {
-  const message = (body as { error?: unknown }).error;
+  const message = (body as { error?: unknown } | null)?.error;
   return typeof message === "string" && message.length > 0 ? message : fallback;
 }
 
@@ -147,14 +151,14 @@ export class BroodClient {
     body?: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> {
-    let res: Response;
     try {
-      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: this.headers(body !== undefined, extraHeaders),
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
+      return { status: res.status, body: await parseJsonBody(res) };
     } catch (err) {
       throw new BroodUnavailableError(
         `Could not reach the brood service at ${this.baseUrl}: ${
@@ -162,7 +166,6 @@ export class BroodClient {
         }`,
       );
     }
-    return { status: res.status, body: await parseJsonBody(res) };
   }
 
   private async requestText(
@@ -259,6 +262,74 @@ export class BroodClient {
       );
     }
     return body as SessionRecord;
+  }
+
+  private async integrationRequest(method: string, path: string, input?: unknown): Promise<unknown> {
+    const { status, body } = await this.request(method, path, input);
+    if (status !== 200) {
+      throw new BroodClientError(bodyError(body, `Brood integration request failed (HTTP ${status})`));
+    }
+    return body;
+  }
+
+  private async integrationAttemptRequest(
+    method: string,
+    path: string,
+    attemptId: string,
+    input?: RegisterIntegrationAttempt,
+  ): Promise<IntegrationAttemptState> {
+    const body = await this.integrationRequest(method, path, input);
+    const attempt = parseIntegrationAttemptState(body);
+    if (!attempt || attempt.attemptId !== attemptId) {
+      throw new BroodClientError("Invalid integration attempt response from Brood");
+    }
+    return attempt;
+  }
+
+  async registerIntegrationAttempt(input: RegisterIntegrationAttempt): Promise<IntegrationAttemptState> {
+    const state = await this.integrationAttemptRequest("POST", "/integration-attempts", input.attemptId, input);
+    if (state.spawnId !== input.spawnId || state.stewardDeadline !== input.stewardDeadline || state.fenced) {
+      throw new BroodClientError("Unexpected integration attempt binding from Brood");
+    }
+    return state;
+  }
+
+  async readIntegrationAttempt(attemptId: string): Promise<IntegrationAttemptState> {
+    return this.integrationAttemptRequest("GET", `/integration-attempts/${encodeURIComponent(attemptId)}`, attemptId);
+  }
+
+  async confirmIntegrationFailure(attemptId: string): Promise<IntegrationAttemptState> {
+    const state = await this.integrationAttemptRequest(
+      "POST", `/integration-attempts/${encodeURIComponent(attemptId)}/confirm-failure`, attemptId,
+    );
+    if (!state.outcome && !state.fenced) {
+      throw new BroodClientError("Brood did not confirm the integration failure");
+    }
+    return state;
+  }
+
+  async writeIntegrationOutcome(attemptId: string, outcome: PrIntegrationResult): Promise<PrIntegrationResult> {
+    const body = await this.integrationRequest(
+      "PUT", `/integration-attempts/${encodeURIComponent(attemptId)}/outcome`, outcome,
+    );
+    const persisted = parseIntegrationOutcome(body);
+    if (!persisted || persisted.spawnId !== outcome.spawnId) {
+      throw new BroodClientError("Invalid terminal outcome response from Brood");
+    }
+    return persisted;
+  }
+
+  async readIntegrationOutcome(spawnId: string): Promise<PrIntegrationResult | null> {
+    const body = await this.integrationRequest(
+      "GET", `/sessions/${encodeURIComponent(spawnId)}/integration-outcome`,
+    );
+    const outcome = (body as { outcome?: unknown } | null)?.outcome;
+    if (outcome === null) return null;
+    const parsed = parseIntegrationOutcome(outcome);
+    if (!parsed || parsed.spawnId !== spawnId) {
+      throw new BroodClientError("Invalid terminal outcome response from Brood");
+    }
+    return parsed;
   }
 
   async getExtractionReadiness(

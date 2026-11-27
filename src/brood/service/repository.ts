@@ -1,4 +1,5 @@
 import { SessionStore, type SessionStoreOptions } from "./store.js";
+import type { IntegrationRegistry } from "./integration-registry.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -21,6 +22,7 @@ import type {
  * I/O is a follow-up that would widen this contract (and its callers) together.
  */
 export interface SessionRepository {
+  readonly integration: IntegrationRegistry;
   /** Register a session, or merge new fields into an existing one (idempotent). */
   register(input: RegisterSessionInput): SessionRecord;
   /** Apply a lifecycle update. Returns `undefined` if the session is unknown. */

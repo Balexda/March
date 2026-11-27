@@ -35,6 +35,9 @@ import {
   postSpawn,
   resolveHatcheryUrl,
 } from "../../hatchery/service/client.js";
+import { stewardDeadlineFromNow } from "../../hatchery/integration-deadline.js";
+import { BroodClient } from "../../brood/service/client.js";
+import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../../observability/trace-ids.js";
 import { CastraClient } from "../../castra/client.js";
 import { ProfileClient } from "../../herald/profiles/client.js";
 import type { ProfileRecord } from "../../herald/profiles/types.js";
@@ -1068,13 +1071,28 @@ async function cullStewardForSlice(
 // Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
 function dispatchIoDeps(meta: any): DispatchIoDeps {
   const hatcheryUrl = resolveHatcheryUrl(env);
+  const integrationBrood = (sliceId: string) => new BroodClient({
+    env, timeoutMs: 5_000,
+    traceparent: buildTraceparent(traceIdForDispatch(sliceId), spanIdForDispatch(sliceId)),
+  });
+  const dispatchFetch: typeof fetch = (input, init) =>
+    fetch(input, { ...init, signal: AbortSignal.timeout(5_000) });
   return {
     meta,
     emitTransition: (event: any) => emitTransition(meta.profile, event),
     emit: (event: any) => append(meta, meta.processor_events_path, event),
     log: (line: string) => appendText(meta.processor_log_path, line),
-    postSpawn: (request: any) => postSpawn(hatcheryUrl, request),
-    getJob: (jobId: string) => getJob(hatcheryUrl, jobId),
+    postSpawn: (request: any) => postSpawn(hatcheryUrl, request, dispatchFetch),
+    getJob: (jobId: string) => getJob(hatcheryUrl, jobId, dispatchFetch),
+    integration: {
+      stewardDeadline: () => stewardDeadlineFromNow(env),
+      appendTransition: async (event) => {
+        const id = "attemptId" in event && event.attemptId ? `${event.type}:${event.attemptId}` : undefined;
+        await legateHerald().append(meta.profile, { ...event, id });
+      },
+      readAttempt: (sliceId, attemptId) => integrationBrood(sliceId).readIntegrationAttempt(attemptId),
+      confirmFailure: (sliceId, attemptId) => integrationBrood(sliceId).confirmIntegrationFailure(attemptId),
+    },
     cullStewardForSlice: (sliceId: string, branch: string | undefined) =>
       cullStewardForSlice(meta.profile, sliceId, branch),
   };

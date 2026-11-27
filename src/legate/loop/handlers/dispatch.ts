@@ -192,7 +192,7 @@ async function fireNotifications(
 function tallyHardDownFailures(failures: any[]): number {
   let n = 0;
   for (const f of failures) {
-    const reason = parseAgentFailureReason(String(f?.error ?? ""));
+    const reason = f?.agent_failure_reason ?? parseAgentFailureReason(String(f?.error ?? ""));
     if (reason && isHardDownReason(reason)) n += 1;
   }
   return n;

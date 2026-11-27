@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { DispatchTrace } from "../observability/spawn-trace.js";
 import { TesseraClient, TesseraClientError } from "../tessera/client.js";
+import { fetchDuringStewardAttempt, stewardOperationSignal } from "./integration-deadline.js";
 import type { IntegrationCommit } from "./integration-publisher.js";
 
 export interface PullRequestRecord {
@@ -149,7 +150,7 @@ export async function openOrReusePullRequest(input: {
         throw new GitHubFailure("unauthorized");
       }
       if (!key) throw new GitHubFailure("unauthorized");
-      const client = new TesseraClient({ clientKey: key, env: { MARCH_TESSERA_URL: process.env.MARCH_TESSERA_URL } });
+      const client = new TesseraClient({ fetchImpl: fetchDuringStewardAttempt, clientKey: key, env: { MARCH_TESSERA_URL: process.env.MARCH_TESSERA_URL } });
       return async (refresh: boolean) => (await client.issueGitHubToken({
         identity: "app", access: "write", repo: repository, sliceId: input.sliceId, refresh,
       })).token;
@@ -160,7 +161,7 @@ export async function openOrReusePullRequest(input: {
     // absence of the exact resource. Redirects are never followed, so the
     // token is never forwarded to another location.
     async function request(resource: string, body?: object, deadline?: AbortSignal, probe = false): Promise<{ value: unknown; hasNext?: boolean }> {
-      const timeout = AbortSignal.timeout(10_000);
+      const timeout = stewardOperationSignal(10_000);
       const signal = deadline ? AbortSignal.any([timeout, deadline]) : timeout;
       let response: Response;
       try {
@@ -212,7 +213,7 @@ export async function openOrReusePullRequest(input: {
     const head = `${repository.split("/")[0]}:${commit.branch}`;
     const query = new URLSearchParams({ state: "open", head, per_page: "100" });
     const lookup = () => phase("steward.pr.lookup", async () => {
-      const deadline = AbortSignal.timeout(15_000);
+      const deadline = stewardOperationSignal(15_000);
       const records: Matched[] = [];
       for (let page = 1; page <= 10; page++) {
         query.set("page", String(page));

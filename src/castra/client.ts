@@ -121,6 +121,7 @@ export interface SendPromptRequest {
   readonly sessionId: string;
   readonly prompt: string;
   readonly traceKey?: string;
+  readonly signal?: AbortSignal;
 }
 
 export interface RemoveSessionRequest {
@@ -245,6 +246,7 @@ export class CastraClient {
         json: { profile: req.profile, prompt: req.prompt },
         expectStatus: 202,
         timeoutMs: CASTRA_SEND_TIMEOUT_MS,
+        signal: req.signal,
       },
     );
   }

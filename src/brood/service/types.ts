@@ -254,3 +254,84 @@ export interface SessionLogResponse {
  * roll the launch back rather than keep running unregistered.
  */
 export const WORKSPACE_RECLAIMING_CODE = "workspace_reclaiming";
+
+export const INTEGRATION_FAILURE_REASONS = [
+  "extraction_rejected",
+  "missing_lifecycle",
+  "patch_conflict",
+  "commit_failed",
+  "push_failed",
+  "pr_failed",
+  "timeout",
+  "persistence",
+] as const;
+
+export type IntegrationFailureReason = typeof INTEGRATION_FAILURE_REASONS[number];
+
+export interface IntegrationApplication {
+  readonly spawnId: string;
+  readonly status: "applied" | "failed";
+  readonly touchedPaths: readonly string[];
+  readonly diagnostic?: string;
+  readonly appliedAt?: string;
+}
+
+export interface IntegrationCommitRecord {
+  readonly spawnId: string;
+  readonly branch: string;
+  readonly commitSha: string;
+  readonly patchSha256: string;
+  readonly committedAt: string;
+}
+
+export interface IntegrationPullRequestRecord {
+  readonly provider: "github";
+  readonly repository: string;
+  readonly number: number;
+  readonly url: string;
+  readonly headBranch: string;
+  readonly baseBranch: string;
+  readonly state: "open" | "closed" | "merged";
+  readonly createdAt?: string;
+  readonly observedAt: string;
+}
+
+interface IntegrationArtifacts {
+  readonly completedAt: string;
+  readonly stewardSessionId?: string;
+  readonly worktreePath?: string;
+  readonly artifactsDir?: string;
+}
+
+export type PrIntegrationFailure = IntegrationArtifacts & {
+  /** Null when an orchestration attempt failed before a spawn was linked. */
+  readonly spawnId: string | null;
+  readonly status: "failed";
+  readonly failureReason: IntegrationFailureReason;
+  readonly diagnostic: string;
+  readonly application?: IntegrationApplication;
+  readonly commit?: IntegrationCommitRecord;
+  readonly pullRequest?: IntegrationPullRequestRecord;
+};
+
+export type PrIntegrationResult = PrIntegrationFailure | (IntegrationArtifacts & {
+  readonly spawnId: string;
+  readonly status: "succeeded";
+  readonly application: IntegrationApplication;
+  readonly commit: IntegrationCommitRecord;
+  readonly pullRequest: IntegrationPullRequestRecord;
+});
+
+export interface RegisterIntegrationAttempt {
+  readonly attemptId: string;
+  readonly spawnId: string;
+  readonly stewardDeadline: string;
+}
+
+export interface IntegrationAttemptState {
+  readonly attemptId: string;
+  readonly spawnId: string | null;
+  readonly stewardDeadline: string | null;
+  readonly fenced: boolean;
+  readonly outcome: PrIntegrationResult | null;
+}

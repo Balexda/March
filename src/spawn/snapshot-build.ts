@@ -92,6 +92,7 @@ export interface BuildSpawnImageInput {
   readonly contextPath: string;
   /** Absolute path to the generated Dockerfile (passed via `-f`). */
   readonly dockerfilePath: string;
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -156,6 +157,7 @@ export function buildSpawnImage(input: BuildSpawnImageInput): string {
         // does not trigger the same ENOBUFS path.
         stdio: ["ignore", "ignore", "pipe"],
         maxBuffer: DOCKER_STDERR_MAX_BUFFER,
+        ...(input.timeoutMs !== undefined && { timeout: input.timeoutMs, killSignal: "SIGKILL" }),
       },
     );
   } catch (err) {

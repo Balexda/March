@@ -322,7 +322,12 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
     if (s.recoveryRung !== undefined) slice.recovery_rung = s.recoveryRung;
     // Restore the Hatchery job id so a slice still in `hatchery-pending` after a
     // restart can be polled to completion (otherwise the completion poll skips it).
-    if (s.jobId) slice.hatchery = { job_id: s.jobId, backend: "codex" };
+    if (s.jobId) slice.hatchery = {
+      job_id: s.jobId, backend: "codex",
+      ...(s.spawnId && { spawn_id: s.spawnId }),
+      ...(s.attemptId && { attempt_id: s.attemptId, steward_deadline: s.stewardDeadline }),
+    };
+    if (s.integrationFailure) slice.integration_outcome = s.integrationFailure;
     slices[sliceId] = slice;
   }
   return {
@@ -382,7 +387,15 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
   const requeueRequests: RequeueRequest[] = [];
   const mergeRequests: MergeRequest[] = [];
   const relaunchRequests: { sliceId: string; seq: number }[] = [];
+  let rebuilt: ReturnType<typeof rebuildWorkingState> | undefined;
   for (const [sliceId, s] of Object.entries(sys.slices)) {
+    // A lost Herald acknowledgement can leave a durable dispatch whose POST
+    // was never sent. Recover its deadline in the warm loop as on cold start.
+    if (s.attemptId && s.stage === "hatchery-pending" &&
+        slices[sliceId]?.hatchery?.attempt_id !== s.attemptId) {
+      rebuilt ??= rebuildWorkingState(sys, deps.meta);
+      if (rebuilt.slices[sliceId]) slices[sliceId] = rebuilt.slices[sliceId];
+    }
     // Operator requeue (#588/#593): read straight off the fold every tick — it is
     // durable until the legate's rung-3 tombstone or `slice.requeue.refused`
     // clears it, so warm ticks and a cold start see the same pending set.
