@@ -47,6 +47,7 @@
 
   - Orchestration distinguishes incomplete work, terminal success, and terminal failure. Existing retry and escalation policy receives the stable failure reason. Report a persistence failure through the job result when the durable write is unavailable.
   - Persist a lookup from the dispatch attempt to the actual integration spawn, including resumed publication. Legate can recover that result if its first poll arrives after job expiry or a Hatchery restart. A prior attempt’s result cannot complete the pending dispatch.
+  - Handle an unrecoverable persistence failure. This applies when the job result is gone and Brood has neither the lookup nor an outcome for the attempt. Once the attempt's Steward deadline has passed, Legate records a terminal `persistence` failure for the dispatch as a Herald transition event. That event is the durable record orchestration reads, and it routes through the existing retry and escalation policy. A late Brood write from that attempt cannot reopen the dispatch.
   - Verify success and failure through the worker, job API, and orchestration read paths without reading container logs or Steward output. Update affected subsystem contracts.
 
 **PR Outcome**: Legate and Herald can retrieve terminal integration status and available PR and commit identifiers from structured state.
