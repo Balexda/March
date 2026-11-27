@@ -117,7 +117,10 @@ export function addBranchVariants(branches: Set<string>, value: unknown): void {
  * `<repo-parent>/WorkTrees/<repo-name>/feature-<branch with / → ->`. Recorded
  * facts win (`actual_branch` from the PR head, `worktree_path` from the
  * session); the derivation covers a slice whose spawn failed before either was
- * recorded — exactly the orphan a requeue/relaunch must still reach. Pure.
+ * recorded. The derived `worktreePath` is a naming convention, NOT proof of
+ * ownership (`a/b` and `a-b` map to the same directory): never hand it to a
+ * destructive teardown — resolve the checkout from git's branch→worktree
+ * records instead (requeue does). Pure.
  */
 export function managerWorkspace(
   slice: any,

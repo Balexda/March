@@ -175,7 +175,7 @@ describe("requeue apply", () => {
     expect(res.actions[0].detail).toMatch(/closed PR #7; deleted remote branch feature\/b/);
   });
 
-  it("failed spawn (no session, worktree or PR recorded): reclaims agent-deck's real feature/ branch + derived worktree", async () => {
+  it("failed spawn (no session, worktree or PR recorded): reclaims agent-deck's real feature/ branch + git's worktree for it", async () => {
     // The branch_collision incident: the fold kept only the symbolic dispatch
     // branch, so the old handler registered `smithy/forge/x` with no worktree and
     // Brood "tore down" a branch that never existed — the orphan survived.
@@ -185,8 +185,10 @@ describe("requeue apply", () => {
       requeueRequests: [req("x")],
     });
     const c = ctx();
-    const d = deps();
+    const findWorktreeForBranch = vi.fn().mockReturnValue("/home/u/Dev/WorkTrees/March/feature-smithy-forge-x");
+    const d = deps({ findWorktreeForBranch });
     const res = await apply(assess(state), c, state, d);
+    expect(findWorktreeForBranch).toHaveBeenCalledWith("/home/u/Dev/March", "feature/smithy/forge/x");
     expect(c.broodRegister).toHaveBeenCalledWith(
       expect.objectContaining({
         repoPath: "/home/u/Dev/March",
@@ -196,6 +198,21 @@ describe("requeue apply", () => {
     );
     expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/home/u/Dev/March", "feature/smithy/forge/x", "x");
     expect(res.actions[0]).toMatchObject({ action: "requeue-done" });
+  });
+
+  it("never registers a name-derived worktree: no git record for the branch means branch-only teardown", async () => {
+    // `smithy/forge/a/b` and `smithy/forge/a-b` derive the same directory; Brood
+    // force-removes what it is given, so a guess could delete another checkout.
+    const state = loopState({
+      repoPath: "/home/u/Dev/March",
+      raw: { slices: { x: { stage: "escalated", branch: "smithy/forge/a/b" } } },
+      requeueRequests: [req("x")],
+    });
+    const c = ctx();
+    await apply(assess(state), c, state, deps({ findWorktreeForBranch: vi.fn().mockReturnValue(undefined) }));
+    const registered = (c.broodRegister as any).mock.calls[0][0];
+    expect(registered).toMatchObject({ branch: "feature/smithy/forge/a/b" });
+    expect(registered.worktreePath).toBeUndefined();
   });
 
   it("refusal clears the request and records it", async () => {
