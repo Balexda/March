@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Publish the versioned package entrypoint**
+- [x] **Publish the versioned package entrypoint**
 
   Wire `@balexda/march/modules/v0` into the package export map and existing build and package flow. Export the contract version independently of the npm package version (AS 1.1).
 
@@ -26,7 +26,7 @@
   - The normal build produces an ESM entry and TypeScript declarations included in the packed package. The CLI binary remains usable.
   - The entrypoint exports the contract version, and the packed package resolves the subpath.
 
-- [ ] **Declare the module roles and facets**
+- [x] **Declare the module roles and facets**
 
   Define the Herald observe and Legate act interfaces from the companion contracts. Expose the signal and step vocabulary declarations used by those signatures through the public entrypoint (AS 1.1).
 
@@ -35,7 +35,7 @@
   - Act outputs are declarative. Context provides scoped inputs and optional steward metadata where applicable, with no write-capable GitHub or git client or credential.
   - The owning subsystem contract reference documents the surface introduced in this slice.
 
-- [ ] **Model canonical kinds and work entry**
+- [x] **Model canonical kinds and work entry**
 
   Define work identity, destination binding and stages from the companion data model. Expose Smithy alias resolution on the public boundary (AS 1.2, AS 1.3).
 
@@ -43,14 +43,14 @@
   - Each specified bare Smithy verb resolves to its corresponding `smithy/<verb>` kind. Other producer-namespaced kinds retain their namespace.
   - A work item identifies its current producer, canonical kind, origin, destination, entry stage and one close-out owner. An existing Dependabot PR can enter at land with its artifact and no steward.
 
-- [ ] **Preserve ownership across handoffs**
+- [x] **Preserve ownership across handoffs**
 
   Define the handoff proposal and successor contract for producer changes. Use the predecessor as the source of origin and close-out ownership (AS 1.3).
 
   _Acceptance criteria:_
   - A triage-to-Smithy handoff correlates to the predecessor, uses a kind declared by the receiving producer, and preserves the issue origin, sole close-out owner and record of participating producers.
 
-- [ ] **Expose correlated outcome reports**
+- [x] **Expose correlated outcome reports**
 
   Define the landed and close-out reports used by the act facets. Represent landing, close-out and failure diagnostics as contract values (AS 1.4).
 
@@ -58,7 +58,7 @@
   - Both reports correlate by item ID. A landed report identifies the destination and landed artifact. A close-out report identifies the origin, owner and outcome.
   - Close-out failure carries a diagnostic, and replay can represent an already-completed origin.
 
-- [ ] **Verify the packed contract from both consumers**
+- [x] **Verify the packed contract from both consumers**
 
   Exercise the completed public surface from an in-tree consumer and from a separate consumer installed from the packed tarball (AS 1.1).
 
