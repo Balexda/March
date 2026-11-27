@@ -101,3 +101,5 @@ Specs and feature maps that explicitly invoke this philosophy:
 - `specs/2026-11-25-019-sticky-triage-notes/sticky-triage-notes.spec.md` — FR-004. Applies rule 3 (clean exits): malformed or ambiguous March-owned triage notes surface as explicit failures with no proposed change.
 
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
+
+- `specs/2026-11-27-020-published-work-module-contract/published-work-module-contract.spec.md` — FR-004 and FR-005 apply the three rules through needs-human escalation, core-owned write access, and diagnostic outcomes.

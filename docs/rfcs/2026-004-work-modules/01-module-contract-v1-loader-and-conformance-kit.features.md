@@ -93,7 +93,7 @@ _No unresolved specification debt remains._
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| F1 | Published Work Module Contract | — | — |
+| F1 | Published Work Module Contract | — | specs/2026-11-27-020-published-work-module-contract/ |
 | F2 | Module Loading and Startup Compatibility | F1 | — |
 | F3 | Profile Module Bindings and Known Kinds | F2 | — |
 | F4 | Module Author Conformance Kit | F2, F3 | — |
