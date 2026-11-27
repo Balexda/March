@@ -6,6 +6,7 @@ export interface CheckSignal<Category extends "not-possible" | "not-permitted" |
   readonly category: Category;
   readonly kind: Category extends "user-check" ? "user" : "platform";
   readonly status: CheckStatus;
+  readonly reason?: Category extends "not-possible" ? "conflict" | "moved-base" : never;
   readonly reference?: string;
 }
 

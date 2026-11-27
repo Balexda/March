@@ -1,6 +1,18 @@
-import { deepStrictEqual, equal, throws } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, throws } from "node:assert/strict";
 import {
   WORK_MODULE_CONTRACT_VERSION,
+  STEP_CLASSES,
+  arbitrateSignals,
+  closeOutFailure,
+  evaluateModuleIntent,
+  landedRecipients,
+  rankSignals,
+  recoveryFailure,
+  signalReportMatches,
+  type BoundedActionContext,
+  type Intent,
+  type ResponseContext,
+  type SignalSet,
   createHandoffSuccessor,
   resolveWorkKind,
   type CloseOutReport,
@@ -147,5 +159,176 @@ equal(failure.itemId, replay.itemId);
 // @ts-expect-error A close-out failure requires a diagnostic.
 const invalidFailure: CloseOutReport = { ...outcome, outcome: "failed" };
 void invalidFailure;
+
+const item = {
+  ...successor,
+  entryStage: "land",
+  artifact,
+  destination: { ...destination, moduleId: "github-repo" },
+} satisfies WorkItem;
+const clear: SignalSet = { ...signals, itemId: item.id, destination: item.destination };
+const gateBlocked: SignalSet = {
+  ...clear,
+  checks: { ...clear.checks, notPermitted: { ...clear.checks.notPermitted, status: "failed" } },
+};
+equal(signalReportMatches(item, clear), true);
+equal(signalReportMatches(item, { ...clear, itemId: "other" }), false);
+equal(signalReportMatches(item, { ...clear, destination }), false);
+// @ts-expect-error A destination report requires both platform checks.
+equal(signalReportMatches(item, { ...clear, checks: { notPossible: clear.checks.notPossible, user: [] } }), false);
+deepStrictEqual(rankSignals(clear), []);
+deepStrictEqual(rankSignals(gateBlocked).map(signal => signal.category), ["not-permitted"]);
+
+const simultaneous: SignalSet = {
+  ...gateBlocked,
+  checks: {
+    ...gateBlocked.checks,
+    notPossible: { ...clear.checks.notPossible, status: "failed", reason: "moved-base" },
+    user: [{ kind: "user", category: "user-check", status: "failed", reference: "opaque" }],
+  },
+  comments: [
+    { category: "conversation-comment", reference: "2", body: "Follow up" },
+    { category: "review-thread", reference: "1", body: "Changes needed" },
+  ],
+  approvals: [{ state: "pending", reference: "opaque" }],
+};
+deepStrictEqual(rankSignals(simultaneous).map(signal => signal.category), [
+  "not-possible", "review-thread", "user-check", "conversation-comment", "not-permitted",
+]);
+
+const head = { branch: "dependency-update", sha: "a".repeat(40) };
+const recovery = {
+  itemId: item.id,
+  step: "recover-github-pr-conflict",
+  inputs: { pr: artifact, headBranch: head.branch, expectedHead: head.sha },
+} satisfies Intent;
+const recoveryResponder = {
+  kind: item.kind,
+  category: "not-possible",
+  respond: () => recovery,
+} satisfies ResponderRegistration;
+const acted = new Set<string>();
+const withSteward = { ...item, steward: { sessionId: "session-1" } };
+equal(arbitrateSignals(withSteward, simultaneous, [responder], acted).status, "needs-human");
+equal(arbitrateSignals(withSteward, simultaneous, [recoveryResponder], acted).status, "respond");
+equal(arbitrateSignals(withSteward, simultaneous, [recoveryResponder], acted).status, "deferred");
+const landEntryDecision = arbitrateSignals(item, simultaneous, [recoveryResponder], acted);
+ok(landEntryDecision.status === "respond" && landEntryDecision.responder.category === "not-possible"
+  && landEntryDecision.signal.category === "not-possible");
+deepStrictEqual(await landEntryDecision.responder.respond({ item, signal: landEntryDecision.signal }), recovery);
+
+const moduleContext: ResponseContext = { item, signal: simultaneous.checks.notPossible };
+// @ts-expect-error Module contexts carry no GitHub write client.
+equal(moduleContext.github, undefined);
+// @ts-expect-error Module contexts carry no Git credentials.
+equal(moduleContext.gitCredentials, undefined);
+
+const destinationRequest: BoundedActionContext = {
+  item,
+  signals: clear,
+  requester: { capability: "destination", moduleId: item.destination.moduleId },
+  policy: { land: true, closeOut: true },
+};
+const landIntent = {
+  itemId: item.id,
+  step: "land-artifact",
+  inputs: { destination: item.destination, artifact },
+} satisfies Intent;
+equal(evaluateModuleIntent(landIntent, destinationRequest).status, "eligible");
+equal(evaluateModuleIntent(landIntent, { ...destinationRequest, signals: gateBlocked }).status, "needs-human");
+equal(evaluateModuleIntent(landIntent, { ...destinationRequest, policy: undefined }).status, "needs-human");
+
+const confirmed = { itemId: item.id, destination: item.destination, artifact };
+deepStrictEqual(landedRecipients(item, confirmed), ["triage", "intake", "smithy"]);
+deepStrictEqual(landedRecipients(item, { ...confirmed, itemId: "other" }), []);
+const closeContext: BoundedActionContext = {
+  ...destinationRequest,
+  requester: { capability: "origin-owner", moduleId: item.closeOutOwner },
+  originLanding: { report: confirmed, closeOutAttempted: false },
+};
+const close = {
+  itemId: item.id,
+  step: "close-out-origin",
+  inputs: { origin: item.origin, landed: confirmed },
+} satisfies Intent;
+equal(evaluateModuleIntent(close, closeContext).status, "eligible");
+equal(evaluateModuleIntent(close, {
+  ...closeContext, requester: { capability: "origin-owner", moduleId: "smithy" },
+}).status, "needs-human");
+equal(evaluateModuleIntent(close, {
+  ...closeContext, originLanding: { report: confirmed, closeOutAttempted: true },
+}).status, "needs-human");
+
+const later = { ...item, id: "later", artifact: { ...artifact, id: "example/repo#43" } };
+equal(evaluateModuleIntent({
+  ...close, itemId: later.id, inputs: { ...close.inputs, landed: { ...confirmed, itemId: later.id, artifact: later.artifact } },
+}, { ...closeContext, item: later }).status, "needs-human");
+for (const evidence of [{ verdict: "accepted" }, { approvals: [{ state: "approved" }] }]) {
+  equal(evaluateModuleIntent({
+    ...close, inputs: { origin: item.origin, landed: evidence },
+  }, { ...closeContext, originLanding: undefined }).status, "needs-human");
+}
+
+const recoveryContext: BoundedActionContext = {
+  item,
+  signals: simultaneous,
+  requester: { capability: "responder", moduleId: item.producer },
+  githubHead: head,
+};
+const recoveryDecision = evaluateModuleIntent(recovery, recoveryContext);
+ok(recoveryDecision.status === "eligible");
+equal(recoveryDecision.stepClass, "bounded-recovery");
+equal(evaluateModuleIntent(recovery, {
+  ...recoveryContext, signals: { ...simultaneous, checks: {
+    ...simultaneous.checks, notPossible: { ...simultaneous.checks.notPossible, reason: "conflict" },
+  } },
+}).status, "eligible");
+for (const input of [
+  { ...recovery.inputs, pr: { ...artifact, id: "example/repo#99" } },
+  { ...recovery.inputs, headBranch: "main" },
+  { pr: artifact, headBranch: head.branch },
+  { ...recovery.inputs, expectedHead: "b".repeat(40) },
+]) {
+  equal(evaluateModuleIntent({ ...recovery, inputs: input }, recoveryContext).status, "needs-human");
+}
+equal(evaluateModuleIntent(recovery, { ...recoveryContext, signals: gateBlocked }).status, "needs-human");
+equal(evaluateModuleIntent(recovery, {
+  ...recoveryContext, signals: { ...simultaneous, checks: {
+    ...simultaneous.checks, notPossible: { ...simultaneous.checks.notPossible, reason: undefined },
+  } },
+}).status, "needs-human");
+equal(evaluateModuleIntent(recovery, {
+  ...recoveryContext, item: { ...item, destination }, signals: { ...simultaneous, destination },
+}).status, "needs-human");
+
+const remediation = { itemId: item.id, step: "remediate", inputs: { instructions: "Fix CI" } } satisfies Intent;
+equal(evaluateModuleIntent(remediation, recoveryContext).status, "eligible");
+equal(evaluateModuleIntent(remediation, destinationRequest).status, "needs-human");
+equal(evaluateModuleIntent({ ...remediation, itemId: "other" }, recoveryContext).status, "needs-human");
+for (const [step, inputs] of [
+  ["delete-branch", { branch: head.branch }],
+  ["delete-worktree", { path: "/tmp/worktree" }],
+  ["teardown", {}],
+  ["command", { command: "git branch -D branch" }],
+  ["callback", { callback: () => undefined }],
+  ["remediate", { ...remediation.inputs, callback: () => undefined }],
+] as const) {
+  equal(evaluateModuleIntent({ itemId: item.id, step, inputs }, recoveryContext).status, "needs-human");
+}
+equal(STEP_CLASSES["delete-branch"], "destructive");
+equal(STEP_CLASSES["delete-worktree"], "destructive");
+equal(STEP_CLASSES.teardown, "destructive");
+
+const failedRecovery = recoveryFailure(item, { code: "lease-rejected", message: "Head moved" });
+const rejectedRecovery = evaluateModuleIntent({ ...recovery, inputs: {} }, recoveryContext);
+const failedCloseOut = closeOutFailure({ ...failure, itemId: item.id });
+equal(failedRecovery.status, "needs-human");
+ok(rejectedRecovery.status === "needs-human");
+equal(rejectedRecovery.diagnostic.code, "ineligible-intent");
+equal(failedCloseOut?.status, "needs-human");
+equal(failedCloseOut?.diagnostic.code, failure.diagnostic.code);
+equal(failedRecovery.traceId, recoveryDecision.traceId);
+equal(rejectedRecovery.traceId, recoveryDecision.traceId);
+equal(failedCloseOut?.traceId, recoveryDecision.traceId);
 
 console.log(contractVersion);

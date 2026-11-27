@@ -6,6 +6,8 @@ import type { ActionableSignal, Intent, ModuleStep, SignalSet } from "./vocabula
 
 export * from "./work.js";
 export type * from "./vocabulary.js";
+export { arbitrateSignals, rankSignals, signalReportMatches, type SignalDecision } from "./signals.js";
+export * from "./eligibility.js";
 
 export const WORK_MODULE_CONTRACT_VERSION = "0.1.0";
 

@@ -31,12 +31,60 @@ Smithy verbs to their `smithy/` kinds. `createHandoffSuccessor` checks the
 predecessor and receiving producer declaration, then carries the origin,
 close-out owner and producer history into the successor.
 
-`SignalSet` carries both platform checks alongside user checks, review threads,
-conversation comments and approvals. `Intent` discriminates step-specific
-inputs. Module facets can request only their declared subset of steps.
-`LandedReport` correlates the item, destination and artifact. `CloseOutReport`
-correlates the item, origin and owner with a closed, already-completed or
-failed outcome. A failure includes a diagnostic.
+### Destination signals
+
+Report a `SignalSet` for the item and its bound destination. Both platform
+checks are required. Use empty arrays for unsupported user checks, comments
+or approvals. Empty groups pass. Approval state feeds the destination's
+*not permitted* merge gate, which can still fail with no approvals reported.
+
+| Priority | Actionable signal |
+|----------|-------------------|
+| 1 | Failed platform *not possible* check, including a conflict or moved base |
+| 2 | Unresolved review thread |
+| 3 | Failed user check |
+| 4 | Actionable conversation comment |
+| 5 | Failed platform *not permitted* check |
+
+`arbitrateSignals` selects the highest-priority signal by category and matches
+the item's canonical kind and signal category against registered responders.
+Entries within a category retain report order. Core reserves at most one
+response per steward session per tick. An actionable signal without a matching
+responder yields `needs-human`. A matching responder can propose an intent
+for a land-entry item with no steward.
+
+### Bounded action requests
+
+Core validates an intent's requesting facet, item and target, and derives
+its class from the step discriminator using `STEP_CLASSES`. Core executes
+eligible intents. The module receives scoped data and supplies only declarative
+inputs. Module commands, callbacks, git or GitHub write clients and credentials
+are outside the contract.
+
+| Class | Steps |
+|-------|-------|
+| Non-destructive | `implement`, `remediate`, `request-review`, `update-labels`, `write-feedback` |
+| Bounded recovery | `recover-github-pr-conflict` |
+| Policy-controlled land | `land-artifact` |
+| Policy-controlled close-out | `close-out-origin` |
+| Destructive, core-owned | `delete-branch`, `delete-worktree`, `teardown` |
+
+Destination policy is resolved for the bound repository or board and work
+kind. It can authorize landing when the scoped checks pass and actionable
+comments are clear. Upon confirmed landing, core delivers the correlated
+`LandedReport` to the sole origin owner and all participating producers.
+With close-out enabled, only that owner may request close-out, using the
+confirmed report for the first qualifying artifact of that origin. Core
+reserves close-out once per origin. A verdict or approval alone supplies
+no landing evidence. A failed close-out yields `needs-human` and a diagnostic
+on the item's deterministic trace.
+
+Automatic GitHub conflict recovery requires the built-in `github-repo`
+destination, a failed *not possible* check for a conflict or moved base, and
+a request targeting the item's own PR and current head branch. The expected
+head SHA must match core's current observation and must be enforced as a
+lease at execution. A rejection or execution failure carries a diagnostic on
+the same deterministic item trace.
 
 Run `npm run test:work-module-package` to type-check and exercise representative
 consumers from the checkout and a separate npm tarball installation.
