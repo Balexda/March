@@ -81,9 +81,25 @@ jobs:
       id-token: write
 
     steps:
+    # Pin the release to the branch tip at the moment Release was pressed
+    # (github.sha, when dispatched from that branch) so a merge that lands
+    # while `validate` runs isn't picked up. To release an exact set of
+    # changes, dispatch with `branch` set to a validation branch.
+    # Expression `==` ignores case, so compare in bash (case-sensitive).
+    - name: Resolve release ref
+      id: ref
+      env:
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        if [[ "$GITHUB_REF" == "refs/heads/$BRANCH" ]]; then
+          echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+        else
+          echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+        fi
+
     - uses: actions/checkout@v7
       with:
-        ref: ${{ inputs.branch }}
+        ref: ${{ steps.ref.outputs.ref }}
         ssh-key: ${{ secrets.DEPLOY_KEY }}
 
     - name: Setup Node.js
@@ -99,7 +115,7 @@ jobs:
       run: npm run build
 
     - name: Typecheck
-      run: npx tsc --noEmit
+      run: npm run typecheck
 
     - name: Test
       run: npm test
@@ -109,18 +125,63 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
 
-    - name: Bump version
+    # The release is the commit checked out above (pinned at dispatch) plus a
+    # version bump, and nothing else: the tag always points at the tree this
+    # job built and tested. If the branch moved meanwhile (a PR merged after
+    # dispatch), the branch is linear-history + squash-only, so instead of
+    # merging we push a separate version-bump commit onto the new tip so the
+    # next release bumps from the right version. That commit carries only
+    # package.json/package-lock.json version fields, never code, so it needs
+    # no rebuild. The tag then sits on a commit beside the branch, not on it.
+    - name: Bump version, push commit and tag
       id: version
       env:
         BUMP: ${{ inputs.bump }}
+        BRANCH: ${{ inputs.branch }}
       run: |
+        PINNED="$(git rev-parse HEAD)"
+        FROM_VERSION="$(node -p 'require("./package.json").version')"
         npm version "$BUMP" -m "release: v%s"
-        echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+        VERSION="$(node -p 'require("./package.json").version')"
+        TAG="v$VERSION"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-    - name: Push version commit and tag
-      run: |
-        git push origin "HEAD:refs/heads/${{ inputs.branch }}"
-        git push origin "v${{ steps.version.outputs.version }}"
+        if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+          echo "::error::Tag $TAG already exists on origin; delete it or bump differently."
+          exit 1
+        fi
+
+        # Fast path: the branch hasn't moved, so tag and bump land on it together.
+        if git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"; then
+          exit 0
+        fi
+
+        for attempt in 1 2 3; do
+          git fetch origin "$BRANCH"
+          TIP="$(git rev-parse FETCH_HEAD)"
+          if [[ "$TIP" == "$PINNED" ]]; then
+            echo "::error::Push was rejected but $BRANCH has not moved; see the push error above."
+            exit 1
+          fi
+          TIP_VERSION="$(git show "$TIP:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0)).version')"
+          if [[ "$TIP_VERSION" != "$FROM_VERSION" ]]; then
+            echo "::error::$BRANCH is now at version $TIP_VERSION (expected $FROM_VERSION); another release landed."
+            exit 1
+          fi
+          echo "::notice::$BRANCH moved past the pinned commit ${PINNED:0:8}; tagging $TAG on the pinned commit and pushing only the version bump onto $BRANCH."
+          git log --oneline "$PINNED..$TIP"
+          git checkout --quiet --detach "$TIP"
+          npm version "$VERSION" --no-git-tag-version
+          git commit --quiet -am "release: $TAG"
+          if git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"; then
+            # Back to the pinned release tree so later steps (npm publish
+            # packs src/templates, docker) never see the newer tip's files.
+            git checkout --quiet "refs/tags/$TAG"
+            exit 0
+          fi
+        done
+        echo "::error::$BRANCH kept moving; gave up pushing the version bump after 3 attempts."
+        exit 1
 
     # A draft: the repo has immutable releases, so once published nothing can
     # be attached. The `images` job adds march-stack.json to the draft and
