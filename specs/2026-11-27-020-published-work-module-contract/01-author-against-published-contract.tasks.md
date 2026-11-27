@@ -24,7 +24,7 @@
 
   _Acceptance criteria:_
   - The normal build produces an ESM entry and TypeScript declarations included in the packed package. The CLI binary remains usable.
-  - An in-tree consumer and a separate consumer installed from the tarball resolve the same subpath, observe the same contract version and type-check representative producers, destinations and responders using only that public import.
+  - The entrypoint exports the contract version, and the packed package resolves the subpath.
 
 - [ ] **Declare the module roles and facets**
 
@@ -57,6 +57,14 @@
   _Acceptance criteria:_
   - Both reports correlate by item ID. A landed report identifies the destination and landed artifact. A close-out report identifies the origin, owner and outcome.
   - Close-out failure carries a diagnostic, and replay can represent an already-completed origin.
+
+- [ ] **Verify the packed contract from both consumers**
+
+  Exercise the completed public surface from an in-tree consumer and from a separate consumer installed from the packed tarball (AS 1.1).
+
+  _Acceptance criteria:_
+  - Both consumers resolve the same subpath and observe the same contract version.
+  - Both type-check representative producers, destinations and responders using only the public import.
 
 **PR Outcome**: Authors can use the packed contract to declare modules, express Smithy and Dependabot work, preserve ownership across handoffs and consume correlated outcomes.
 
