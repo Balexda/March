@@ -340,7 +340,7 @@ it("publishes after the exact pushed commit receives its Castra review receipt",
     expect(payload.body).toContain("new file.txt");
     return Response.json({
       state: "open", number: 42, html_url: `https://github.com/${repo}/pull/42`,
-      head: { ref: pushedBranch, repo: { full_name: repo } },
+      head: { ref: pushedBranch, sha: publishedCommit, repo: { full_name: repo } },
       base: { ref: "release", repo: { full_name: repo } },
     }, { status: 201 });
   });

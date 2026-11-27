@@ -1,5 +1,5 @@
 /**
- * @l1
+ * @l0
  * @deterministic
  * @ci
  */
@@ -12,9 +12,10 @@ const commit = {
   patchSha256: "b".repeat(64), committedAt: "2026-05-24T00:00:00Z",
 };
 const metadata = { title: "Review spawn", body: "## Summary\n\n## Validation" };
-const pull = (number: number, base = "main", state = "open", source = repository, target = repository) => ({
+const pull = (number: number, base = "main", state = "open", source = repository, target = repository,
+  sha = commit.commitSha) => ({
   number, state, html_url: `https://github.com/${repository}/pull/${number}`,
-  head: { ref: commit.branch, repo: { full_name: source } },
+  head: { ref: commit.branch, sha, repo: { full_name: source } },
   base: { ref: base, repo: { full_name: target } },
 });
 
@@ -23,6 +24,7 @@ function api(options: {
   next?: ReturnType<typeof pull>[];
   defaultBranch?: string;
   branches?: string[];
+  redirects?: string[];
   create?: () => Response | Promise<Response>;
   lookup?: () => Response;
 } = {}) {
@@ -43,6 +45,10 @@ function api(options: {
     if (url.pathname === prefix) return Response.json({ default_branch: options.defaultBranch ?? "main" });
     const branches = options.branches ?? ["main"];
     const branch = decodeURIComponent(url.pathname.slice((prefix + "/branches/").length));
+    if (options.redirects?.includes(branch)) {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 301, headers: { location: "https://api.github.com/elsewhere" } });
+    }
     return branches.includes(branch) ? Response.json({ name: branch }) : new Response(null, { status: 404 });
   });
   const token = vi.fn(async () => "isolated-test-token");
@@ -89,7 +95,7 @@ describe("Steward PR publication", () => {
   it("prefers a base match across pages and ignores foreign repositories and non-exact refs", async () => {
     const upstream = api({ open: [
       pull(8, "main", "open", "fork/project"), pull(9, "main", "open", repository, "other/project"),
-      { ...pull(10), head: { ref: commit.branch + "-extra", repo: { full_name: repository } } },
+      { ...pull(10), head: { ref: commit.branch + "-extra", sha: commit.commitSha, repo: { full_name: repository } } },
       pull(11, "other"),
     ], next: [pull(12)] });
     const review = vi.fn(async () => metadata);
@@ -106,6 +112,22 @@ describe("Steward PR publication", () => {
       status: "failed", failureReason: "base_mismatch", existingPullRequest: { number: 8, baseBranch: "other" },
     });
     expect(upstream.create).not.toHaveBeenCalled();
+  });
+
+  it("treats a redirected configured base as absent and falls back to the default", async () => {
+    const upstream = api({ redirects: ["master"] });
+    await expect(upstream.publish("master")).resolves.toMatchObject({
+      status: "succeeded", pullRequest: { number: 1, baseBranch: "main" },
+    });
+  });
+
+  it.each([
+    ["reused before review", { open: [pull(8, "main", "open", repository, repository, "c".repeat(40))] }],
+    ["created", { create: () => Response.json(pull(1, "main", "open", repository, repository, "c".repeat(40)),
+      { status: 201 }) }],
+  ])("does not report success when the PR head is not the reviewed commit (%s)", async (_, options) => {
+    const upstream = api(options);
+    await expect(upstream.publish()).resolves.toMatchObject({ status: "failed", failureReason: "head_mismatch" });
   });
 
   it.each([{ open: [] }, { open: [pull(8, "other")] }])("handles an unresolved base with or without a matching PR (%j)", async ({ open }) => {

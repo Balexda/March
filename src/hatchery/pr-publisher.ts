@@ -17,7 +17,7 @@ export interface PullRequestRecord {
   readonly observedAt: string;
 }
 
-type FailureReason = "base_unresolved" | "base_mismatch" | "unauthorized" | "forbidden" |
+type FailureReason = "base_unresolved" | "base_mismatch" | "head_mismatch" | "unauthorized" | "forbidden" |
   "network" | "timeout" | "publication_failed" | "review_failed" | "unsupported_origin";
 
 export type PullRequestPublication =
@@ -28,6 +28,7 @@ export type PullRequestPublication =
 const diagnostics: Record<FailureReason, string> = {
   base_unresolved: "Could not resolve a GitHub base branch.",
   base_mismatch: "An open pull request targets a different base branch.",
+  head_mismatch: "The open pull request head is not the reviewed commit.",
   unauthorized: "Steward authentication failed.",
   forbidden: "Steward permission to publish was denied.",
   network: "The publication service could not be reached.",
@@ -117,7 +118,7 @@ interface GitHubPull {
   html_url?: string;
   state?: string;
   created_at?: string;
-  head?: { ref?: string; repo?: { full_name?: string } | null };
+  head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null };
   base?: { ref?: string; repo?: { full_name?: string } | null };
 }
 
@@ -155,7 +156,10 @@ export async function openOrReusePullRequest(input: {
     })();
     token = await getToken(false);
 
-    async function request(resource: string, body?: object, deadline?: AbortSignal): Promise<{ value: unknown; hasNext?: boolean }> {
+    // `probe` requests treat a redirect (for example a renamed branch) as
+    // absence of the exact resource. Redirects are never followed, so the
+    // token is never forwarded to another location.
+    async function request(resource: string, body?: object, deadline?: AbortSignal, probe = false): Promise<{ value: unknown; hasNext?: boolean }> {
       const timeout = AbortSignal.timeout(10_000);
       const signal = deadline ? AbortSignal.any([timeout, deadline]) : timeout;
       let response: Response;
@@ -165,7 +169,7 @@ export async function openOrReusePullRequest(input: {
           headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json",
             ...(body && { "content-type": "application/json" }) },
           body: body && JSON.stringify(body),
-          redirect: "error",
+          redirect: probe ? "manual" : "error",
           signal,
         });
         if (response.ok) {
@@ -179,8 +183,9 @@ export async function openOrReusePullRequest(input: {
       if (response.status === 401 && !refreshed) {
         refreshed = true;
         token = await getToken(true);
-        return request(resource, body, deadline);
+        return request(resource, body, deadline, probe);
       }
+      if (probe && response.status >= 300 && response.status < 400) return { value: undefined };
       if (response.status === 404 && !body) return { value: undefined };
       if (response.status === 401) throw new GitHubFailure("unauthorized");
       if (response.status === 403) throw new GitHubFailure("forbidden");
@@ -188,7 +193,8 @@ export async function openOrReusePullRequest(input: {
       throw new GitHubFailure(response.status >= 500 ? "network" : "publication_failed");
     }
 
-    const match = (value: unknown): PullRequestRecord | undefined => {
+    type Matched = { record: PullRequestRecord; headSha?: string };
+    const match = (value: unknown): Matched | undefined => {
       const pr = value as GitHubPull | null;
       if (pr?.state !== "open" || pr.head?.ref !== commit.branch ||
         typeof pr.head.repo?.full_name !== "string" || pr.head.repo.full_name.toLowerCase() !== repository.toLowerCase() ||
@@ -197,17 +203,17 @@ export async function openOrReusePullRequest(input: {
         !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
         typeof pr.html_url !== "string" ||
         pr.html_url.toLowerCase() !== `https://github.com/${repository}/pull/${pr.number}`.toLowerCase()) return;
-      return {
+      return { headSha: typeof pr.head.sha === "string" ? pr.head.sha.toLowerCase() : undefined, record: {
         provider: "github", repository, number: pr.number, url: pr.html_url, headBranch: commit.branch,
         baseBranch: pr.base.ref, state: "open", observedAt: new Date().toISOString(),
         ...(typeof pr.created_at === "string" && { createdAt: pr.created_at }),
-      };
+      } };
     };
     const head = `${repository.split("/")[0]}:${commit.branch}`;
     const query = new URLSearchParams({ state: "open", head, per_page: "100" });
     const lookup = () => phase("steward.pr.lookup", async () => {
       const deadline = AbortSignal.timeout(15_000);
-      const records: PullRequestRecord[] = [];
+      const records: Matched[] = [];
       for (let page = 1; page <= 10; page++) {
         query.set("page", String(page));
         const result = await request(`/pulls?${query}`, undefined, deadline);
@@ -221,7 +227,8 @@ export async function openOrReusePullRequest(input: {
       throw new GitHubFailure("publication_failed");
     });
     const branchExists = async (branch: string) => {
-      const result = (await request(`/branches/${encodeURIComponent(branch)}`)).value as { name?: unknown } | undefined;
+      const result = (await request(`/branches/${encodeURIComponent(branch)}`, undefined, undefined, true)).value as
+        { name?: unknown } | undefined;
       return result?.name === branch;
     };
     const existing = await lookup();
@@ -232,11 +239,16 @@ export async function openOrReusePullRequest(input: {
       base = typeof defaultBranch === "string" && defaultBranch && defaultBranch !== base &&
         await branchExists(defaultBranch) ? defaultBranch : undefined;
     }
-    if (!base) return failed("base_unresolved", existing[0]);
-    const compare = (records: PullRequestRecord[]): PullRequestPublication | undefined => {
-      const sameBase = records.find((record) => record.baseBranch === base);
-      if (sameBase) return { status: "succeeded", pullRequest: sameBase };
-      if (records.length) return failed("base_mismatch", records[0]);
+    if (!base) return failed("base_unresolved", existing[0]?.record);
+    // Success requires the PR head to be the exact reviewed commit; a branch
+    // advanced by another writer must not be reported as this publication.
+    const reviewedSha = commit.commitSha.toLowerCase();
+    const compare = (records: Matched[]): PullRequestPublication | undefined => {
+      const sameBase = records.filter(({ record }) => record.baseBranch === base);
+      const current = sameBase.find(({ headSha }) => headSha === reviewedSha);
+      if (current) return { status: "succeeded", pullRequest: current.record };
+      if (sameBase.length) return failed("head_mismatch", sameBase[0].record);
+      if (records.length) return failed("base_mismatch", records[0].record);
     };
     const reused = compare(existing);
     if (reused) return reused;
@@ -250,8 +262,8 @@ export async function openOrReusePullRequest(input: {
     try {
       return await phase("steward.pr.create", async () => {
         const created = match((await request("/pulls", { ...metadata, head, base })).value);
-        const result = compare(created ? [created] : []);
-        if (result?.status === "succeeded") return result;
+        const result = created && compare([created]);
+        if (result) return result;
         throw new GitHubFailure("publication_failed");
       });
     } catch (error) {

@@ -214,6 +214,7 @@ and a bounded `diagnostic`. Base failures can include `existingPullRequest`.
 | Existing open PR | Reused record | Match the target repository, source repository, exact head, and resolved base. |
 | Existing closed PR only | New PR | Attempt creation after resolving the base and obtaining metadata. |
 | Open PR has a different base | `base_mismatch` | Return the mismatched record when no open PR matches the resolved base. |
+| Open PR head is not the reviewed commit | `head_mismatch` | Return the stale record. Never report it as a successful publication. |
 | Base branch unknown | `base_unresolved` | Return any matched open PR for context. Skip creation. |
 | GitHub auth or permission failure | `unauthorized` or `forbidden` | Return a bounded failure. |
 | GitHub network failure or timeout | `network` or `timeout` | Recheck for an exact open PR if creation may have succeeded. |

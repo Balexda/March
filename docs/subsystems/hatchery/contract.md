@@ -140,7 +140,9 @@ A successful push records the branch as the checkout's upstream and binds PR
 publication to that same GitHub origin. Hatchery reuses an open PR only when
 both repositories, the exact source branch and the resolved base match. A
 different base yields `base_mismatch`, while an unresolved base yields
-`base_unresolved`. Closed PRs do not block a fresh PR. A fresh PR requires a
+`base_unresolved`. A matched PR whose head is not the reviewed commit yields
+`head_mismatch`, never success. A configured base that redirects (renamed
+branch) is treated as absent, so the repository default is used. Closed PRs do not block a fresh PR. A fresh PR requires a
 bounded review receipt from the Castra Steward. Hatchery uses validated spawn
 facts and receipt status for the body, and rechecks the exact open PR identity
 after an ambiguous creation response. The result reports PR failure even
