@@ -6,6 +6,7 @@ import path from "node:path";
 import { emitSpawnLog } from "../observability/logs.js";
 import { TesseraClient } from "../tessera/client.js";
 import { hatcheryGitEnv, resolveHatcheryOrigin, runScopedNetworkGit } from "./github-read.js";
+import { fetchDuringStewardAttempt, stewardTimeRemaining } from "./integration-deadline.js";
 import type { StewardHandoffInput } from "./spawn-handoff.js";
 
 export interface IntegrationCommit {
@@ -50,7 +51,7 @@ function git(cwd: string, args: string[], options?: { index?: string; input?: st
   const output = execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     cwd, env, input: options?.input, encoding: "utf-8",
     stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-    maxBuffer: 1024 * 1024, timeout: 5_000, killSignal: "SIGKILL",
+    maxBuffer: 1024 * 1024, timeout: stewardTimeRemaining(5_000), killSignal: "SIGKILL",
   });
   return options?.raw ? output : output.trimEnd();
 }
@@ -242,7 +243,7 @@ export async function pushIntegrationCommit(
       ? fs.readFileSync(path.join(options.homeDir ?? os.homedir(), ".march", "steward", "tessera-client-key"), "utf8").trim()
       : undefined;
     if (origin.repo && !clientKey) throw new Error("steward_key_missing");
-    const client = new TesseraClient({ clientKey, env: { MARCH_TESSERA_URL: process.env.MARCH_TESSERA_URL } });
+    const client = new TesseraClient({ fetchImpl: fetchDuringStewardAttempt, clientKey, env: { MARCH_TESSERA_URL: process.env.MARCH_TESSERA_URL } });
     const request = origin.repo
       ? { identity: "app", access: "write", repo: origin.repo, sliceId: options.sliceId } as const
       : undefined;

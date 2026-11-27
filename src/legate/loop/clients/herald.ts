@@ -44,6 +44,7 @@ export type TransitionEvent = Extract<
   {
     type:
       | "slice.dispatched"
+      | "slice.integration.failed"
       | "slice.stage.changed"
       | "slice.archived"
       | "slice.recovery.dispatched"

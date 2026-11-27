@@ -51,6 +51,13 @@ describe("adopt-from-fold assess", () => {
     expect(assess(s)).toEqual([{ sliceId: "esc", pr: PR }]);
   });
 
+  it("keeps a failed integration eligible for retry even when Herald observes a PR on the branch", () => {
+    expect(assess(loopState({ s: {
+      stage: "escalated", pr: PR, hatchery: { attempt_id: "attempt" },
+      integration_outcome: { status: "failed", failureReason: "persistence" },
+    } }))).toEqual([]);
+  });
+
   it("does not select: no PR / closed PR / implementing / recovered / archived / already pr-open", () => {
     expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: null } }))).toEqual([]);
     expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: { number: 1, state: "CLOSED" } } }))).toEqual([]);

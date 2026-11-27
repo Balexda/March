@@ -73,6 +73,16 @@ describe("HeraldClient", () => {
     expect(fetchImpl.mock.calls[1][0]).toBe("http://herald/state/delta?from=1&to=3");
   });
 
+  it("reads a profile-scoped integration result and preserves unavailable reads as errors", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(200, { outcome: null }))
+      .mockResolvedValueOnce(jsonResponse(503, { error: "Brood integration outcome unavailable." }));
+    const client = new HeraldClient({ baseUrl: "http://herald", fetchImpl });
+    await expect(client.integrationOutcome("slice/1", "profile 2")).resolves.toBeNull();
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://herald/state/integration/slice%2F1?profile=profile+2");
+    await expect(client.integrationOutcome("slice/1")).rejects.toThrow("Brood integration outcome unavailable.");
+  });
+
   it("propagates the traceparent header when provided", async () => {
     const fetchImpl = vi.fn(async (..._args: unknown[]) => jsonResponse(200, { events: [], lastSeq: 0 }));
     const client = new HeraldClient({

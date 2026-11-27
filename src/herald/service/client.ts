@@ -1,4 +1,6 @@
+import { parseIntegrationOutcome } from "../../brood/service/integration.js";
 import { heraldPort } from "../config.js";
+import type { PrIntegrationResult } from "../../brood/service/types.js";
 import type { MultiStateProjection, StateProjection } from "./state-projection.js";
 import type { HeraldEvent } from "../events.js";
 import type { AdminEventRequest } from "./admin.js";
@@ -222,6 +224,20 @@ export class HeraldClient {
       throw new HeraldClientError(bodyError(body, `herald GET /state failed (${status})`));
     }
     return body as StateProjection;
+  }
+
+  /** Read the current dispatch attempt's outcome, or null while none exists. */
+  async integrationOutcome(sliceId: string, profile?: string): Promise<PrIntegrationResult | null> {
+    const query = profile === undefined ? "" : `?${new URLSearchParams({ profile })}`;
+    const { status, body } = await this.request("GET", `/state/integration/${encodeURIComponent(sliceId)}${query}`);
+    if (status !== 200) {
+      throw new HeraldClientError(bodyError(body, `herald integration outcome read failed (${status})`));
+    }
+    const raw = (body as { outcome?: unknown } | null)?.outcome;
+    if (raw === null) return null;
+    const outcome = parseIntegrationOutcome(raw);
+    if (!outcome) throw new HeraldClientError("Invalid integration outcome response from Herald.");
+    return outcome;
   }
 
   /** The full multi-profile projection (or, with `at`, as of a seq). The legate's

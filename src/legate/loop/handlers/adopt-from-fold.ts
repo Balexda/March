@@ -1,3 +1,4 @@
+import { awaitingSuccessfulIntegration } from "../pure/slice.js";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 
@@ -41,7 +42,7 @@ export function assess(state: LoopState): AdoptFromFoldDecision[] {
   const out: AdoptFromFoldDecision[] = [];
   const slices = state.slices && typeof state.slices === "object" ? state.slices : {};
   for (const [sliceId, slice] of Object.entries(slices) as [string, any][]) {
-    if (!slice || typeof slice !== "object") continue;
+    if (!slice || typeof slice !== "object" || awaitingSuccessfulIntegration(slice)) continue;
     if (slice.archived || slice.recovered) continue;
     if (slice.stage !== "escalated") continue;
     // Operator-ATTENTION escalations (steward parked awaiting input / stuck) are

@@ -81,7 +81,7 @@ import {
   recordSpawnTokens,
   type SpawnFailureStage,
 } from "../observability/spawn-metrics.js";
-import { classifyAgentFailure, parseTokenUsage } from "../observability/agent-output.js";
+import { classifyAgentFailure, parseTokenUsage, type AgentFailureReason } from "../observability/agent-output.js";
 import {
   classifyBranchSafety,
   describeVerdict,
@@ -100,7 +100,10 @@ import {
   DEFAULT_MANAGER_GROUP,
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
-import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+import { registerStewardLaunchWithBrood, registerStewardRelaunchWithBrood } from "./service/brood-registration.js";
+import type { PrIntegrationResult } from "../brood/service/types.js";
+import { IntegrationAttempt, IntegrationOutcomeError } from "./integration-outcome.js";
+import { attemptDeadlineSignal, stewardDeadlineExpired, stewardOperationSignal, stewardTimeRemaining, withStewardDeadline } from "./integration-deadline.js";
 import { BroodWorkspaceReclaimingError } from "../brood/service/client.js";
 import { publishStewardAttachedToHerald } from "./service/herald-registration.js";
 
@@ -140,6 +143,8 @@ export interface HatcherySpawnOptions {
   readonly taskName?: string;
   /** Dispatch slice id; hashed into the trace id so all spans share one trace. */
   readonly sliceId?: string;
+  readonly attemptId?: string;
+  readonly stewardDeadline?: string;
   /**
    * Per-profile worker toolchain override (issue #287). `auto`/undefined →
    * auto-detect the stack from the snapshot's marker files; an explicit value
@@ -221,6 +226,7 @@ export interface HatcherySpawnResult {
   readonly application: PatchApplicationResult;
   readonly commit: IntegrationCommit;
   readonly pullRequestPublication?: PullRequestPublication;
+  readonly integrationOutcome?: Extract<PrIntegrationResult, { status: "succeeded" }>;
 }
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
@@ -408,9 +414,13 @@ async function resumePreservedPublication(input: {
   readonly sliceId: string;
   readonly dispatch: DispatchTrace;
   readonly castra: CastraClient;
+  readonly attempt?: IntegrationAttempt;
+  readonly title: string;
+  readonly group: string;
 }): Promise<HatcherySpawnResult | undefined> {
   type Preserved = {
     readonly spawnId: string;
+    readonly branch: string;
     readonly sessionId: string;
     readonly worktreePath: string;
     readonly target: AuthorizedStewardTarget;
@@ -422,7 +432,7 @@ async function resumePreservedPublication(input: {
   const sameWork = (recorded: AdmittedWork | undefined) =>
     !!recorded && recorded.sliceId === expected.sliceId &&
     recorded.promptSha256 === expected.promptSha256 && recorded.backend === expected.backend;
-  const locate = (candidate: string): Preserved | undefined => {
+  const locate = async (candidate: string): Promise<Preserved | undefined> => {
     const worktreePath = findWorktreePathForBranch(input.repoPath, candidate);
     if (!worktreePath) return undefined;
     const body = stewardGit(input.repoPath, "show", "-s", "--format=%B", "refs/heads/" + candidate);
@@ -431,29 +441,49 @@ async function resumePreservedPublication(input: {
     const record = loadSpawnRecord(spawnId, input.homeDir);
     if (!record || record.integrationBranch !== candidate || !record.stewardSessionId) return undefined;
     if (!sameWork(record.admittedWork)) return undefined;
-    const eligibility = evaluateStewardHandoffEligibility({ spawnId, homeDir: input.homeDir });
-    if (!eligibility.eligible) return undefined;
-    const target = resolveStewardTarget({
-      spawnId, repoPath: input.repoPath, managerWorktreePath: worktreePath, homeDir: input.homeDir,
-    });
-    const commit = findIntegrationCommit(target, eligibility.handoff);
-    if (!commit) return undefined;
-    return { spawnId, sessionId: record.stewardSessionId, worktreePath, target, handoff: eligibility.handoff, commit };
+    if (input.attempt) {
+      input.attempt.artifacts = { stewardSessionId: record.stewardSessionId, worktreePath, artifactsDir: hatcherySpawnLogDir(spawnId, input.homeDir) };
+      await input.attempt.bind(spawnId);
+      await input.attempt.requireLifecycle(input.backend);
+    }
+    const eligibility = evaluateStewardHandoffEligibility({ spawnId, homeDir: input.homeDir, dispatch: input.dispatch });
+    if (!eligibility.eligible) return input.attempt?.fail("extraction_rejected");
+    try {
+      const target = resolveStewardTarget({
+        spawnId, repoPath: input.repoPath, managerWorktreePath: worktreePath, homeDir: input.homeDir,
+      });
+      const commit = findIntegrationCommit(target, eligibility.handoff);
+      if (commit) {
+        return { spawnId, branch: candidate, sessionId: record.stewardSessionId, worktreePath, target, handoff: eligibility.handoff, commit };
+      }
+    } catch (error) {
+      if (!input.attempt) throw error;
+      return input.attempt.fail(stewardDeadlineExpired() || gitTimedOut(error) ? "timeout" : "commit_failed");
+    }
+    return input.attempt?.fail("commit_failed");
   };
   const candidates = [...new Set([orphanManagerBranch(input.branch), input.branch])];
   let preserved: Preserved | undefined;
   for (const candidate of candidates) {
     try {
-      preserved = locate(candidate);
-    } catch {
+      preserved = await locate(candidate);
+    } catch (error) {
+      if (input.attempt?.isBound() || error instanceof IntegrationOutcomeError || stewardDeadlineExpired()) throw error;
       preserved = undefined;
     }
     if (preserved) break;
   }
   if (!preserved) return undefined;
-  const { spawnId, sessionId, worktreePath, target, handoff } = preserved;
+  const { spawnId, worktreePath, target, handoff } = preserved;
   input.dispatch.setAttributes({ "march.resumed_spawn_id": spawnId });
+  const sessionId = await input.dispatch.spanAsync("steward.resume.session", () =>
+    ensureResumeSteward(input, preserved));
 
+  const application = {
+    spawnId, status: "applied" as const, touchedPaths: [...new Set(handoff.touchedPaths)].sort(),
+    appliedAt: preserved.commit.committedAt,
+  };
+  if (input.attempt) Object.assign(input.attempt.artifacts, { application, commit: preserved.commit });
   let repository: string | undefined;
   const commit = await input.dispatch.spanAsync("steward.push", async (span) => {
     span.setAttributes({
@@ -475,9 +505,11 @@ async function resumePreservedPublication(input: {
     managerPromptPath: path.join(dir, "manager-prompt.md"),
     metadataPath: path.join(dir, "metadata.json"),
   };
+  if (input.attempt) Object.assign(input.attempt.artifacts, { commit });
   const pullRequestPublication = await reviewAndPublish({
     ...input, commit, repository, handoff, sessionId, artifacts,
   });
+  const integrationOutcome = await finalizePublication(input.attempt, application, commit, pullRequestPublication);
   let metadata: { managerSession?: Partial<AgentDeckManagerSession>; exitCode?: unknown } = {};
   try {
     metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf8"));
@@ -497,14 +529,10 @@ async function resumePreservedPublication(input: {
     branch: input.branch,
     managerSession,
     artifacts,
-    application: {
-      spawnId,
-      status: "applied",
-      touchedPaths: [...new Set(handoff.touchedPaths)].sort(),
-      appliedAt: preserved.commit.committedAt,
-    },
+    application,
     commit,
     pullRequestPublication,
+    integrationOutcome,
     exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : 0,
     summary: [
       `Hatchery resumed publication for spawn ${spawnId} and handed off to manager session ${sessionId}.`,
@@ -1060,6 +1088,28 @@ function publicationSummary(result: PullRequestPublication): string {
     : `PR publication failed (${result.failureReason}). ${result.diagnostic}`;
 }
 
+async function finalizePublication(
+  attempt: IntegrationAttempt | undefined,
+  application: PatchApplicationResult,
+  commit: IntegrationCommit,
+  publication: PullRequestPublication,
+): Promise<HatcherySpawnResult["integrationOutcome"]> {
+  if (!attempt) return;
+  if (publication.status === "failed") {
+    Object.assign(attempt.artifacts, { pullRequest: publication.existingPullRequest });
+    return attempt.fail(publication.failureReason === "timeout" || stewardDeadlineExpired() ? "timeout" : "pr_failed");
+  }
+  return attempt.succeed(application, commit, publication.pullRequest);
+}
+
+async function stopTimedOutSteward(
+  castra: CastraClient, dispatch: DispatchTrace, sessionId: string, profile: string, traceKey: string,
+): Promise<void> {
+  await dispatch.spanAsync("steward.timeout.stop", () => castra.removeSession({
+    sessionId, profile, pruneWorktree: false, traceKey, signal: AbortSignal.timeout(20_000),
+  })).catch(() => {});
+}
+
 async function reviewAndPublish(input: {
   commit: IntegrationCommit;
   repository?: string;
@@ -1091,6 +1141,7 @@ async function reviewAndPublish(input: {
       fs.writeFileSync(artifacts.managerPromptPath, managerPrompt, "utf8");
       return sendPromptToAgentDeckManager({
         sessionId: input.sessionId, prompt: managerPrompt, profile: input.profile, traceKey: input.traceKey,
+        signal: attemptDeadlineSignal(),
       }, input.castra);
     });
     const review = async (): Promise<PullRequestMetadata | "review_failed" | "timeout"> => {
@@ -1099,7 +1150,7 @@ async function reviewAndPublish(input: {
       } catch {
         return "review_failed";
       }
-      const signal = AbortSignal.timeout(300_000);
+      const signal = stewardOperationSignal(300_000);
       const receipt = new RegExp(`^REVIEW ${reviewId} (passed|unavailable|failed|steering)$`);
       try {
         while (!signal.aborted) {
@@ -1206,12 +1257,19 @@ export async function launchAgentDeckManager(
     readonly traceKey?: string;
     /** Dispatch slice id, stamped into the session's queryable metadata (#214). */
     readonly sliceId?: string;
+    /** Steward deadline; aborts the launch in addition to Castra's own budget. */
+    readonly signal?: AbortSignal;
+    /** Integration attempt id, stamped into the session metadata. */
+    readonly attemptId?: string;
+    /** False attaches to the existing branch checkout instead of creating it. */
+    readonly createBranch?: boolean;
   },
   castra: CastraClient = createCastraClientFromEnv(),
 ): Promise<AgentDeckManagerSession> {
   let session;
   try {
     session = await castra.launchSession({
+      signal: input.signal,
       profile: input.profile,
       repoPath: input.repoPath,
       branch: input.branch,
@@ -1219,14 +1277,24 @@ export async function launchAgentDeckManager(
       group: input.group,
       model: DEFAULT_MANAGER_MODEL,
       traceKey: input.traceKey,
+      ...(input.createBranch === false && { createBranch: false }),
       // Self-describe the session so Herald's pull path can reconcile it to its
       // slice by exact id, not the brittle worktree/title heuristic (#214).
       metadata: {
         spawnId: input.spawnId,
         ...(input.sliceId ? { sliceId: input.sliceId } : {}),
+        // Lets Legate find this attempt's session exactly when Hatchery never
+        // learned it, for example after a lost launch acknowledgement.
+        ...(input.attemptId ? { attemptId: input.attemptId } : {}),
       },
     });
   } catch (err) {
+    if (input.signal?.aborted) {
+      // Castra may still finish a launch the deadline aborted. Report any such
+      // session so the caller's timeout path can stop it.
+      const created = await findLaunchedManager(castra, input).catch(() => undefined);
+      if (created) throw new ManagerLaunchAbortedError(created);
+    }
     throw new HatcherySpawnError(
       `Castra session launch failed: ${
         err instanceof CastraClientError || err instanceof Error
@@ -1242,6 +1310,93 @@ export async function launchAgentDeckManager(
     );
   }
 
+  return {
+    sessionId: session.sessionId,
+    title: session.title || input.title,
+    group: session.group || input.group,
+    branch: session.branch || input.branch,
+    worktreePath: session.worktreePath,
+  };
+}
+
+/**
+ * Return a live Steward session for a preserved checkout. A timed-out attempt
+ * removes its Steward but keeps the checkout, so attach a new session to it
+ * and record that session in place of the removed one.
+ */
+async function ensureResumeSteward(
+  input: {
+    readonly repoPath: string; readonly homeDir?: string; readonly profile: string; readonly traceKey: string;
+    readonly sliceId: string; readonly castra: CastraClient; readonly attempt?: IntegrationAttempt;
+    readonly title: string; readonly group: string; readonly backend: string;
+  },
+  preserved: { readonly spawnId: string; readonly branch: string; readonly sessionId: string; readonly worktreePath: string },
+): Promise<string> {
+  const sessions = await input.castra.listSessions(input.profile, undefined, stewardOperationSignal(LAUNCH_RECONCILE_TIMEOUT_MS));
+  if (sessions.some((session) => session.sessionId === preserved.sessionId)) return preserved.sessionId;
+  const manager = await launchAgentDeckManager({
+    repoPath: input.repoPath,
+    spawnId: preserved.spawnId,
+    branch: preserved.branch,
+    title: input.title,
+    group: input.group,
+    profile: input.profile,
+    traceKey: input.traceKey,
+    sliceId: input.sliceId || undefined,
+    attemptId: input.attempt?.attemptId,
+    createBranch: false,
+    signal: attemptDeadlineSignal(),
+  }, input.castra);
+  updateSpawnRecordStewardSession(preserved.spawnId, manager.sessionId, input.homeDir);
+  if (input.attempt) Object.assign(input.attempt.artifacts, { stewardSessionId: manager.sessionId });
+  // A refused registration leaves the new Steward untracked; stop it but keep
+  // the preserved checkout so a later attempt can still resume it.
+  await registerStewardRelaunchWithBrood({
+    spawnId: preserved.spawnId,
+    stewardSessionId: manager.sessionId,
+    repoPath: input.repoPath,
+    branch: preserved.branch,
+    worktreePath: manager.worktreePath,
+    backend: input.backend,
+    profile: input.profile,
+    group: input.group,
+  }, { client: input.attempt?.client }).catch(async (error: unknown) => {
+    await input.castra.removeSession({
+      profile: input.profile, sessionId: manager.sessionId, pruneWorktree: false, traceKey: input.traceKey,
+      signal: stewardOperationSignal(LAUNCH_RECONCILE_TIMEOUT_MS),
+    }).catch(() => undefined);
+    throw error;
+  });
+  return manager.sessionId;
+}
+
+/** Keep the apply or publication details of `cause` on an outcome error. */
+function withErrorDetails(error: unknown, cause: unknown): unknown {
+  if (!(error instanceof IntegrationOutcomeError)) return error;
+  if (cause instanceof StewardApplyError) return error.withDetails({ application: cause.application });
+  if (cause instanceof IntegrationPublicationError) return error.withDetails({ publication: cause.publication });
+  return error;
+}
+
+/** A deadline aborted the launch after Castra had created the session. */
+export class ManagerLaunchAbortedError extends HatcherySpawnError {
+  constructor(readonly manager: AgentDeckManagerSession) {
+    super("Castra session launch exceeded the Steward deadline.");
+    this.name = "ManagerLaunchAbortedError";
+  }
+}
+
+const LAUNCH_RECONCILE_TIMEOUT_MS = 10_000;
+
+async function findLaunchedManager(
+  castra: CastraClient,
+  input: { readonly spawnId: string; readonly profile: string; readonly group: string; readonly title: string; readonly branch: string },
+): Promise<AgentDeckManagerSession | undefined> {
+  const sessions = await castra.listSessions(
+    input.profile, input.group, AbortSignal.timeout(LAUNCH_RECONCILE_TIMEOUT_MS),
+  );
+  const session = sessions.find((candidate) => candidate.metadata?.spawnId === input.spawnId);
+  if (!session) return undefined;
   return {
     sessionId: session.sessionId,
     title: session.title || input.title,
@@ -1277,6 +1432,7 @@ export async function sendPromptToAgentDeckManager(
     readonly prompt: string;
     readonly profile: string;
     readonly traceKey?: string;
+    readonly signal?: AbortSignal;
   },
   castra: CastraClient = createCastraClientFromEnv(),
 ): Promise<void> {
@@ -1286,6 +1442,7 @@ export async function sendPromptToAgentDeckManager(
       sessionId: input.sessionId,
       prompt: input.prompt,
       traceKey: input.traceKey,
+      signal: input.signal,
     });
   } catch (err) {
     throw new HatcherySpawnError(
@@ -1497,13 +1654,7 @@ function worktreeGitToplevel(cwd: string): string | undefined {
 function assertBranchOwnedWorktree(worktreePath: string): void {
   let branch = "";
   try {
-    branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: worktreePath,
-      env: hatcheryGitEnv(),
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: EXEC_MAX_BUFFER,
-    }).trim();
+    branch = stewardGit(worktreePath, "rev-parse", "--abbrev-ref", "HEAD").trim();
   } catch (err) {
     throw new HatcherySpawnError(
       `git apply --index aborted: manager worktree at ${worktreePath} is not a readable git worktree. ${
@@ -1529,7 +1680,7 @@ function runGitApply(args: string[], cwd: string, input?: string): void {
     input,
     stdio: [input === undefined ? "ignore" : "pipe", "ignore", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
-    timeout: 5_000,
+    timeout: stewardTimeRemaining(5_000),
     killSignal: "SIGKILL",
   });
 }
@@ -1541,7 +1692,7 @@ function stewardGit(cwd: string, ...args: string[]): string {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
-    timeout: 5_000,
+    timeout: stewardTimeRemaining(5_000),
     killSignal: "SIGKILL",
   });
 }
@@ -1708,7 +1859,7 @@ function runGitQuiet(args: readonly string[], cwd: string): void {
     env: hatcheryGitEnv(),
     stdio: ["ignore", "ignore", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
-    timeout: 5_000,
+    timeout: stewardTimeRemaining(5_000),
     killSignal: "SIGKILL",
   });
 }
@@ -1721,7 +1872,7 @@ function runGitCapture(args: readonly string[], cwd: string): string {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
-    timeout: 5_000,
+    timeout: stewardTimeRemaining(5_000),
     killSignal: "SIGKILL",
   }).trim();
 }
@@ -1865,9 +2016,11 @@ export function validateHatcherySpawnBackend(backend: SpawnBackend): void {
   }
 }
 
-export async function runHatcherySpawn(
-  input: HatcherySpawnOptions,
-): Promise<HatcherySpawnResult> {
+export function runHatcherySpawn(input: HatcherySpawnOptions): Promise<HatcherySpawnResult> {
+  return withStewardDeadline(input.stewardDeadline, () => executeHatcherySpawn(input));
+}
+
+async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<HatcherySpawnResult> {
   validateHatcherySpawnBackend(input.backend);
 
   const spawnId = generateSpawnId();
@@ -1901,7 +2054,11 @@ export async function runHatcherySpawn(
       "march.spawn_id": spawnId,
     },
   });
+  const attempt = input.attemptId && input.stewardDeadline
+    ? new IntegrationAttempt(input.attemptId, input.stewardDeadline, spawnId, dispatch, traceKey)
+    : undefined;
   let exitCode: number | undefined;
+  let agentFailureReason: AgentFailureReason = "none";
 
   let manager: AgentDeckManagerSession | undefined;
   let integrationBranch = orphanManagerBranch(branch);
@@ -1921,21 +2078,32 @@ export async function runHatcherySpawn(
   // recorded on success.
   let stage: SpawnFailureStage = "manager_launch";
   try {
-    manager = await dispatch.spanAsync("manager.launch", () =>
-      launchAgentDeckManager(
-        {
-          repoPath: input.repoPath,
-          spawnId,
-          branch,
-          title,
-          group,
-          profile: agentDeckProfile,
-          traceKey,
-          sliceId: sliceId || undefined,
-        },
-        castra,
-      ),
-    );
+    stewardTimeRemaining(1);
+    try {
+      manager = await dispatch.spanAsync("manager.launch", () =>
+        launchAgentDeckManager(
+          {
+            repoPath: input.repoPath,
+            spawnId,
+            branch,
+            title,
+            group,
+            profile: agentDeckProfile,
+            traceKey,
+            sliceId: sliceId || undefined,
+            attemptId: input.attemptId,
+            signal: attemptDeadlineSignal(),
+          },
+          castra,
+        ),
+      );
+    } catch (error) {
+      // Track a session created after the deadline so the timeout path stops it.
+      if (error instanceof ManagerLaunchAbortedError) manager = error.manager;
+      throw error;
+    }
+    // A launch that returns after the deadline must not start further work.
+    stewardTimeRemaining(1);
 
     const spawnPrompt = buildSpawnCommitPrompt(input.prompt);
     stage = "record_init";
@@ -1946,6 +2114,10 @@ export async function runHatcherySpawn(
       spawnId, repoPath: input.repoPath, managerWorktreePath: manager.worktreePath, homeDir: input.homeDir,
     };
     stewardTarget = recordedTarget;
+    if (attempt) {
+      attempt.artifacts = { stewardSessionId: manager.sessionId, worktreePath: manager.worktreePath };
+      await attempt.bind(spawnId);
+    }
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
@@ -1966,8 +2138,8 @@ export async function runHatcherySpawn(
     // in-process cleanup is best-effort and can be skipped (Castra unreachable,
     // worker killed, crash). The launch-time row makes the steward Brood-trackable
     // so ghost-cleanup can reclaim it instead of deferring on a "registration gap".
-    // Best-effort and MARCH_BROOD_URL-gated: a missing/unreachable registry never
-    // fails the dispatch. The onSucceeded hook later enriches this row. The
+    // The writer is best-effort and the managed integration gate below verifies
+    // the resulting lifecycle row. The onSucceeded hook later enriches it. The
     // exception is Brood refusing the row because it is reclaiming this group's
     // workspace: that throws, and the rollback below removes the steward session
     // and worktree instead of leaving it running unregistered (#717 review).
@@ -1984,8 +2156,10 @@ export async function runHatcherySpawn(
         backend: input.backend.name,
         profile: agentDeckProfile,
         group,
-      }),
+      }, { client: attempt?.client }),
     );
+
+    await attempt?.requireLifecycle(input.backend.name);
 
     // Pin the worker's base to the up-to-date default branch (#460). agent-deck
     // cut this worktree from a stale local base and never fetched; pinning it to
@@ -2060,6 +2234,7 @@ export async function runHatcherySpawn(
           spawnId,
           contextPath: handle.contextPath,
           dockerfilePath,
+          ...(attempt && { timeoutMs: stewardTimeRemaining(2_147_483_647) }),
         });
         updateSpawnRecordImageId(spawnId, imageTag, input.homeDir);
       } finally {
@@ -2068,6 +2243,7 @@ export async function runHatcherySpawn(
     });
 
     stage = "container_run";
+    stewardTimeRemaining(1);
     dispatch.span("spawn.start", () => {
       const otelCtx = buildSpawnOtelContext({
         traceparent: dispatch.traceparent(),
@@ -2081,19 +2257,21 @@ export async function runHatcherySpawn(
           "march.slice_id": sliceId,
         },
       });
+      const remaining = () => attempt ? stewardTimeRemaining(60_000) : undefined;
       containerId = createSpawnContainer({
         spawnId,
         backend: input.backend,
         otel: otelCtx,
+        ...(attempt && { timeoutMs: remaining() }),
       });
-      copyPromptToContainer(containerId, spawnPrompt);
-      if (otelCtx) copyOtelEmitterToContainer(containerId);
-      startSpawnContainer(containerId);
+      copyPromptToContainer(containerId, spawnPrompt, remaining());
+      if (otelCtx) copyOtelEmitterToContainer(containerId, remaining());
+      startSpawnContainer(containerId, remaining());
       markSpawnRecordRunning(spawnId, containerId, input.homeDir);
     });
 
     const waitResult = dispatch.span("spawn.end", () => {
-      const r = waitForSpawnContainer(containerId!);
+      const r = waitForSpawnContainer(containerId!, attempt ? stewardTimeRemaining(2_147_483_647) : undefined);
       logs = readSpawnContainerLogs(containerId!);
       markSpawnRecordStopped(spawnId, r.exitCode, input.homeDir);
       return r;
@@ -2108,7 +2286,7 @@ export async function runHatcherySpawn(
     // first-class alarm (march_spawn_agent_failures_total{reason}) and stamps
     // the reason into the dispatch detail so the legate's circuit-breaker can
     // read it. A clean run classifies as "none" and falls through.
-    const agentFailureReason = classifyAgentFailure(logs);
+    agentFailureReason = classifyAgentFailure(logs);
     if (agentFailureReason !== "none") {
       const managerPrompt = buildManagerPrompt({
         operatorPrompt: input.prompt,
@@ -2156,6 +2334,7 @@ export async function runHatcherySpawn(
     // Patch extraction persists the backend-neutral result. Handoff eligibility
     // below consumes that persisted contract instead of scraping logs again.
     stage = "patch_extract";
+    stewardTimeRemaining(1);
     try {
       const patch = extractPatchFromSpawnOutput(logs);
       updateSpawnRecordExtractionResult(
@@ -2210,6 +2389,13 @@ export async function runHatcherySpawn(
       dispatch,
     });
     if (!eligibility.eligible) {
+      if (attempt) {
+        const artifacts = createHatcherySpawnArtifacts({
+          spawnId, homeDir: input.homeDir, spawnOutput: logs, patch: "", managerPrompt: "",
+          metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
+        });
+        Object.assign(attempt.artifacts, { artifactsDir: artifacts.dir });
+      }
       throw new HatcherySpawnError(eligibility.diagnostic);
     }
 
@@ -2229,6 +2415,7 @@ export async function runHatcherySpawn(
         eligibility.handoff,
       ),
     });
+    if (attempt) Object.assign(attempt.artifacts, { artifactsDir: artifacts.dir });
     stage = "integration_commit";
     const managerWorktreePath = manager.worktreePath;
     const { touchedPaths, patchText } = eligibility.handoff;
@@ -2296,9 +2483,11 @@ export async function runHatcherySpawn(
         throw error;
       }
     });
+    if (attempt) Object.assign(attempt.artifacts, { application });
     stage = "integration_commit";
     integrationCommit = recovered ?? commitPhase("steward.commit", (target) => createIntegrationCommit(target, handoff));
     const localCommit = integrationCommit;
+    if (attempt) Object.assign(attempt.artifacts, { commit: localCommit });
     stage = "integration_push";
     let repository: string | undefined;
     const commit = await dispatch.spanAsync("steward.push", async (span) => {
@@ -2314,11 +2503,13 @@ export async function runHatcherySpawn(
         homeDir: input.homeDir, sliceId, onPushed: (repo) => { repository = repo; },
       });
     });
+    if (attempt) Object.assign(attempt.artifacts, { commit });
     stage = "steward_send";
     const pullRequestPublication = await reviewAndPublish({
       ...input, commit, repository, handoff, sessionId: stewardSessionId, artifacts,
       profile: agentDeckProfile, traceKey, sliceId, dispatch, castra,
     });
+    const integrationOutcome = await finalizePublication(attempt, application, commit, pullRequestPublication);
     handedOff = true;
 
     return {
@@ -2330,6 +2521,7 @@ export async function runHatcherySpawn(
       application,
       commit,
       pullRequestPublication,
+      integrationOutcome,
       exitCode: waitResult.exitCode,
       summary: [
         `Hatchery spawn ${spawnId} handed off to manager session ${manager.sessionId}.`,
@@ -2358,8 +2550,20 @@ export async function runHatcherySpawn(
         sliceId,
         dispatch,
         castra,
-      }).catch((resumeError: unknown) => {
+        attempt,
+        title,
+        group,
+      }).catch(async (resumeError: unknown) => {
         dispatch.recordException(resumeError);
+        if ((stewardDeadlineExpired() || attempt?.timedOut) && attempt?.artifacts.stewardSessionId) {
+          await stopTimedOutSteward(castra, dispatch, attempt.artifacts.stewardSessionId, agentDeckProfile, traceKey);
+        }
+        if (resumeError instanceof IntegrationOutcomeError) throw resumeError;
+        if (attempt) {
+          return attempt.fail(stewardDeadlineExpired() ? "timeout" :
+            resumeError instanceof IntegrationPublicationError ? resumeError.publication.failureReason : "pr_failed")
+            .catch((error: unknown) => { throw withErrorDetails(error, resumeError); });
+        }
         if (resumeError instanceof IntegrationPublicationError) throw resumeError;
         stage = "steward_send";
         throw new HatcherySpawnError((resumeError as Error).message);
@@ -2370,7 +2574,29 @@ export async function runHatcherySpawn(
       }
       stage = "manager_launch";
     }
-    dispatch.recordException(err);
+    let terminalError: IntegrationOutcomeError | undefined;
+    if (attempt) {
+      if (err instanceof StewardApplyError) Object.assign(attempt.artifacts, { application: err.application });
+      const artifactsDir = hatcherySpawnLogDir(spawnId, input.homeDir);
+      if (fs.existsSync(artifactsDir)) Object.assign(attempt.artifacts, { artifactsDir });
+      if (err instanceof IntegrationOutcomeError) terminalError = err;
+      else {
+        const timeout = agentFailureReason === "timeout" || stewardDeadlineExpired() || gitTimedOut(err) ||
+          (err instanceof LaunchError && /timed out/.test(err.message)) ||
+          (err instanceof StewardApplyError && err.application.diagnostic === "timeout");
+        const reason = timeout ? "timeout" : err instanceof StewardApplyError ? "patch_conflict" :
+          err instanceof IntegrationPublicationError ? err.publication.failureReason :
+          stage === "steward_send" ? "pr_failed" : "extraction_rejected";
+        try {
+          if (!attempt.isBound()) await attempt.bind(spawnId);
+          await attempt.fail(reason);
+        } catch (error) {
+          if (!(error instanceof IntegrationOutcomeError)) throw error;
+          terminalError = error;
+        }
+      }
+    }
+    dispatch.recordException(terminalError ?? err);
     if (!(err instanceof HatcherySpawnError) || err instanceof StewardApplyError) {
       try {
         markSpawnRecordFailed(spawnId, { error: (err as Error).message }, input.homeDir);
@@ -2387,7 +2613,11 @@ export async function runHatcherySpawn(
     // was authorized, and a rejected target stays outside the rollback path.
     const rollbackAuthorized = !integrationCommit && (err instanceof StewardApplyError ? err.targetAuthorized : true) &&
       canAuthorizeRollback(stewardTarget, integrationBranch);
-    const mgr = rollbackAuthorized ? manager : undefined;
+    const timedOut = attempt && (stewardDeadlineExpired() || attempt.timedOut || terminalError?.outcome.failureReason === "timeout");
+    const mgr = rollbackAuthorized && !timedOut ? manager : undefined;
+    if (timedOut && manager) {
+      await stopTimedOutSteward(castra, dispatch, manager.sessionId, agentDeckProfile, traceKey);
+    }
     // #243: `manager.launch` failed because the dispatch branch already exists.
     // `mgr` is undefined, so the `mgr && !handedOff` rollback below cannot clean
     // it — the gap that makes the wedge self-perpetuating. Detect it here so the
@@ -2491,13 +2721,19 @@ export async function runHatcherySpawn(
         dispatch,
       });
     }
-    if (selfHeal && selfHeal.verdict.kind === "unsafe") {
+    if (!terminalError && selfHeal?.verdict.kind === "unsafe") {
       throw new HatcherySpawnError(
         `${(err as Error).message}\n\nOrphan branch ${selfHeal.orphanBranch} was NOT auto-removed: ` +
           `${describeVerdict(selfHeal.verdict)}. Operator must reconcile before this slice can re-dispatch.`,
       );
     }
 
+    if (terminalError) {
+      const outcomeError = agentFailureReason !== "none"
+        ? new IntegrationOutcomeError(terminalError.outcome, agentFailureReason).withDetails(terminalError.details)
+        : terminalError;
+      throw withErrorDetails(outcomeError, err);
+    }
     if (
       err instanceof SnapshotError ||
       err instanceof BuildError ||

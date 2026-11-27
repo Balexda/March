@@ -330,7 +330,7 @@ export class EventStore {
 
   /** The projection for one profile (empty when the profile has no events yet). */
   projectionFor(profile: string): SystemState {
-    const sys = this.hot.byProfile[profile];
+    const sys = Object.hasOwn(this.hot.byProfile, profile) ? this.hot.byProfile[profile] : undefined;
     return sys ? structuredClone(sys) : emptySystemState();
   }
 

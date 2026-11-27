@@ -249,6 +249,7 @@ function formatDeclaredCredentialMounts(
 
 /** Inputs to {@link createSpawnContainer}. */
 export interface LaunchSpawnContainerInput {
+  readonly timeoutMs?: number;
   /** SpawnId — used to derive the container name and image tag. */
   readonly spawnId: string;
   /** Backend selected for this spawn. */
@@ -317,7 +318,7 @@ export interface WaitForSpawnContainerResult {
  * backend does not declare, or if `docker create` exits non-zero.
  */
 export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
-  const { backend, spawnId } = input;
+  const { backend, spawnId, timeoutMs } = input;
   const containerName = spawnContainerName(spawnId);
   const imageTag = spawnImageTag(spawnId);
 
@@ -394,6 +395,7 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
       // doc comment for rationale.
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+      ...(timeoutMs !== undefined && { timeout: timeoutMs, killSignal: "SIGKILL" }),
     });
   } catch (err) {
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
@@ -423,6 +425,7 @@ export const launchSpawnContainer = createSpawnContainer;
 export function copyPromptToContainer(
   containerId: string,
   prompt: string,
+  timeoutMs?: number,
 ): void {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-prompt-"));
   const promptPath = path.join(tmpDir, "prompt.txt");
@@ -431,6 +434,7 @@ export function copyPromptToContainer(
     execFileSync("docker", ["cp", promptPath, `${containerId}:${CONTAINER_PROMPT_PATH}`], {
       stdio: ["ignore", "ignore", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+...(timeoutMs !== undefined && { timeout: timeoutMs, killSignal: "SIGKILL" }),
     });
   } catch (err) {
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
@@ -451,7 +455,7 @@ export function copyPromptToContainer(
  * wrapped entrypoint to no-op (`node … 2>/dev/null || true`) without affecting
  * the spawn.
  */
-export function copyOtelEmitterToContainer(containerId: string): void {
+export function copyOtelEmitterToContainer(containerId: string, timeoutMs?: number): void {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-otel-"));
   const scriptPath = path.join(tmpDir, "otel-emit.js");
   try {
@@ -462,6 +466,7 @@ export function copyOtelEmitterToContainer(containerId: string): void {
       {
         stdio: ["ignore", "ignore", "pipe"],
         maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+...(timeoutMs !== undefined && { timeout: timeoutMs, killSignal: "SIGKILL" }),
       },
     );
   } catch {
@@ -471,11 +476,12 @@ export function copyOtelEmitterToContainer(containerId: string): void {
   }
 }
 
-export function startSpawnContainer(containerId: string): void {
+export function startSpawnContainer(containerId: string, timeoutMs?: number): void {
   try {
     execFileSync("docker", ["start", containerId], {
       stdio: ["ignore", "ignore", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+...(timeoutMs !== undefined && { timeout: timeoutMs, killSignal: "SIGKILL" }),
     });
   } catch (err) {
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
@@ -489,19 +495,21 @@ export function startSpawnContainer(containerId: string): void {
 
 export function waitForSpawnContainer(
   containerId: string,
+  maxWaitMs = SPAWN_CONFIG.timeoutSeconds * 1000,
 ): WaitForSpawnContainerResult {
+  const timeout = Math.min(maxWaitMs, SPAWN_CONFIG.timeoutSeconds * 1000);
   let stdout: Buffer | string;
   try {
     stdout = execFileSync("docker", ["wait", containerId], {
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
-      timeout: SPAWN_CONFIG.timeoutSeconds * 1000,
+      timeout,
     });
   } catch (err) {
     if (isExecTimeout(err)) {
       forceRemoveContainer(containerId);
       throw new LaunchError(
-        `docker wait timed out for "${containerId}" after ${SPAWN_CONFIG.timeoutSeconds}s; container was removed`,
+        `docker wait timed out for "${containerId}" after ${Math.ceil(timeout / 1000)}s; container was removed`,
       );
     }
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
@@ -537,9 +545,13 @@ function isExecTimeout(err: unknown): boolean {
   );
 }
 
+const DOCKER_REMOVE_TIMEOUT_MS = 10_000;
+
 function forceRemoveContainer(containerId: string): void {
   try {
     execFileSync("docker", ["rm", "-f", containerId], {
+      timeout: DOCKER_REMOVE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
       stdio: ["ignore", "ignore", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
     });
@@ -593,6 +605,8 @@ export function removeSpawnContainer(spawnId: string): void {
   const containerName = spawnContainerName(spawnId);
   try {
     execFileSync("docker", ["rm", "-f", containerName], {
+      timeout: DOCKER_REMOVE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
       // Discard stdout entirely — caller does not care about removed
       // container IDs. Capture stderr so we can swallow noisy "no such
       // container" messages rather than leaking them to the operator's

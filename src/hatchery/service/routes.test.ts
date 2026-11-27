@@ -3,7 +3,9 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
+import { IntegrationOutcomeError } from "../integration-outcome.js";
 import { JobStore } from "./jobs.js";
+import { runSpawnInWorker } from "./spawn-runner.js";
 import { validateSpawnRequest, type ReadinessProbes } from "./routes.js";
 import type { FastifyInstance } from "fastify";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
@@ -210,4 +212,72 @@ describe("routes", () => {
       spawns: { recent: 5, failed: 5, consecutive_failures: 5, last_error: "tessera:unconfigured", last_success_at: null },
     });
   });
+});
+
+it("uses the orchestration attempt as an idempotent job ID and exposes the terminal outcome", async () => {
+  const result = fakeResult();
+  const integrationOutcome = {
+    spawnId: result.spawnId,
+    status: "succeeded" as const,
+    completedAt: "2026-01-01T00:00:00Z",
+    commit: result.commit,
+    application: result.application,
+    pullRequest: {
+      provider: "github" as const, repository: "team/project", number: 42,
+      url: "https://github.com/team/project/pull/42", headBranch: result.commit.branch,
+      baseBranch: "main", state: "open" as const, observedAt: "2026-01-01T00:00:00Z",
+    },
+  };
+  const executor = vi.fn(async () => ({ ...result, integrationOutcome }));
+  const app = await makeApp(undefined, new JobStore({ executor }));
+  try {
+    const payload = {
+      repoPath: "/r", prompt: "work", backend: "codex",
+      attemptId: "dispatch-1", stewardDeadline: "2099-01-01T00:00:00Z",
+    };
+    const first = await app.inject({ method: "POST", url: "/spawns", payload });
+    const duplicate = await app.inject({ method: "POST", url: "/spawns", payload });
+    expect(first.json().id).toBe(payload.attemptId);
+    expect(duplicate.json().id).toBe(payload.attemptId);
+    expect(executor).toHaveBeenCalledOnce();
+    const job = await app.inject({ method: "GET", url: "/spawns/dispatch-1" });
+    expect(job.json()).toMatchObject({ status: "succeeded", integrationOutcome });
+  } finally {
+    await app.close();
+  }
+});
+
+
+it("exposes typed persistence failure and the validated agent failure reason", async () => {
+  const outcome = {
+    spawnId: "spawn-1", status: "failed" as const, failureReason: "persistence" as const,
+    diagnostic: "Brood could not confirm the integration attempt or its outcome.",
+    completedAt: "2026-01-01T00:00:00Z",
+  };
+  const app = await makeApp(undefined, new JobStore({ executor: async () => {
+    throw new IntegrationOutcomeError(outcome, "auth");
+  } }));
+  try {
+    await app.inject({ method: "POST", url: "/spawns", payload: {
+      repoPath: "/r", prompt: "work", backend: "codex", attemptId: "failing-dispatch",
+      stewardDeadline: "2099-01-01T00:00:00Z",
+    } });
+    const job = await app.inject({ method: "GET", url: "/spawns/failing-dispatch" });
+    expect(job.json()).toMatchObject({ status: "failed", integrationOutcome: outcome,
+      error: { message: outcome.diagnostic, agentFailureReason: "auth" } });
+  } finally {
+    await app.close();
+  }
+});
+
+it("normalizes an abnormal worker exit before it can report the linked spawn", async () => {
+  vi.stubEnv("MARCH_HATCHERY_WORKER_ENTRY", "/march/missing-worker-entry.js");
+  try {
+    await expect(runSpawnInWorker({
+      repoPath: "/r", prompt: "work", backend: "codex", attemptId: "unstarted-dispatch",
+      stewardDeadline: "2099-01-01T00:00:00Z",
+    })).rejects.toMatchObject({ outcome: { status: "failed", failureReason: "persistence", spawnId: null } });
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });

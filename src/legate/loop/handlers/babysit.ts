@@ -4,7 +4,7 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import type { ReviewObservation } from "../../../observe/sense-io.js";
 import { hashText } from "../pure/hash.js";
 import { approvalSatisfied, changesRequestedSatisfied, eligibleReviewer, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { awaitingSuccessfulIntegration, mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import { NEEDS_STEERING_LABEL, prNeedsSteering } from "../../../shared/steering.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
@@ -284,7 +284,7 @@ export function assess(state: LoopState): BabysitDecision[] {
   const workers = workerBySessionId(state.sessions, state.workerGroup);
 
   for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
-    if (!slice || typeof slice !== "object") continue;
+    if (!slice || typeof slice !== "object" || awaitingSuccessfulIntegration(slice)) continue;
     if (slice.resume_pending === "selected") continue;
     const sessionId = String(slice.worker_session_id || "");
     if (!sessionId) continue;

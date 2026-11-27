@@ -1,7 +1,9 @@
+import { IntegrationOutcomeError, workerIntegrationError } from "../integration-outcome.js";
 import { IntegrationPublicationError } from "../integration-publisher.js";
 import { Worker, parentPort } from "node:worker_threads";
 import { getBackend } from "../../spawn/backends.js";
 import { initOtel } from "../../observability/otel.js";
+import { startDispatchSpan } from "../../observability/spawn-trace.js";
 import { runHatcherySpawn, StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
 import type {
   SpawnRequest,
@@ -41,11 +43,26 @@ export function runSpawnInWorker(
 ): Promise<HatcherySpawnResult> {
   return new Promise((resolve, reject) => {
     const workerData: SpawnWorkerData = { request };
+    const fail = (error: unknown) => {
+      if (!request.attemptId || !request.stewardDeadline) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      const failure = workerIntegrationError(request.stewardDeadline);
+      const dispatch = startDispatchSpan({
+        traceKey: request.sliceId?.trim() || request.attemptId,
+        rootName: "hatchery.spawn.worker_failure",
+        attributes: { "march.failure_reason": failure.outcome.failureReason },
+      });
+      dispatch.recordException(failure);
+      dispatch.end({ error: true });
+      reject(failure);
+    };
     let worker: Worker;
     try {
       worker = new Worker(workerEntryPath(), { workerData });
     } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
+      fail(err);
       return;
     }
     let settled = false;
@@ -57,15 +74,22 @@ export function runSpawnInWorker(
     worker.once("message", (message: SpawnWorkerMessage) => {
       settle(() => {
         if (message.ok) resolve(message.result);
+        else if (message.integrationOutcome) {
+          reject(new IntegrationOutcomeError(message.integrationOutcome, message.agentFailureReason).withDetails({
+            ...(message.application && { application: message.application }),
+            ...(message.publication && { publication: message.publication }),
+          }));
+        }
+        else if (request.stewardDeadline) fail(new Error(message.error));
         else if (message.application) reject(new StewardApplyError(message.application, false));
         else if (message.publication) reject(new IntegrationPublicationError(message.publication));
         else reject(new Error(message.error));
       });
     });
-    worker.once("error", (err) => settle(() => reject(err)));
+    worker.once("error", (err) => settle(() => fail(err)));
     worker.once("exit", (code) => {
       settle(() =>
-        reject(
+        fail(
           new Error(
             `spawn worker exited with code ${code} before reporting a result`,
           ),
@@ -102,13 +126,17 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       taskType: request.taskType,
       taskName: request.taskName,
       sliceId: request.sliceId,
+      attemptId: request.attemptId,
+      stewardDeadline: request.stewardDeadline,
       toolchain: request.toolchain,
     });
     message = { ok: true, result };
   } catch (err) {
     message = {
       ok: false,
+      ...(err instanceof IntegrationOutcomeError ? { integrationOutcome: err.outcome, agentFailureReason: err.agentFailureReason } : {}),
       error: err instanceof Error ? err.message : String(err),
+      ...(err instanceof IntegrationOutcomeError ? err.details : {}),
       ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
       ...(err instanceof StewardApplyError ? { application: err.application } : {}),
     };

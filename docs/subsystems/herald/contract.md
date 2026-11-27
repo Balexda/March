@@ -43,6 +43,30 @@ an optional string `headSha` records the PR head it was sent against. The fold
 accumulates the IDs per slice and kind, and keeps the latest dispatch (kind,
 key, event time and head SHA), for Legate to restore on restart.
 
+A `slice.dispatched` transition can carry an `attemptId` and an absolute
+`stewardDeadline` in ISO UTC format with milliseconds. The fold retains both
+for restart recovery. Legate records a successful Brood handoff through a matching
+`slice.stage.changed` transition with the attempt, spawn, branch, session, and
+worktree identifiers. Replay ignores a handoff for a superseded attempt.
+Legate appends `slice.integration.failed` with the
+`sliceId`, `attemptId` and typed failure `outcome` after Brood returns a
+durable failure or fences an attempt without an outcome. When the attempt
+matches the current dispatch, the fold stores `integrationFailure`
+and moves the slice to `escalated` with reason `hatchery_dispatch_failed`.
+The failure has a null spawn ID when no spawn was linked or reported.
+A new attempt clears the prior fallback. When `MARCH_LEGATE_OPERATOR_TOKEN`
+is set, this failure transition requires the bearer token.
+
+`GET /state/integration/:sliceId?profile=<profile>` returns
+`{ outcome: PrIntegrationResult | null }` for the slice's current attempt.
+The profile defaults to Herald's default profile. Herald reads the outcome
+through Brood's attempt lookup and returns it when present. Once Brood
+confirms that no outcome exists, Herald uses the folded failure, if any.
+A `null` outcome means there is no terminal result. When the Brood read
+fails, Herald returns `503`. The `HeraldClient.integrationOutcome` method
+exposes this read to consumers. Historical `/state?at=` reads use the event
+log and snapshots.
+
 Herald synchronizes every active profile's default branch before each
 observation (#601; there is no switch, and removing the profile is how to stop
 it). Herald fetches and pulls over HTTPS with the same repository entitlement
@@ -67,6 +91,7 @@ Herald reads these settings:
 | Variable | Meaning |
 |----------|---------|
 | `MARCH_TESSERA_URL` | Tessera base URL. |
+| `MARCH_BROOD_URL` | Brood base URL for attempt lookups. Compose defaults to `http://brood:9748`. |
 | `MARCH_TESSERA_CLIENT_KEY_FILE` | File holding Herald's own Tessera client key (takes precedence over `MARCH_TESSERA_CLIENT_KEY`). The compose file defaults it to `~/.march/tessera/keys/herald.key`, which `march tessera provision` writes; `MARCH_HERALD_TESSERA_CLIENT_KEY_FILE` overrides the path. Compose forwards no `GH_TOKEN`/`GITHUB_TOKEN` and sets no fallback. |
 
 ### Profile merge policy

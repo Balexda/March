@@ -1,4 +1,5 @@
 import { execTextInGroup } from "../shared/exec-group.js";
+import { stewardTimeRemaining } from "./integration-deadline.js";
 import { getGitHubToken, TesseraClientError } from "../tessera/client.js";
 
 export class HatcheryGitHubError extends Error {
@@ -30,7 +31,7 @@ export function hatcheryGitEnv(): NodeJS.ProcessEnv {
 async function git(cwd: string, args: string[], env = hatcheryGitEnv()) {
   try {
     const stdout = await execTextInGroup("git", args, {
-      cwd, env, timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
+      cwd, env, timeout: stewardTimeRemaining(15_000), killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
     });
     return { code: 0, stdout, timedOut: false, unauthorized: false };
   } catch (error) {

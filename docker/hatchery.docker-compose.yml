@@ -62,6 +62,8 @@ services:
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-hatchery
       - MARCH_HATCHERY_PORT=8080
+      - MARCH_BROOD_URL=${MARCH_BROOD_URL:-http://brood:${MARCH_BROOD_PORT:-9748}}
+      - MARCH_STEWARD_TIMEOUT_MS=${MARCH_STEWARD_TIMEOUT_MS:-3900000}
       - MARCH_HATCHERY_LOG_DIR=/march/logs
       # #460: PARK failed spawns (keep the worker container/image, rename the
       # manager worktree+branch aside, drop a parked/<spawnId>.json manifest)

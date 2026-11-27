@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
 import { parseExtractionResult } from "./extraction.js";
+import { SqliteIntegrationRegistry, type IntegrationRegistry } from "./integration-registry.js";
 import type { SessionRepository } from "./repository.js";
 import type {
   ListSessionsFilter,
@@ -228,6 +229,7 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
  */
 export class SessionStore implements SessionRepository {
   private readonly db: BroodDatabase;
+  readonly integration: IntegrationRegistry;
 
   constructor(options: SessionStoreOptions = {}) {
     const dbPath = options.dbPath ?? registryDbPath(options.homeDir);
@@ -241,6 +243,7 @@ export class SessionStore implements SessionRepository {
     }
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.migrate();
+    this.integration = new SqliteIntegrationRegistry(this.db);
   }
 
   private migrate(): void {
