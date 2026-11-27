@@ -85,9 +85,21 @@ jobs:
     # (github.sha, when dispatched from that branch) so a merge that lands
     # while `validate` runs isn't picked up. To release an exact set of
     # changes, dispatch with `branch` set to a validation branch.
+    # Expression `==` ignores case, so compare in bash (case-sensitive).
+    - name: Resolve release ref
+      id: ref
+      env:
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        if [[ "$GITHUB_REF" == "refs/heads/$BRANCH" ]]; then
+          echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+        else
+          echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+        fi
+
     - uses: actions/checkout@v7
       with:
-        ref: ${{ inputs.branch == github.ref_name && github.sha || inputs.branch }}
+        ref: ${{ steps.ref.outputs.ref }}
         ssh-key: ${{ secrets.DEPLOY_KEY }}
 
     - name: Setup Node.js
@@ -162,6 +174,9 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
           git commit --quiet -am "release: $TAG"
           if git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"; then
+            # Back to the pinned release tree so later steps (npm publish
+            # packs src/templates, docker) never see the newer tip's files.
+            git checkout --quiet "refs/tags/$TAG"
             exit 0
           fi
         done
