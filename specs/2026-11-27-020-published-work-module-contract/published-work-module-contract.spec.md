@@ -79,7 +79,7 @@ As a maintainer, I want the compatibility and execution rules documented so that
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | Author Against the Published Contract | — | — |
+| US1 | Author Against the Published Contract | — | specs/2026-11-27-020-published-work-module-contract/01-author-against-published-contract.tasks.md |
 | US2 | Interpret Signals and Request Bounded Actions | US1 | — |
 | US3 | Verify Compatibility and Ownership | US1, US2 | — |
 
