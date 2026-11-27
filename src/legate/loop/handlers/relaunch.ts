@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
-import { isWorkerSession } from "../pure/session.js";
+import { isWorkerSession, managerWorkspace } from "../pure/session.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
 import { dropSession } from "../state/mutations.js";
@@ -242,10 +242,9 @@ function baseDecision(
   sliceId: string,
   slice: any,
   attempt: number,
-  worktreesParent: string,
+  repoPath: string,
 ): Omit<RelaunchDecision, "mode" | "unescalateStage" | "autoRateLimited" | "removeStaleSessionId"> {
-  const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
-  const bareBranch = rawBranch.replace(/^feature\//, "");
+  const { bareBranch, worktreePath } = managerWorkspace(slice, repoPath);
   const featureBranch = "feature/" + bareBranch;
   const expectedDirName = "feature-" + bareBranch.replace(/\//g, "-");
   const pr = slice.pr || {};
@@ -254,7 +253,7 @@ function baseDecision(
     bareBranch,
     featureBranch,
     expectedDirName,
-    worktreePath: slice.worktree_path || path.join(worktreesParent, expectedDirName),
+    worktreePath,
     launchTitle: slice.worker_title || "steward: " + sliceId,
     prNumber: pr.number,
     prUrl: pr.url || "(unknown)",
@@ -285,7 +284,6 @@ export function assess(state: LoopState): RelaunchDecision[] {
     else liveSessionIds.add(s.id);
   }
   const nowMs = parseMs(state.ts);
-  const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
   // Slices with a pending operator recovery request this tick belong to the
   // graduated-recovery ladder (recovery.ts runs LATER in the pipeline). Relaunch
   // must not act on them first — the auto path would otherwise un-escalate +
@@ -301,7 +299,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
   // steward's checkout. Excluded from every path (operator, ladder, auto) until
   // cleanup confirms; an operator request stays unsettled and runs afterwards.
   const pendingCleanup = new Set(pendingTeardowns(state, "cleanup").map(({ traceKey }) => traceKey));
-  const operator = operatorDecisions(state, worktreesParent).filter((d) => !pendingCleanup.has(d.sliceId));
+  const operator = operatorDecisions(state, repoPath).filter((d) => !pendingCleanup.has(d.sliceId));
   const operatorOwned = new Set(operator.map((d) => d.sliceId));
 
   const ladder: RelaunchDecision[] = [];
@@ -338,7 +336,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
       const attempt = retryAttempts(state.raw, RELAUNCH_DOMAIN, sliceId) + 1;
       if (!ELIGIBLE_STAGES.has(slice.stage)) continue;
       if (attempt > RELAUNCH_LIMIT) continue;
-      ladder.push({ ...baseDecision(sliceId, slice, attempt, worktreesParent), mode: "ladder", ...staleField });
+      ladder.push({ ...baseDecision(sliceId, slice, attempt, repoPath), mode: "ladder", ...staleField });
       continue;
     }
 
@@ -378,7 +376,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
   const autoRateLimited = autoCandidates.length > rate;
   const selected = autoCandidates.slice(0, rate);
   const auto: RelaunchDecision[] = selected.map((c) => ({
-    ...baseDecision(c.sliceId, c.slice, c.attempt, worktreesParent),
+    ...baseDecision(c.sliceId, c.slice, c.attempt, repoPath),
     mode: "auto",
     autoRateLimited,
     ...(c.unescalateStage ? { unescalateStage: c.unescalateStage } : {}),
@@ -398,7 +396,7 @@ function relaunchHandledSeqs(raw: any): Record<string, number> {
 const OPERATOR_RELAUNCH_REFUSED_STAGES = new Set(["merged", "hatchery-pending"]);
 
 /** Pure: one `mode:"operator"` decision per pending operator relaunch request. */
-function operatorDecisions(state: LoopState, worktreesParent: string): RelaunchDecision[] {
+function operatorDecisions(state: LoopState, repoPath: string): RelaunchDecision[] {
   const handled = (state.raw?.relaunch_handled_seq ?? {}) as Record<string, number>;
   const out: RelaunchDecision[] = [];
   for (const { sliceId, seq } of state.relaunchRequests ?? []) {
@@ -433,7 +431,7 @@ function operatorDecisions(state: LoopState, worktreesParent: string): RelaunchD
       continue;
     }
     out.push({
-      ...baseDecision(sliceId, slice, 0, worktreesParent),
+      ...baseDecision(sliceId, slice, 0, repoPath),
       mode: "operator",
       requestSeq: seq,
       ...(slice.stage === "escalated" ? { unescalateStage: "pr-open" } : {}),

@@ -25,6 +25,7 @@ import {
   type OperatorAction,
 } from "../../observability/loop-metrics.js";
 import { probeServices, type ServicesHealth } from "./service-health.js";
+import { findWorktreePathForBranch } from "../../hatchery/orphan-branch.js";
 import { stampDwell } from "./pure/dwell.js";
 import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -1183,6 +1184,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     requeue: {
       closePr: closePrGh,
       deleteRemoteBranch: deleteRemoteBranchGh,
+      findWorktreeForBranch: (repoPath, branch) => findWorktreePathForBranch(repoPath, branch),
     },
     mergeNow: {
       readPr: readLivePrGh,

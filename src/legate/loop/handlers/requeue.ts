@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState, RequeueRequest } from ".
 import { emptyHandlerResult } from "../state/types.js";
 import { dropRecoveredSlice, dropSession } from "../state/mutations.js";
 import { releasableArchive } from "../pure/slice.js";
+import { managerWorkspace } from "../pure/session.js";
 
 /**
  * Operator REQUEUE (#588/#593): "throw this slice's output away and put the smithy
@@ -52,6 +53,9 @@ export interface RequeueDeps {
   closePr: (repoPath: string, prNumber: number, comment: string, sliceId?: string) => Promise<void>;
   /** Delete the remote branch; resolves `false` when it did not exist. */
   deleteRemoteBranch: (repoPath: string, branch: string, sliceId?: string) => Promise<boolean>;
+  /** The checkout git records for exactly this local branch (`git worktree list`),
+   *  or undefined when the branch has no worktree. */
+  findWorktreeForBranch?: (repoPath: string, branch: string) => string | undefined;
 }
 
 export type RequeueDecision =
@@ -133,10 +137,28 @@ interface StepOutcome {
 }
 
 /** Step 1: tear the incarnation down through Brood (exact path, #155). */
-async function teardownIncarnation(sliceId: string, slice: any, state: LoopState, ctx: HandlerContext): Promise<StepOutcome> {
+async function teardownIncarnation(
+  sliceId: string,
+  slice: any,
+  state: LoopState,
+  ctx: HandlerContext,
+  deps?: RequeueDeps,
+): Promise<StepOutcome> {
   const sessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
-  const worktreePath = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
-  const branch = String(slice.actual_branch || slice.branch || "");
+  // The REAL on-disk names, not the symbolic dispatch branch: a spawn that failed
+  // before a PR/session was recorded leaves only `slice.branch` (`smithy/…`), but
+  // agent-deck created `feature/smithy/…` and its worktree. Registering the bare
+  // name made Brood "tear down" a branch that never existed and report success,
+  // leaving the orphan to collide with every re-dispatch.
+  //
+  // The worktree comes from a recorded path or git's own branch→worktree record,
+  // never from the naming convention: distinct branches can map to the same
+  // derived directory (`a/b` and `a-b`), and Brood force-removes the path it is
+  // given, so a guess could delete another slice's checkout.
+  const { branch } = managerWorkspace(slice, state.repoPath ?? "");
+  const recorded = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
+  const worktreePath =
+    recorded || (branch && state.repoPath ? deps?.findWorktreeForBranch?.(state.repoPath, branch) ?? "" : "");
   const opts = { force: true, reason: "operator-requeue", traceKey: sliceId };
 
   if (sessionId) {
@@ -218,7 +240,9 @@ export async function apply(
     const releasing = d.action === "release-archived";
     const slice = releasing ? state.archived[d.sliceId] : state.slices[d.sliceId];
     const sessionId = !releasing && typeof slice.worker_session_id === "string" ? slice.worker_session_id : null;
-    const branch = String(slice.actual_branch || slice.branch || "");
+    // Pushed March branches carry the `feature/` prefix too (the PR head), so
+    // the bare dispatch name would miss them.
+    const { branch } = managerWorkspace(slice, state.repoPath ?? "");
     const notes: string[] = [];
     const archivedAttrs = releasing ? { archived: true, terminal: d.terminal } : {};
 
@@ -228,7 +252,7 @@ export async function apply(
       // that archived it, and its PR is already terminal.
       notes.push(`released archived ${d.terminal} hold`);
     } else {
-      const teardown = await teardownIncarnation(d.sliceId, slice, state, ctx);
+      const teardown = await teardownIncarnation(d.sliceId, slice, state, ctx, deps);
       notes.push(teardown.detail);
       if (!teardown.ok) failure = teardown.detail;
     }

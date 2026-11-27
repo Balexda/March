@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  managerWorkspace,
   addBranchVariants,
   isWorkerSession,
   looseSessionMatch,
@@ -102,5 +103,25 @@ describe("session pure helpers", () => {
     expect(prMatchesBranches(branches, { head_branch: "feature/x" })).toBe(true);
     expect(prMatchesBranches(branches, { headRefName: "other" })).toBe(false);
     expect(prMatchesBranches(new Set(), { headRefName: "x" })).toBe(false);
+  });
+});
+
+describe("managerWorkspace", () => {
+  it("derives agent-deck's feature/ branch and worktree when nothing was recorded", () => {
+    expect(managerWorkspace({ branch: "smithy/forge/a-b" }, "/h/Dev/March")).toEqual({
+      bareBranch: "smithy/forge/a-b",
+      featureBranch: "feature/smithy/forge/a-b",
+      branch: "feature/smithy/forge/a-b",
+      worktreePath: "/h/Dev/WorkTrees/March/feature-smithy-forge-a-b",
+    });
+  });
+
+  it("prefers the recorded actual_branch and worktree_path, and is idempotent on a feature/ branch", () => {
+    const ws = managerWorkspace({ branch: "feature/smithy/cut/c", actual_branch: "feature/x", worktree_path: "/wt/c" }, "/r/March");
+    expect(ws).toMatchObject({ bareBranch: "smithy/cut/c", featureBranch: "feature/smithy/cut/c", branch: "feature/x", worktreePath: "/wt/c" });
+  });
+
+  it("yields empty names for a slice with no branch", () => {
+    expect(managerWorkspace({}, "/r/March")).toMatchObject({ branch: "", worktreePath: "" });
   });
 });
