@@ -6,7 +6,8 @@
 <!-- END AUTOGEN -->
 
 The published `@balexda/march/modules/v0` authoring contract defines the producer
-and destination observe facets Herald calls. See the
+and destination observe facets that Herald is planned to call. Herald does not
+load or invoke work modules yet. See the
 [work module authoring reference](../legate/contract.md#work-module-authoring).
 
 Herald observes each registered profile and appends changes to its event log.

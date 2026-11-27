@@ -17,7 +17,8 @@ March package version.
 | Destination act | `DestinationAct` evaluates the item, signals and scoped policy to propose landing or review, or returns a blocked decision with a diagnostic. |
 | Origin act | `OriginAct` proposes origin close-out from a successful landed report and can receive a correlated close-out result. |
 
-Herald calls observe facets and Legate calls act facets. Context carries scoped
+Herald is planned to call observe facets and Legate is planned to call act
+facets. Neither service loads or invokes work modules yet. Context carries scoped
 data and optional steward metadata. Act facets propose typed intents for core
 execution. See the [March vision](../../vision.md) and
 [operating philosophy](../../operating-philosophy.md).
