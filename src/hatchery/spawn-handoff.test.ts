@@ -170,6 +170,7 @@ describe("spawn-handoff", () => {
       // After the answer: apply it, remove the gate and the label.
       expect(prompt).toContain("remove the gate");
       expect(prompt).toContain("--remove-label march:needs-steering");
+      expect(prompt).toContain("`gh pr ready <number>`");
       // Plain debt is explicitly not a reason to escalate.
       expect(prompt).toContain("Ordinary specification debt is NOT a reason to escalate");
       // No line of the prompt itself parses as a steering question.
@@ -206,6 +207,7 @@ describe("spawn-handoff", () => {
       expect(skill).toContain("`steering` receipt status");
       expect(skill).toContain("`march:needs-steering`");
       expect(skill).toContain("--remove-label march:needs-steering");
+      expect(skill).toContain("`gh pr ready <number>`");
       expect(skill).toContain("Ordinary specification debt is not a reason to escalate.");
       expect(skill).toContain("Never use it for ordinary spec debt.");
     });

@@ -80,9 +80,10 @@ whether the change gates a slice on an unresolved decision. Ordinary spec debt
 does not count. If it does, the Steward prints one `STEERING:` line per
 question (the question, its options and trade-offs, and the slices it blocks),
 reports `REVIEW <receipt ID> steering` and ends with a `NEED:` line. Hatchery
-opens the PR with the `march:needs-steering` label. Once the human answers, the
-Steward applies the decision to the spec or task file, pushes, and removes the
-label, which re-arms the merge. Hatchery
+opens the PR as a draft with the `march:needs-steering` label. Once the human
+answers, the Steward applies the decision to the spec or task file, pushes,
+removes the label and marks the PR ready (`gh pr ready`), which re-arms the
+merge. Hatchery
 publishes from validated handoff facts after an approving receipt and returns
 the typed GitHub outcome to the caller.
 

@@ -51,12 +51,13 @@ const STEWARD_OUTPUT_DEBT_ONLY = [
   "REVIEW r-debt passed",
 ].join("\n");
 
-interface FakePr { number: number; state: "OPEN" | "MERGED"; labels: { name: string }[]; headSha: string }
+interface FakePr { number: number; state: "OPEN" | "MERGED"; draft: boolean; labels: { name: string }[]; headSha: string }
 
 interface World {
   raw: any;
   sessions: { id: string; status: string; group: string }[];
-  github: { prs: FakePr[] };
+  /** `labelDenied`: GitHub refuses label writes (the steering_label_failed case). */
+  github: { prs: FakePr[]; labelDenied?: boolean };
 }
 
 /** A stateful GitHub REST fake covering what the publisher calls. */
@@ -66,13 +67,13 @@ function githubFetch(world: World): typeof fetch {
     const path = url.pathname.slice(`/repos/${REPO}`.length);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     const pull = (pr: FakePr) => ({
-      number: pr.number, state: pr.state === "OPEN" ? "open" : "closed",
+      number: pr.number, state: pr.state === "OPEN" ? "open" : "closed", draft: pr.draft, labels: pr.labels,
       html_url: `https://github.com/${REPO}/pull/${pr.number}`,
       head: { ref: BRANCH, sha: pr.headSha, repo: { full_name: REPO } },
       base: { ref: "main", repo: { full_name: REPO } },
     });
     if (path === "/pulls" && init?.method === "POST") {
-      const pr: FakePr = { number: 620, state: "OPEN", labels: [], headSha: COMMIT.commitSha };
+      const pr: FakePr = { number: 620, state: "OPEN", draft: body.draft === true, labels: [], headSha: COMMIT.commitSha };
       world.github.prs.push(pr);
       return Response.json(pull(pr), { status: 201 });
     }
@@ -82,6 +83,7 @@ function githubFetch(world: World): typeof fetch {
     if (path === "/labels") return Response.json({ name: body.name }, { status: 201 });
     const labels = /^\/issues\/(\d+)\/labels$/.exec(path);
     if (labels) {
+      if (world.github.labelDenied) return new Response(null, { status: 403 });
       const pr = world.github.prs.find((p) => p.number === Number(labels[1]))!;
       pr.labels.push(...body.labels.map((name: string) => ({ name })));
       return Response.json(pr.labels);
@@ -91,7 +93,7 @@ function githubFetch(world: World): typeof fetch {
 }
 
 /** Hatchery publication of the cut from its steward's review output. */
-async function publish(world: World, stewardOutput: string): Promise<void> {
+async function publish(world: World, stewardOutput: string, expected = "succeeded"): Promise<void> {
   const verification = /^REVIEW \S+ (passed|steering)$/m.exec(stewardOutput)![1] as "passed" | "steering";
   const metadata = buildPullRequestMetadata({
     commit: COMMIT, backend: "codex", touchedPaths: ["specs/tessera/us3.tasks.md"], verification,
@@ -101,7 +103,7 @@ async function publish(world: World, stewardOutput: string): Promise<void> {
     { repository: REPO, commit: COMMIT, baseBranch: "main", metadata: async () => metadata },
     { token: async () => "t", fetch: githubFetch(world) },
   );
-  expect(result.status).toBe("succeeded");
+  expect(result.status).toBe(expected);
 }
 
 function makeWorld(): World {
@@ -120,13 +122,14 @@ function makeWorld(): World {
   };
 }
 
-/** Herald's observation of the live PR: green, mergeable, clean, unapproved. */
+/** Herald's observation of the live PR: green, mergeable, unapproved; GitHub
+ *  reports a draft's merge state as `draft`, otherwise `clean`. */
 function observePr(world: World): any {
   const pr = world.github.prs.find((p) => p.number === 620)!;
   return {
     number: pr.number, url: `https://github.com/${REPO}/pull/${pr.number}`, state: pr.state,
-    mergeable: "MERGEABLE", checks: "NONE", needs_response_count: 0, thread_count: 0,
-    head_branch: BRANCH, head_sha: pr.headSha, merge_state_status: "clean",
+    mergeable: "MERGEABLE", checks: "NONE", needs_response_count: 0, thread_count: 0, is_draft: pr.draft,
+    head_branch: BRANCH, head_sha: pr.headSha, merge_state_status: pr.draft ? "draft" : "clean",
     human_approval_count: 0, changes_requested_count: 0, conversation_comments: [],
     needs_steering: labelsNeedSteering(pr.labels),
   };
@@ -184,7 +187,7 @@ describe("cut steering gate — multi-tick", () => {
   it("the #620 cut is held, not merged, while its steering question is open; removing the label merges it", async () => {
     const world = makeWorld();
     await publish(world, STEWARD_OUTPUT_620);
-    expect(world.github.prs[0].labels).toEqual([{ name: NEEDS_STEERING_LABEL }]);
+    expect(world.github.prs[0]).toMatchObject({ draft: true, labels: [{ name: NEEDS_STEERING_LABEL }] });
     const { deps, mergePr } = makeDeps(world);
 
     const actions: string[] = [];
@@ -202,12 +205,36 @@ describe("cut steering gate — multi-tick", () => {
     expect(actions.filter((a) => a === "pr-steering-hold")).toHaveLength(1);
     expect(actions).not.toContain("pr-auto-merge");
 
-    // The human answers; the steward applies it and removes the label.
+    // The human answers; the steward applies it, removes the label and marks it ready.
     world.github.prs[0].labels = [];
+    world.github.prs[0].draft = false;
     const out = await runTick(deps);
     expect(babysitActions(out)).toContain("pr-auto-merge");
     expect(merged(world)).toBe(true);
     expect(world.raw.slices[SLICE].stage).toBe("merged");
+  });
+
+  it("a cut whose steering label could not be applied stays unmerged as a draft", async () => {
+    const world = makeWorld();
+    world.github.labelDenied = true;
+    await publish(world, STEWARD_OUTPUT_620, "failed");
+    expect(world.github.prs[0]).toMatchObject({ draft: true, labels: [] });
+    const { deps, mergePr } = makeDeps(world);
+
+    for (let tick = 0; tick < 5; tick++) {
+      const out = await runTick(deps);
+      expect(babysitActions(out)).not.toContain("pr-auto-merge");
+    }
+    expect(mergePr).not.toHaveBeenCalled();
+    expect(merged(world)).toBe(false);
+
+    // A later publication retry finishes the label on the reused draft.
+    world.github.labelDenied = false;
+    await publish(world, STEWARD_OUTPUT_620);
+    expect(world.github.prs).toHaveLength(1);
+    expect(world.github.prs[0].labels).toEqual([{ name: NEEDS_STEERING_LABEL }]);
+    await runTick(deps);
+    expect(world.raw.slices[SLICE].pr_blocker).toBe("needs_steering");
   });
 
   it("control: a cut with spec debt but no gate merges on the first tick, as today", async () => {

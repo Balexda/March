@@ -39,13 +39,13 @@ If there is such a gate, do not report the change as done:
   blocks.
 - Use the `steering` receipt status (below), and end with a `NEED:` line
   asking the human to decide.
-- Hatchery opens the PR with the `march:needs-steering` label. March will not
-  auto-merge the PR while that label is set.
+- Hatchery opens the PR as a draft with the `march:needs-steering` label.
+  March will not auto-merge the PR while either holds.
 
 When the human answers, apply the decision to the spec or task file (mark the
 debt row resolved and remove the gate), commit and push to the PR branch,
 remove the label with `gh pr edit <number> --remove-label march:needs-steering`,
-and report the PR as done.
+mark it ready with `gh pr ready <number>`, and report the PR as done.
 
 ## Validation
 

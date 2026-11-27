@@ -974,11 +974,12 @@ function steeringGuidance(verb: PlanningVerb): string[] {
     "- If there is a gate, do not report it as done. For each steering question print one line",
     "  that begins with STEERING: and gives the question, its options with their trade-offs,",
     "  and the slices it blocks. Then use REVIEW <receipt ID> steering as the receipt, and end",
-    `  with a NEED: line asking the human to decide. Hatchery opens the PR with the ${NEEDS_STEERING_LABEL}`,
-    "  label, and March will not auto-merge it while that label is set.",
+    `  with a NEED: line asking the human to decide. Hatchery opens the PR as a draft with the`,
+    `  ${NEEDS_STEERING_LABEL} label, and March will not auto-merge it while either holds.`,
     "- When the human answers: apply the decision to the spec or task file (mark the debt row",
     "  resolved and remove the gate), commit and push to the PR branch, remove the label with",
-    `  \`gh pr edit <number> --remove-label ${NEEDS_STEERING_LABEL}\`, and report the PR as done.`,
+    `  \`gh pr edit <number> --remove-label ${NEEDS_STEERING_LABEL}\`, mark it ready with`,
+    "  `gh pr ready <number>`, and report the PR as done.",
     "",
   ];
 }

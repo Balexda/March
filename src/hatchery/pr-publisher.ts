@@ -146,6 +146,8 @@ interface GitHubPull {
   html_url?: string;
   state?: string;
   created_at?: string;
+  draft?: boolean;
+  labels?: Array<{ name?: string }>;
   head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null };
   base?: { ref?: string; repo?: { full_name?: string } | null };
 }
@@ -221,7 +223,7 @@ export async function openOrReusePullRequest(input: {
       throw new GitHubFailure(response.status >= 500 ? "network" : "publication_failed");
     }
 
-    type Matched = { record: PullRequestRecord; headSha?: string };
+    type Matched = { record: PullRequestRecord; headSha?: string; draft: boolean; labels: string[] };
     const match = (value: unknown): Matched | undefined => {
       const pr = value as GitHubPull | null;
       if (pr?.state !== "open" || pr.head?.ref !== commit.branch ||
@@ -231,7 +233,10 @@ export async function openOrReusePullRequest(input: {
         !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
         typeof pr.html_url !== "string" ||
         pr.html_url.toLowerCase() !== `https://github.com/${repository}/pull/${pr.number}`.toLowerCase()) return;
-      return { headSha: typeof pr.head.sha === "string" ? pr.head.sha.toLowerCase() : undefined, record: {
+      return { headSha: typeof pr.head.sha === "string" ? pr.head.sha.toLowerCase() : undefined,
+        draft: pr.draft === true,
+        labels: (Array.isArray(pr.labels) ? pr.labels : []).map((label) => String(label?.name ?? "")),
+        record: {
         provider: "github", repository, number: pr.number, url: pr.html_url, headBranch: commit.branch,
         baseBranch: pr.base.ref, state: "open", observedAt: new Date().toISOString(),
         ...(typeof pr.created_at === "string" && { createdAt: pr.created_at }),
@@ -278,15 +283,9 @@ export async function openOrReusePullRequest(input: {
       if (sameBase.length) return failed("head_mismatch", sameBase[0].record);
       if (records.length) return failed("base_mismatch", records[0].record);
     };
-    const reused = compare(existing);
-    if (reused) return reused;
-
-    const metadata = typeof input.metadata === "function" ? await input.metadata() : input.metadata;
-    if (typeof metadata === "string") return failed(metadata);
-    const { labels = [], ...pull } = metadata;
     // The steering label is the merge gate's hold, so a PR that should carry it
     // and does not is reported as a failed publication, never as a success.
-    const labelled = async (result: PullRequestPublication): Promise<PullRequestPublication> => {
+    const labelled = async (result: PullRequestPublication, labels: readonly string[]): Promise<PullRequestPublication> => {
       if (result.status !== "succeeded" || labels.length === 0) return result;
       return phase("steward.pr.label", async () => {
         try {
@@ -299,14 +298,34 @@ export async function openOrReusePullRequest(input: {
         }
       });
     };
+    const reused = compare(existing);
+    if (reused) {
+      // Only a steering publication opens a draft on a Hatchery branch, so a
+      // reused draft without the label is a retry after `steering_label_failed`:
+      // finish labelling it rather than report it as published.
+      const prior = reused.status === "succeeded"
+        ? existing.find(({ record }) => record.number === reused.pullRequest.number) : undefined;
+      const unlabelledSteering = prior?.draft === true && !prior.labels.includes(NEEDS_STEERING_LABEL);
+      return unlabelledSteering ? labelled(reused, [NEEDS_STEERING_LABEL]) : reused;
+    }
+
+    const metadata = typeof input.metadata === "function" ? await input.metadata() : input.metadata;
+    if (typeof metadata === "string") return failed(metadata);
+    const { labels = [], ...pull } = metadata;
     if (typeof input.metadata === "function") {
       const concurrent = compare(await lookup());
-      if (concurrent) return labelled(concurrent);
+      if (concurrent) return labelled(concurrent, labels);
     }
     let published: PullRequestPublication;
     try {
       published = await phase("steward.pr.create", async () => {
-        const created = match((await request("/pulls", { ...pull, head, base })).value);
+        // A steering PR opens as a draft. GitHub never reports a draft's merge
+        // state as clean, so the legate cannot merge it before the label lands,
+        // or at all if labelling fails. The steward marks it ready once the
+        // human has answered.
+        const created = match((await request("/pulls", {
+          ...pull, head, base, ...(labels.length > 0 && { draft: true }),
+        })).value);
         const result = created && compare([created]);
         if (result) return result;
         throw new GitHubFailure("publication_failed");
@@ -317,7 +336,7 @@ export async function openOrReusePullRequest(input: {
       const recovered = await lookup().then(compare).catch(() => undefined);
       published = recovered ?? failed(failureReason(error));
     }
-    return labelled(published);
+    return labelled(published, labels);
   } catch (error) {
     return failed(failureReason(error));
   }

@@ -146,10 +146,12 @@ branch) is treated as absent, so the repository default is used. Closed PRs do n
 bounded review receipt from the Castra Steward. Hatchery uses validated spawn
 facts and receipt status for the body, and rechecks the exact open PR identity
 after an ambiguous creation response. A `steering` receipt (a planning change
-that gates a slice on an unresolved decision) publishes the PR with a
-"Steering required" section listing the Steward's `STEERING:` lines and then
-applies the `march:needs-steering` label, which holds Legate's auto-merge. A PR
-that could not be labelled is reported as `steering_label_failed`, never as
+that gates a slice on an unresolved decision) publishes the PR as a draft with
+a "Steering required" section listing the Steward's `STEERING:` lines and then
+applies the `march:needs-steering` label, which holds Legate's auto-merge. The
+draft keeps the PR unmergeable before the label lands and if labelling fails.
+A reused draft without the label (a retry) is labelled before success is
+reported. A PR that could not be labelled is reported as `steering_label_failed`, never as
 success. The result reports PR failure even
 when the spawn job itself completes with a pushed commit. Git and PR phases
 are bounded and traced on the slice. [March vision](../../vision.md) ·
