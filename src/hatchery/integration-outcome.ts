@@ -1,6 +1,8 @@
 import { BroodClient } from "../brood/service/client.js";
 import type { PrIntegrationResult } from "../brood/service/types.js";
 import type { AgentFailureReason } from "../observability/agent-output.js";
+import type { PublicationFailure } from "./integration-publisher.js";
+import type { PatchApplicationResult } from "./spawn-handoff.js";
 import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import type { DispatchTrace } from "../observability/spawn-trace.js";
 import { stewardDeadlineExpired, stewardTimeRemaining } from "./integration-deadline.js";
@@ -21,10 +23,23 @@ const diagnostics: Record<FailureReason, string> = {
   persistence: "Brood could not confirm the integration attempt or its outcome.",
 };
 
+/** Structured failure details that the job API reports beside the outcome. */
+export interface IntegrationErrorDetails {
+  readonly application?: PatchApplicationResult;
+  readonly publication?: PublicationFailure;
+}
+
 export class IntegrationOutcomeError extends Error {
+  details: IntegrationErrorDetails = {};
+
   constructor(readonly outcome: FailedOutcome, readonly agentFailureReason?: Exclude<AgentFailureReason, "none">) {
     super(outcome.diagnostic);
     this.name = "IntegrationOutcomeError";
+  }
+
+  withDetails(details: IntegrationErrorDetails): this {
+    this.details = { ...this.details, ...details };
+    return this;
   }
 }
 
@@ -59,7 +74,7 @@ export class IntegrationAttempt {
   timedOut = false;
 
   constructor(
-    private readonly attemptId: string,
+    readonly attemptId: string,
     private readonly stewardDeadline: string,
     spawnId: string,
     private readonly dispatch: DispatchTrace,

@@ -232,11 +232,14 @@ async function cullOrphanedSteward(
   errorText: string,
   ts: string,
   deps: DispatchIoDeps,
+  attemptId?: string,
 ): Promise<any | null> {
   if (!deps.cullStewardForSlice) return null;
   if (/already exists/i.test(errorText)) return null;
   try {
-    const res = await deps.cullStewardForSlice(sliceId, branch);
+    const res = attemptId === undefined
+      ? await deps.cullStewardForSlice(sliceId, branch)
+      : await deps.cullStewardForSlice(sliceId, branch, attemptId);
     if (res?.culled) {
       return {
         action: "steward-cull",
@@ -516,8 +519,14 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // The spawn failed before reaching a useful steward; cull the session it may
     // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
     // rollback can't reach) so it does not leak or hold a budget slot.
+    // An integration failure culls only its own attempt's session, and only
+    // before a commit or PR exists, so a preserved publication stays resumable.
+    const attemptId = slice.hatchery?.attempt_id;
     if (!integrationFailure) {
       const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
+      if (culled) actions.push(culled);
+    } else if (typeof attemptId === "string" && !integrationFailure.commit && !integrationFailure.pullRequest) {
+      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, attemptId);
       if (culled) actions.push(culled);
     }
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
@@ -563,7 +572,12 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         if (!completion) continue;
         ({ job, outcome } = completion);
         if (outcome.status === "failed") {
-          await deps.integration.appendTransition({ type: "slice.integration.failed", sliceId, attemptId, outcome });
+          const stored = await deps.integration.appendTransition({ type: "slice.integration.failed", sliceId, attemptId, outcome });
+          // A retried append returns the event Herald kept from the first write.
+          // Its outcome is the recorded one, so escalate with it.
+          const storedOutcome = (stored as { type?: unknown; outcome?: unknown } | undefined)?.type === "slice.integration.failed"
+            ? parseIntegrationOutcome((stored as { outcome?: unknown }).outcome) : undefined;
+          if (storedOutcome?.status === "failed") outcome = storedOutcome;
           emitLoopSpan({
             name: "legate.integration.complete", traceKey: sliceId, root: false, error: true,
             attributes: { "march.failure_reason": outcome.failureReason },

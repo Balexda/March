@@ -37,7 +37,9 @@ export interface DispatchIoDeps {
   /** Durable integration coordination for new dispatches. */
   integration?: {
     stewardDeadline: () => string;
-    appendTransition: (event: TransitionEvent) => Promise<void>;
+    /** Resolves to the event Herald stored, which is the first write for a
+     *  retried attempt event (its id is `${type}:${attemptId}`). */
+    appendTransition: (event: TransitionEvent) => Promise<unknown>;
     readAttempt: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
     confirmFailure: (sliceId: string, attemptId: string) => Promise<IntegrationAttemptState>;
   };
@@ -53,6 +55,11 @@ export interface DispatchIoDeps {
    *  orphan, so the legate culls it directly via Castra (the only place it lives).
    *
    *  Resolves `{ culled, sessionId }`; `culled:false` when none matched. Absent
-   *  when Castra isn't configured for this container — the `?.` call then no-ops. */
-  cullStewardForSlice?: (sliceId: string, branch: string | undefined) => Promise<{ culled: boolean; sessionId?: string }>;
+   *  when Castra isn't configured for this container — the `?.` call then no-ops.
+   *
+   *  With `attemptId`, it removes only sessions stamped with that integration
+   *  attempt, so a preserved Steward checkout from another attempt is kept. */
+  cullStewardForSlice?: (
+    sliceId: string, branch: string | undefined, attemptId?: string,
+  ) => Promise<{ culled: boolean; sessionId?: string }>;
 }

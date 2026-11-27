@@ -112,7 +112,9 @@ archived. A mismatch after the archive is written fails the archive step.
 ### Terminal PR integration
 
 `POST /integration-attempts` binds `attemptId` to the actual integration
-`spawnId` and its absolute ISO-8601 `stewardDeadline`. It returns 200 with
+`spawnId` and its absolute ISO-8601 `stewardDeadline`. Every integration
+timestamp must carry `Z` or a `±hh:mm` offset; one without a timezone is
+rejected as invalid. It returns 200 with
 `IntegrationAttemptState`. Repeating the same binding returns its current
 state. Registering a new attempt for the same spawn supersedes the previous
 owner and fences it before the new attempt starts. A fenced attempt or a

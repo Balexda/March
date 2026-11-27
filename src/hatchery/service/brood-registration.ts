@@ -102,6 +102,37 @@ export async function registerStewardLaunchWithBrood(
 }
 
 /**
+ * Register a Steward relaunched onto a preserved checkout. Only the Steward row
+ * is written; the spawn row keeps its recorded lifecycle status.
+ */
+export async function registerStewardRelaunchWithBrood(
+  input: StewardLaunchInput,
+  deps: RegisterSpawnDeps = {},
+): Promise<void> {
+  const env = deps.env ?? process.env;
+  if (!deps.client && !broodConfigured(env)) return;
+  const client = deps.client ?? new BroodClient({ env });
+  const warn = deps.warn ?? ((message) => process.stderr.write(`${message}\n`));
+  try {
+    await client.register({
+      id: input.stewardSessionId,
+      kind: "steward",
+      parentId: input.spawnId,
+      agentDeckSessionId: input.stewardSessionId,
+      profile: input.profile,
+      group: input.group,
+      status: "running",
+      repoPath: input.repoPath,
+      branch: input.branch,
+      worktreePath: input.worktreePath,
+    });
+  } catch (err) {
+    if (err instanceof BroodWorkspaceReclaimingError) throw err;
+    warn(`brood relaunch registration failed for spawn ${input.spawnId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
  * Enrich/finalize a SUCCEEDED spawn and its steward in Brood so the registry —
  * not the legate loop — owns their teardown. Runs from the Hatchery service's
  * onSucceeded hook and layers the terminal facts (containerId, imageId, final

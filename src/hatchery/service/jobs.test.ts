@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { errorMessage, JobStore, type JobLogger } from "./jobs.js";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
+import { IntegrationOutcomeError } from "../integration-outcome.js";
 import type { SpawnRequest } from "./types.js";
 
 interface LogCall {
@@ -78,6 +79,21 @@ describe("JobStore", () => {
 
     await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
     expect(store.get(record.id)?.error?.message).toBe("boom");
+  });
+
+  it("reports the apply details an integration outcome failure carries", async () => {
+    const application = { spawnId: "spawn-1", status: "failed" as const, touchedPaths: ["a.ts"], diagnostic: "conflict" };
+    const outcome = {
+      spawnId: "spawn-1", status: "failed" as const, failureReason: "patch_conflict" as const,
+      diagnostic: "The validated patch could not be applied.", completedAt: "2026-11-27T12:00:00.000Z",
+    };
+    const store = new JobStore({
+      executor: async () => { throw new IntegrationOutcomeError(outcome).withDetails({ application }); },
+    });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
+    expect(store.get(record.id)?.error?.application).toEqual(application);
+    expect(store.get(record.id)?.integrationOutcome).toEqual(outcome);
   });
 
   it("logs profile/task_type/slice_id on the spawn-start record", async () => {

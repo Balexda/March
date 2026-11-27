@@ -251,6 +251,43 @@ describe("castra server", () => {
       );
     });
 
+    it("POST /v1/sessions removes a session whose caller abandoned the launch", async () => {
+      let finishLaunch!: () => void;
+      const launch = vi.fn(() => new Promise<CastraSession>((resolve) => { finishLaunch = () => resolve(SAMPLE); }));
+      const remove = vi.fn(async () => ({ removed: true }));
+      adapter = fakeAdapter({ launch, remove } as Partial<AgentDeckAdapter>);
+      app = buildServer({ adapter });
+      const address = await app.listen({ port: 0, host: "127.0.0.1" });
+      const controller = new AbortController();
+      const request = fetch(`${address}/v1/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: "march", repoPath: "/repo", branch: "b", title: "t" }),
+        signal: controller.signal,
+      }).catch(() => undefined);
+      await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+      controller.abort();
+      await request;
+      // Let the server observe the closed connection before the launch returns.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      finishLaunch();
+      await vi.waitFor(() => expect(remove).toHaveBeenCalledWith({
+        profile: "march", sessionId: "sess-1", pruneWorktree: false,
+      }));
+    });
+
+    it("POST /v1/sessions keeps a session whose caller received the response", async () => {
+      app = buildServer({ adapter });
+      const address = await app.listen({ port: 0, host: "127.0.0.1" });
+      const res = await fetch(`${address}/v1/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: "march", repoPath: "/repo", branch: "b", title: "t" }),
+      });
+      expect(res.status).toBe(201);
+      expect(adapter.remove).not.toHaveBeenCalled();
+    });
+
     it("POST /v1/sessions surfaces a launch race as 409 conflict", async () => {
       adapter = fakeAdapter({
         launch: vi.fn(() => {

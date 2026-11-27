@@ -107,7 +107,9 @@ group for its whole window, from before its before-list until its after-list
 is read: it first waits for those already running, and any that arrive meanwhile
 wait for it to finish. After a launch, Castra enables session `auto-mode` only when that
 command's full timeout still fits in the launch budget; otherwise it skips it
-and logs a warning, and the launch still succeeds.
+and logs a warning, and the launch still succeeds. If the caller closes the
+request before the launch returns, Castra removes the session it created
+(keeping the worktree) so an abandoned launch leaves no Steward behind.
 
 Castra provisions the host steward's credential shims at serve startup.
 Each launch, including attachment to an existing worktree, passes an

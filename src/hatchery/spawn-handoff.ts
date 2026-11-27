@@ -99,7 +99,7 @@ import {
   DEFAULT_MANAGER_GROUP,
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
-import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+import { registerStewardLaunchWithBrood, registerStewardRelaunchWithBrood } from "./service/brood-registration.js";
 import type { PrIntegrationResult } from "../brood/service/types.js";
 import { IntegrationAttempt, IntegrationOutcomeError } from "./integration-outcome.js";
 import { attemptDeadlineSignal, stewardDeadlineExpired, stewardOperationSignal, stewardTimeRemaining, withStewardDeadline } from "./integration-deadline.js";
@@ -414,9 +414,12 @@ async function resumePreservedPublication(input: {
   readonly dispatch: DispatchTrace;
   readonly castra: CastraClient;
   readonly attempt?: IntegrationAttempt;
+  readonly title: string;
+  readonly group: string;
 }): Promise<HatcherySpawnResult | undefined> {
   type Preserved = {
     readonly spawnId: string;
+    readonly branch: string;
     readonly sessionId: string;
     readonly worktreePath: string;
     readonly target: AuthorizedStewardTarget;
@@ -449,7 +452,9 @@ async function resumePreservedPublication(input: {
         spawnId, repoPath: input.repoPath, managerWorktreePath: worktreePath, homeDir: input.homeDir,
       });
       const commit = findIntegrationCommit(target, eligibility.handoff);
-      if (commit) return { spawnId, sessionId: record.stewardSessionId, worktreePath, target, handoff: eligibility.handoff, commit };
+      if (commit) {
+        return { spawnId, branch: candidate, sessionId: record.stewardSessionId, worktreePath, target, handoff: eligibility.handoff, commit };
+      }
     } catch (error) {
       if (!input.attempt) throw error;
       return input.attempt.fail(stewardDeadlineExpired() || gitTimedOut(error) ? "timeout" : "commit_failed");
@@ -468,8 +473,10 @@ async function resumePreservedPublication(input: {
     if (preserved) break;
   }
   if (!preserved) return undefined;
-  const { spawnId, sessionId, worktreePath, target, handoff } = preserved;
+  const { spawnId, worktreePath, target, handoff } = preserved;
   input.dispatch.setAttributes({ "march.resumed_spawn_id": spawnId });
+  const sessionId = await input.dispatch.spanAsync("steward.resume.session", () =>
+    ensureResumeSteward(input, preserved));
 
   const application = {
     spawnId, status: "applied" as const, touchedPaths: [...new Set(handoff.touchedPaths)].sort(),
@@ -1201,6 +1208,10 @@ export async function launchAgentDeckManager(
     readonly sliceId?: string;
     /** Steward deadline; aborts the launch in addition to Castra's own budget. */
     readonly signal?: AbortSignal;
+    /** Integration attempt id, stamped into the session metadata. */
+    readonly attemptId?: string;
+    /** False attaches to the existing branch checkout instead of creating it. */
+    readonly createBranch?: boolean;
   },
   castra: CastraClient = createCastraClientFromEnv(),
 ): Promise<AgentDeckManagerSession> {
@@ -1215,11 +1226,15 @@ export async function launchAgentDeckManager(
       group: input.group,
       model: DEFAULT_MANAGER_MODEL,
       traceKey: input.traceKey,
+      ...(input.createBranch === false && { createBranch: false }),
       // Self-describe the session so Herald's pull path can reconcile it to its
       // slice by exact id, not the brittle worktree/title heuristic (#214).
       metadata: {
         spawnId: input.spawnId,
         ...(input.sliceId ? { sliceId: input.sliceId } : {}),
+        // Lets Legate find this attempt's session exactly when Hatchery never
+        // learned it, for example after a lost launch acknowledgement.
+        ...(input.attemptId ? { attemptId: input.attemptId } : {}),
       },
     });
   } catch (err) {
@@ -1251,6 +1266,57 @@ export async function launchAgentDeckManager(
     branch: session.branch || input.branch,
     worktreePath: session.worktreePath,
   };
+}
+
+/**
+ * Return a live Steward session for a preserved checkout. A timed-out attempt
+ * removes its Steward but keeps the checkout, so attach a new session to it
+ * and record that session in place of the removed one.
+ */
+async function ensureResumeSteward(
+  input: {
+    readonly repoPath: string; readonly homeDir?: string; readonly profile: string; readonly traceKey: string;
+    readonly sliceId: string; readonly castra: CastraClient; readonly attempt?: IntegrationAttempt;
+    readonly title: string; readonly group: string; readonly backend: string;
+  },
+  preserved: { readonly spawnId: string; readonly branch: string; readonly sessionId: string; readonly worktreePath: string },
+): Promise<string> {
+  const sessions = await input.castra.listSessions(input.profile, undefined, stewardOperationSignal(LAUNCH_RECONCILE_TIMEOUT_MS));
+  if (sessions.some((session) => session.sessionId === preserved.sessionId)) return preserved.sessionId;
+  const manager = await launchAgentDeckManager({
+    repoPath: input.repoPath,
+    spawnId: preserved.spawnId,
+    branch: preserved.branch,
+    title: input.title,
+    group: input.group,
+    profile: input.profile,
+    traceKey: input.traceKey,
+    sliceId: input.sliceId || undefined,
+    attemptId: input.attempt?.attemptId,
+    createBranch: false,
+    signal: attemptDeadlineSignal(),
+  }, input.castra);
+  updateSpawnRecordStewardSession(preserved.spawnId, manager.sessionId, input.homeDir);
+  if (input.attempt) Object.assign(input.attempt.artifacts, { stewardSessionId: manager.sessionId });
+  await registerStewardRelaunchWithBrood({
+    spawnId: preserved.spawnId,
+    stewardSessionId: manager.sessionId,
+    repoPath: input.repoPath,
+    branch: preserved.branch,
+    worktreePath: manager.worktreePath,
+    backend: input.backend,
+    profile: input.profile,
+    group: input.group,
+  }, { client: input.attempt?.client });
+  return manager.sessionId;
+}
+
+/** Keep the apply or publication details of `cause` on an outcome error. */
+function withErrorDetails(error: unknown, cause: unknown): unknown {
+  if (!(error instanceof IntegrationOutcomeError)) return error;
+  if (cause instanceof StewardApplyError) return error.withDetails({ application: cause.application });
+  if (cause instanceof IntegrationPublicationError) return error.withDetails({ publication: cause.publication });
+  return error;
 }
 
 /** A deadline aborted the launch after Castra had created the session. */
@@ -1966,6 +2032,7 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
             profile: agentDeckProfile,
             traceKey,
             sliceId: sliceId || undefined,
+            attemptId: input.attemptId,
             signal: attemptDeadlineSignal(),
           },
           castra,
@@ -2425,6 +2492,8 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
         dispatch,
         castra,
         attempt,
+        title,
+        group,
       }).catch(async (resumeError: unknown) => {
         dispatch.recordException(resumeError);
         if ((stewardDeadlineExpired() || attempt?.timedOut) && attempt?.artifacts.stewardSessionId) {
@@ -2433,7 +2502,8 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
         if (resumeError instanceof IntegrationOutcomeError) throw resumeError;
         if (attempt) {
           return attempt.fail(stewardDeadlineExpired() ? "timeout" :
-            resumeError instanceof IntegrationPublicationError ? resumeError.publication.failureReason : "pr_failed");
+            resumeError instanceof IntegrationPublicationError ? resumeError.publication.failureReason : "pr_failed")
+            .catch((error: unknown) => { throw withErrorDetails(error, resumeError); });
         }
         if (resumeError instanceof IntegrationPublicationError) throw resumeError;
         stage = "steward_send";
@@ -2600,8 +2670,10 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
     }
 
     if (terminalError) {
-      if (agentFailureReason !== "none") throw new IntegrationOutcomeError(terminalError.outcome, agentFailureReason);
-      throw terminalError;
+      const outcomeError = agentFailureReason !== "none"
+        ? new IntegrationOutcomeError(terminalError.outcome, agentFailureReason).withDetails(terminalError.details)
+        : terminalError;
+      throw withErrorDetails(outcomeError, err);
     }
     if (
       err instanceof SnapshotError ||

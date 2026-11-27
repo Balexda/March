@@ -74,7 +74,12 @@ export function runSpawnInWorker(
     worker.once("message", (message: SpawnWorkerMessage) => {
       settle(() => {
         if (message.ok) resolve(message.result);
-        else if (message.integrationOutcome) reject(new IntegrationOutcomeError(message.integrationOutcome, message.agentFailureReason));
+        else if (message.integrationOutcome) {
+          reject(new IntegrationOutcomeError(message.integrationOutcome, message.agentFailureReason).withDetails({
+            ...(message.application && { application: message.application }),
+            ...(message.publication && { publication: message.publication }),
+          }));
+        }
         else if (request.stewardDeadline) fail(new Error(message.error));
         else if (message.application) reject(new StewardApplyError(message.application, false));
         else if (message.publication) reject(new IntegrationPublicationError(message.publication));
@@ -131,6 +136,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       ok: false,
       ...(err instanceof IntegrationOutcomeError ? { integrationOutcome: err.outcome, agentFailureReason: err.agentFailureReason } : {}),
       error: err instanceof Error ? err.message : String(err),
+      ...(err instanceof IntegrationOutcomeError ? err.details : {}),
       ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
       ...(err instanceof StewardApplyError ? { application: err.application } : {}),
     };

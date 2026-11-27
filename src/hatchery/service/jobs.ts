@@ -169,6 +169,7 @@ export class JobStore {
       record.error = {
         message: errorMessage(err),
         ...(err instanceof IntegrationOutcomeError && err.agentFailureReason && { agentFailureReason: err.agentFailureReason }),
+        ...(err instanceof IntegrationOutcomeError ? err.details : {}),
         ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
         ...(err instanceof StewardApplyError ? { application: err.application } : {}),
       };

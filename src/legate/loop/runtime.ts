@@ -1048,6 +1048,7 @@ async function cullStewardForSlice(
   profile: string,
   sliceId: string,
   branch: string | undefined,
+  attemptId?: string,
 ): Promise<{ culled: boolean; sessionId?: string }> {
   const sessions = await castra().listSessions(profile);
   const want = (branch ?? "").replace(/^feature\//, "");
@@ -1056,7 +1057,7 @@ async function cullStewardForSlice(
   // the same sliceId/branch, and leaving the extras behind keeps leaking
   // worktrees + holding budget slots. Remove all so the cull is complete.
   const matches = sessions.filter(
-    (s) =>
+    (s) => attemptId !== undefined ? s.metadata?.attemptId === attemptId :
       (s.metadata?.sliceId !== undefined && s.metadata.sliceId === sliceId) ||
       (want.length > 0 && (s.branch ?? "").replace(/^feature\//, "") === want),
   );
@@ -1088,13 +1089,13 @@ function dispatchIoDeps(meta: any): DispatchIoDeps {
       stewardDeadline: () => stewardDeadlineFromNow(env),
       appendTransition: async (event) => {
         const id = "attemptId" in event && event.attemptId ? `${event.type}:${event.attemptId}` : undefined;
-        await legateHerald().append(meta.profile, { ...event, id });
+        return legateHerald().append(meta.profile, { ...event, id });
       },
       readAttempt: (sliceId, attemptId) => integrationBrood(sliceId).readIntegrationAttempt(attemptId),
       confirmFailure: (sliceId, attemptId) => integrationBrood(sliceId).confirmIntegrationFailure(attemptId),
     },
-    cullStewardForSlice: (sliceId: string, branch: string | undefined) =>
-      cullStewardForSlice(meta.profile, sliceId, branch),
+    cullStewardForSlice: (sliceId: string, branch: string | undefined, attemptId?: string) =>
+      cullStewardForSlice(meta.profile, sliceId, branch, attemptId),
   };
 }
 

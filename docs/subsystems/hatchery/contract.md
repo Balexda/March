@@ -126,7 +126,7 @@ Job record response:
 | `error.agentFailureReason` | string | Validated agent failure category when available. |
 | `error.publication` | object | Bounded `commit_failed`, `push_failed`, or `timeout` with the spawn ID, recorded branch, patch digest, and local commit when available. |
 | `error.message` | string | Present when execution fails. |
-| `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. |
+| `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. `error.application` and `error.publication` stay present when the failure also carries an `integrationOutcome`, including across the worker thread boundary. |
 
 Hatchery binds publication to the Brood-recorded linked checkout. It checks the
 branch tip for a commit representing the same spawn and patch, then compares
@@ -139,7 +139,11 @@ and its checkout for retry. A later dispatch of the slice that collides with
 that preserved branch at manager launch resumes it, but only when the prior
 spawn record's `admittedWork` (slice id, prompt sha256, backend) matches the
 current dispatch. Hatchery re-verifies the commit against the prior spawn's
-recorded extraction and pushes it again using the existing Steward session.
+recorded extraction and pushes it again using the recorded Steward session.
+If that session is no longer live (for example a timed-out attempt removed
+it), Hatchery attaches a new Steward to the preserved checkout
+(`createBranch: false`), records it on the spawn record and in Brood, and
+uses it for review.
 A successful push records the branch as the checkout's upstream and binds PR
 publication to that same GitHub origin. Hatchery reuses an open PR only when
 both repositories, the exact source branch and the resolved base match. A

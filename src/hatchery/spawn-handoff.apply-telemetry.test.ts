@@ -11,6 +11,7 @@ import type { SpawnBackend } from "../spawn/backends.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { traceIdForDispatch } from "../observability/trace-ids.js";
 import { removeSpawnWorktree } from "../brood/worktree.js";
+import { loadSpawnRecord } from "../brood/spawn-record.js";
 import { BroodClient } from "../brood/service/client.js";
 import type { IntegrationAttemptState } from "../brood/service/types.js";
 import { TesseraClient } from "../tessera/client.js";
@@ -23,8 +24,9 @@ import * as branchPublisher from "./integration-publisher.js";
 // resolve it) with telemetry on, then inspects the steward.apply span + the
 // emitted log record.
 
-const { worktreePath, sendPrompt, sessionOutput, workerPatch, recordedState, launchCollision, removeSession } = vi.hoisted(() => ({
+const { worktreePath, sendPrompt, sessionOutput, workerPatch, recordedState, launchCollision, removeSession, liveSessions } = vi.hoisted(() => ({
   launchCollision: { value: false },
+  liveSessions: { value: ["ad-xyz"] as string[] },
   worktreePath: { value: "" },
   sendPrompt: vi.fn(async () => {}),
   removeSession: vi.fn(async () => ({ removed: true })),
@@ -59,7 +61,10 @@ vi.mock("../castra/client.js", () => {
   class CastraClient {}
   const createCastraClientFromEnv = () => ({
     launchSession: vi.fn(
-      async (req: { title: string; group?: string; branch: string }) => {
+      async (req: { title: string; group?: string; branch: string; createBranch?: boolean }) => {
+        if (req.createBranch === false) {
+          return { sessionId: "ad-relaunched", title: req.title, group: req.group ?? "g", branch: req.branch, worktreePath: worktreePath.value };
+        }
         if (launchCollision.value) {
           throw new Error(`agent-deck launch failed: Error: branch 'feature/${req.branch}' already exists`);
         }
@@ -72,6 +77,7 @@ vi.mock("../castra/client.js", () => {
         };
       },
     ),
+    listSessions: vi.fn(async () => liveSessions.value.map((sessionId) => ({ sessionId }))),
     removeSession,
     sendPrompt,
     sessionOutput,
@@ -175,6 +181,7 @@ beforeEach(() => {
   removeSession.mockClear();
   sessionOutput.mockReset();
   launchCollision.value = false;
+  liveSessions.value = ["ad-xyz"];
   recordedState.paths = undefined;
   recordedState.unavailable = false;
   vi.stubEnv("MARCH_BROOD_URL", "");
@@ -460,6 +467,31 @@ it("resumes a preserved publication when a retry collides at manager launch", as
   const push = spans.find((candidate) => candidate.name === "steward.push");
   expect(push?.status.code).not.toBe(2);
   expect(push?.spanContext().traceId).toBe(traceIdForDispatch(sliceId));
+});
+
+it("relaunches a removed Steward on the preserved checkout before resuming publication", async () => {
+  workerPatch.value = ADD_PATCH;
+  const target = worktreePath.value;
+  const remote = gitAt(target, "remote", "get-url", "origin").trim();
+  gitAt(target, "remote", "set-url", "origin", path.join(makeHome(), "missing.git"));
+  const homeDir = makeHome();
+  const sliceId = "publication-relaunch-slice";
+  const failure = await runHatcherySpawn({
+    repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId,
+  }).catch((error: { publication: { spawnId: string; commit: { commitSha: string } } }) => error.publication);
+  const spawnId = (failure as { spawnId: string }).spawnId;
+
+  gitAt(target, "remote", "set-url", "origin", remote);
+  launchCollision.value = true;
+  liveSessions.value = [];
+  sendPrompt.mockClear();
+  const result = await runHatcherySpawn({ repoPath, branch, prompt: "do the thing", backend, homeDir, sliceId });
+
+  expect(result.spawnId).toBe(spawnId);
+  expect(result.managerSession).toMatchObject({ sessionId: "ad-relaunched", worktreePath: target });
+  expect(loadSpawnRecord(spawnId, homeDir)?.stewardSessionId).toBe("ad-relaunched");
+  expect(sendPrompt).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ad-relaunched" }));
+  expect(sendPrompt).not.toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ad-xyz" }));
 });
 
 it("decodes Git-quoted header paths so a non-ASCII filename passes the staged-path check", async () => {
