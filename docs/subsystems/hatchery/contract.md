@@ -91,7 +91,7 @@ Spawn request body:
 | `taskName` | string | No | Smithy task name metadata. |
 | `sliceId` | string | No | Smithy slice correlation id. |
 | `attemptId` | string | No | Dispatch attempt ID and Hatchery job ID. Supply it with `stewardDeadline`. |
-| `stewardDeadline` | ISO UTC timestamp string | No | Absolute integration deadline. Supply it with `attemptId`. |
+| `stewardDeadline` | ISO UTC timestamp string | No | Absolute integration deadline. Supply it with `attemptId`. It also aborts the Castra Steward session launch. If Castra creates the session after the deadline, Hatchery stops it and records `timeout`. |
 | `toolchain` | string | No | Toolchain selection. `auto` or absent lets Hatchery detect the stack; explicit values must be in Hatchery's allow-list. |
 
 ### `GET /spawns/:id`

@@ -152,6 +152,20 @@ async function adoptOpenPrOnCollision(
   };
 }
 
+/** Raised before the spawn request leaves Legate, so Hatchery never saw it. */
+class DispatchRejectedError extends Error {}
+
+/**
+ * True when Hatchery cannot have accepted the spawn: Legate failed before
+ * sending it, or Hatchery answered with a 4xx. A transport failure, timeout,
+ * or 5xx stays ambiguous because the job may exist.
+ */
+function dispatchDefinitelyRejected(err: unknown): boolean {
+  if (err instanceof DispatchRejectedError) return true;
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
 // Launch a codex spawn through the Hatchery SERVICE. POSTs the spawn request via
 // the async Hatchery client and returns the server job id;
 // completePendingHatcheryDispatches polls that id with getJob() across ticks
@@ -165,7 +179,7 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
 ): Promise<{ jobId: string }> {
   const repoPath = deps.meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
-    throw new Error("repo path is missing");
+    throw new DispatchRejectedError("repo path is missing");
   }
   const dispatchIdent = dispatchIdentity(item);
   const spawnRequest = {
@@ -289,12 +303,18 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
         job_id: attempt.attemptId, attempt_id: attempt.attemptId, steward_deadline: attempt.stewardDeadline,
       });
     }
-    const launched = attempt
-      ? await launchHatcheryDispatch(item, sliceId, deps, attempt).catch(() => {
+    const integration = deps.integration;
+    const launched = attempt && integration
+      ? await launchHatcheryDispatch(item, sliceId, deps, attempt).catch(async (err: unknown) => {
+          emitLoopSpan({ name: "legate.integration.dispatch", traceKey: sliceId, root: false, error: true });
           // An accepted request can lose its acknowledgement. Keep polling by the
           // ID recorded before POST so Brood can settle the attempt after restart.
-          emitLoopSpan({ name: "legate.integration.dispatch", traceKey: sliceId, root: false, error: true });
-          return { jobId: attempt.attemptId };
+          if (!dispatchDefinitelyRejected(err)) return { jobId: attempt.attemptId };
+          // A definite rejection fails now, once Brood fences the attempt so no
+          // later write from it can publish. Without the fence, keep polling.
+          const confirmed = await integration.confirmFailure(sliceId, attempt.attemptId).catch(() => undefined);
+          if (!confirmed?.fenced || confirmed.outcome) return { jobId: attempt.attemptId };
+          throw err;
         })
       : await launchHatcheryDispatch(item, sliceId, deps);
     state.slices[sliceId].hatchery.job_id = attempt?.attemptId ?? launched.jobId;

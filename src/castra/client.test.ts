@@ -410,3 +410,19 @@ describe("castra client — operation deadlines", () => {
     }
   });
 });
+
+describe("CastraClient.launchSession deadline", () => {
+  it("aborts the launch when the caller's signal fires", async () => {
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+    })) as unknown as typeof fetch;
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl });
+    const controller = new AbortController();
+    const launch = client.launchSession({
+      profile: "p", repoPath: "/repo", branch: "b", title: "t", signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    controller.abort(new Error("steward deadline"));
+    await expect(launch).rejects.toThrow();
+  });
+});

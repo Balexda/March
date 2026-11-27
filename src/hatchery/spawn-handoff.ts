@@ -1199,12 +1199,15 @@ export async function launchAgentDeckManager(
     readonly traceKey?: string;
     /** Dispatch slice id, stamped into the session's queryable metadata (#214). */
     readonly sliceId?: string;
+    /** Steward deadline; aborts the launch in addition to Castra's own budget. */
+    readonly signal?: AbortSignal;
   },
   castra: CastraClient = createCastraClientFromEnv(),
 ): Promise<AgentDeckManagerSession> {
   let session;
   try {
     session = await castra.launchSession({
+      signal: input.signal,
       profile: input.profile,
       repoPath: input.repoPath,
       branch: input.branch,
@@ -1220,6 +1223,12 @@ export async function launchAgentDeckManager(
       },
     });
   } catch (err) {
+    if (input.signal?.aborted) {
+      // Castra may still finish a launch the deadline aborted. Report any such
+      // session so the caller's timeout path can stop it.
+      const created = await findLaunchedManager(castra, input).catch(() => undefined);
+      if (created) throw new ManagerLaunchAbortedError(created);
+    }
     throw new HatcherySpawnError(
       `Castra session launch failed: ${
         err instanceof CastraClientError || err instanceof Error
@@ -1235,6 +1244,34 @@ export async function launchAgentDeckManager(
     );
   }
 
+  return {
+    sessionId: session.sessionId,
+    title: session.title || input.title,
+    group: session.group || input.group,
+    branch: session.branch || input.branch,
+    worktreePath: session.worktreePath,
+  };
+}
+
+/** A deadline aborted the launch after Castra had created the session. */
+export class ManagerLaunchAbortedError extends HatcherySpawnError {
+  constructor(readonly manager: AgentDeckManagerSession) {
+    super("Castra session launch exceeded the Steward deadline.");
+    this.name = "ManagerLaunchAbortedError";
+  }
+}
+
+const LAUNCH_RECONCILE_TIMEOUT_MS = 10_000;
+
+async function findLaunchedManager(
+  castra: CastraClient,
+  input: { readonly spawnId: string; readonly profile: string; readonly group: string; readonly title: string; readonly branch: string },
+): Promise<AgentDeckManagerSession | undefined> {
+  const sessions = await castra.listSessions(
+    input.profile, input.group, AbortSignal.timeout(LAUNCH_RECONCILE_TIMEOUT_MS),
+  );
+  const session = sessions.find((candidate) => candidate.metadata?.spawnId === input.spawnId);
+  if (!session) return undefined;
   return {
     sessionId: session.sessionId,
     title: session.title || input.title,
@@ -1917,21 +1954,30 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
   let stage: SpawnFailureStage = "manager_launch";
   try {
     stewardTimeRemaining(1);
-    manager = await dispatch.spanAsync("manager.launch", () =>
-      launchAgentDeckManager(
-        {
-          repoPath: input.repoPath,
-          spawnId,
-          branch,
-          title,
-          group,
-          profile: agentDeckProfile,
-          traceKey,
-          sliceId: sliceId || undefined,
-        },
-        castra,
-      ),
-    );
+    try {
+      manager = await dispatch.spanAsync("manager.launch", () =>
+        launchAgentDeckManager(
+          {
+            repoPath: input.repoPath,
+            spawnId,
+            branch,
+            title,
+            group,
+            profile: agentDeckProfile,
+            traceKey,
+            sliceId: sliceId || undefined,
+            signal: attemptDeadlineSignal(),
+          },
+          castra,
+        ),
+      );
+    } catch (error) {
+      // Track a session created after the deadline so the timeout path stops it.
+      if (error instanceof ManagerLaunchAbortedError) manager = error.manager;
+      throw error;
+    }
+    // A launch that returns after the deadline must not start further work.
+    stewardTimeRemaining(1);
 
     const spawnPrompt = buildSpawnCommitPrompt(input.prompt);
     stage = "record_init";

@@ -114,6 +114,8 @@ export interface LaunchSessionRequest {
    * `traceKey`, which is only forwarded as a span-correlation header.
    */
   readonly metadata?: Record<string, string>;
+  /** Caller deadline; aborts the launch in addition to the client timeout. */
+  readonly signal?: AbortSignal;
 }
 
 export interface SendPromptRequest {
@@ -232,6 +234,7 @@ export class CastraClient {
       },
       expectStatus: 201,
       timeoutMs: CASTRA_LAUNCH_TIMEOUT_MS,
+      signal: req.signal,
     });
     return (body as { session: CastraSession }).session;
   }

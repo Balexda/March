@@ -373,6 +373,52 @@ describe("durable integration completion", () => {
     expect(state.slices).toMatchObject({ s: { stage: "hatchery-pending", hatchery: { steward_deadline: deadline } } });
   });
 
+  const rejected = () => Object.assign(new Error("invalid spawn request"), { status: 400 });
+
+  it("fails a dispatch Hatchery rejected once Brood fences the attempt", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    const out = await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(integration.confirmFailure).toHaveBeenCalledWith("s", expect.any(String));
+    expect(state.slices.s).toMatchObject({ stage: "escalated", escalated_reason: "hatchery_dispatch_failed" });
+    expect(out.failures).toHaveLength(1);
+  });
+
+  it("fails a dispatch that never left Legate", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const meta = { profile: "prof", worker_group: "wg", repo: {}, processor_name: "proc", paired_legate: "leg" };
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, meta } as any));
+    expect(integration.confirmFailure).toHaveBeenCalledOnce();
+    expect(state.slices.s.stage).toBe("escalated");
+  });
+
+  it("keeps polling a rejected dispatch when Brood cannot fence it", async () => {
+    const state: any = { slices: {} };
+    const integration = io({ confirmFailure: vi.fn(async () => { throw new Error("Brood down"); }) });
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
+  it("keeps polling when the attempt already has an outcome", async () => {
+    const state: any = { slices: {} };
+    const integration = io({ confirmFailure: vi.fn(async () => ({ ...attempt, fenced: true, outcome: result })) });
+    const postSpawn = vi.fn(async () => { throw rejected(); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
+  it("keeps polling a server error without fencing", async () => {
+    const state: any = { slices: {} };
+    const integration = io();
+    const postSpawn = vi.fn(async () => { throw Object.assign(new Error("boom"), { status: 503 }); });
+    await launchDispatch(state, beforeDeadline, item(), "s", deps({ integration, postSpawn }));
+    expect(integration.confirmFailure).not.toHaveBeenCalled();
+    expect(state.slices.s.stage).toBe("hatchery-pending");
+  });
+
   it("recovers published success when the Hatchery job is gone", async () => {
     const state = pending();
     const integration = io({ readAttempt: async () => ({ ...attempt, outcome: result }) });
