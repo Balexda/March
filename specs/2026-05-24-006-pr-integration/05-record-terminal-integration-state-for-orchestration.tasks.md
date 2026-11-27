@@ -41,16 +41,17 @@
 
 - [ ] **Read terminal outcomes through the orchestration boundary**
 
-  Wire Hatchery job completion and Legate's existing dispatch completion path to the typed outcome. Expose the same durable outcome to Herald through a typed Brood read. When Brood has no outcome, Herald uses Legate's fallback terminal event from its own event log (AS 5.5).
+  Wire Hatchery job completion and Legate's existing dispatch completion path to the typed outcome. Expose the same durable outcome to Herald through a typed Brood read. When Brood confirms it has no outcome, Herald uses Legate's terminal failure event from its own event log (AS 5.5).
 
   _Acceptance criteria:_
 
   - Orchestration distinguishes incomplete work, terminal success, and terminal failure. Existing retry and escalation policy receives the stable failure reason. Report a persistence failure through the job result when the durable write is unavailable.
-  - Persist a lookup from the dispatch attempt to the actual integration spawn, including resumed publication. Legate can recover that result if its first poll arrives after job expiry or a Hatchery restart. A prior attempt’s result cannot complete the pending dispatch.
-  - Handle a missing durable outcome. When Legate dispatches the attempt, it records the attempt's absolute Steward deadline in its dispatch transition event in Herald. The dispatch-attempt lookup in Brood stores the same deadline. Legate decides expiry from this stored deadline after a job expiry, a Hatchery or Legate restart, or a failed lookup write.
-    - If Legate reads a job result that reports a `persistence` failure, it records that terminal failure as a Herald transition event right away. The reason then survives a later job expiry.
-    - Suppose the stored deadline passes with no Brood outcome and no recorded job-reported failure. Legate records a terminal `timeout` failure, because it has no evidence that the run finished. This holds whether the lookup is missing, or present without an outcome.
-    - That Herald event is the durable record orchestration reads, and it routes through the existing retry and escalation policy. Herald sequences the event, so its fold projects the event as the attempt's terminal outcome. That fold is the same state the Herald read exposes, so Herald needs no Brood read in this case. A late Brood write from that attempt cannot reopen the dispatch or replace that outcome in the fold.
+  - Before any integration work starts, durably write a lookup in Brood from the dispatch attempt to the actual integration spawn. Resumed publication uses the same lookup. The lookup stores the attempt's absolute Steward deadline. Legate records the same deadline in its dispatch transition event in Herald. If the lookup write fails, Hatchery fails the job with `persistence` before extraction, application, or publication. Nothing is published without a lookup, so Legate can always find a published outcome. A prior attempt's result cannot complete the pending dispatch.
+  - Brood's outcome is authoritative. Before Legate records any terminal failure, it makes one atomic Brood call through the lookup. If Brood has an outcome, the call returns it, and that outcome wins. Otherwise the call fences the attempt, so Brood rejects any later outcome write from it. A failure counts as confirmed only when this call fences the attempt.
+    - A `persistence` failure reported in a job result may be an uncertain write whose acknowledgement was lost. Legate records it only after Brood confirms that it has no outcome for the attempt.
+    - If the stored deadline passes and Brood confirms that no outcome is linked to the attempt, Legate records a terminal `timeout` failure.
+    - If Brood is unreachable, Legate makes no terminal decision for the attempt. It keeps the dispatch pending, emits an errored span, and retries on later ticks.
+    - Legate records each confirmed failure as a Herald transition event. Herald's fold projects the event as the attempt's terminal outcome, and the Herald read returns the same result as the Brood read. The event routes through the existing retry and escalation policy.
   - Verify success and failure through the worker, job API, and orchestration read paths without reading container logs or Steward output. Update affected subsystem contracts.
 
 **PR Outcome**: Legate and Herald can retrieve terminal integration status and available PR and commit identifiers from structured state.
