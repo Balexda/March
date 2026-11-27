@@ -59,8 +59,8 @@ describe("ensureStewardSkills", () => {
     const skillPath = path.join(root, "plugin", "skills", "steward-pr", "SKILL.md");
     const body = await fsp.readFile(skillPath, "utf-8");
     expect(body).toContain("name: steward-pr");
-    // The skill encodes the title rule (no `smithy ` prefix, no US/S numbers).
-    expect(body).toContain("<verb>: <concise goal>");
+    expect(body).toContain("## Summary");
+    expect(body).toContain("## Validation");
 
     // Re-running overwrites cleanly rather than throwing.
     await expect(ensureStewardSkills()).resolves.toBe(root);

@@ -1,109 +1,31 @@
 ---
 name: steward-pr
-description: "Open the pull request for a completed Steward spawn. Use after the worker's patch is applied/committed and pushed, when you (the Hatchery manager/steward session) need to create the PR. Defines the required title and body format: a parentage-grounded Summary, surfaced spec debt + uncertainty, and a one-line validation summary — no per-file Changes dump."
-allowed-tools: Bash(git status *) Bash(git log *) Bash(git diff *) Bash(git branch *) Bash(gh pr create *) Bash(gh pr view *)
+description: "Review a completed Steward spawn after Hatchery verifies and pushes its integration commit. Return a review receipt for the Steward publication flow."
+allowed-tools: Bash(git status *) Bash(git log *) Bash(git diff *) Bash(git branch *) Bash(git show *)
 ---
 # steward-pr
 
-You are the **Steward** opening the pull request for one completed Smithy
-workflow step. The worker's change is already committed in this worktree
-and the branch is pushed. Your job here is **only** to compose and create the PR
-with the title and body format below, then report the PR URL. If review finds a
-correction is needed, report `NEED:` and leave the published branch intact.
+Review the published commit from the handoff on its exact branch. Check the
+diff against the operator request and the slice's acceptance criteria, including
+completion checkboxes. Run the smallest meaningful verification available for
+the changed code. Leave the commit and branch intact.
 
-This skill owns the **PR title + body convention** for every automated steward
-PR. Follow it exactly — these PRs are read in bulk by a single operator, so
-every wasted line costs.
-
-## Inputs you already have
-
-- **The Smithy command** that produced this work (e.g. `smithy.forge … 1`,
-  `smithy.cut …`) — from your original request.
-- **The artifact path** the command targeted (e.g.
-  `specs/<spec-folder>/NN-<slug>.tasks.md`) — from your original request.
-- **The published diff** and **commit log** in this worktree.
-- **The artifact files themselves**, readable in this worktree — read them to
-  derive parentage and spec debt (below). Do not guess from memory.
-
-## Title
-
-```
-<verb>: <concise goal>
-```
-
-- `<verb>` is the **Smithy verb with the `smithy.` prefix stripped** —
-  `forge`, `cut`, `mark`, `render`, `strike`, `spark`, `ignite`, `engrave`,
-  `audit`, or `fix`. **Never** prefix it with `smithy ` (no `smithy forge:`).
-- `<concise goal>` is the slice/step goal in plain words, ≤ ~70 chars total.
-- **Do NOT** put `US#`, `S#`, slice numbers, FR numbers, or acceptance-scenario
-  IDs in the title — they are spec-internal and meaningless to later readers.
-
-Good: `forge: bounded spawn output capture envelope`
-Bad:  `smithy forge: US1 S1 bounded spawn output capture envelope`
-
-## Body
-
-Include these sections in order. The linked artifact and published commit carry the file-level details.
-
-```
 ## Summary
-<RFC id> → M<n> <milestone> → F<n> <feature> → <spec name> → Slice <n>: <goal>
-<1–2 sentences: what this slice adds and why it is the right increment.>
 
-## Spec debt & uncertainty
-- <SD-NNN (open|inherited): one-line description>
-- Assumption: <a relevant assumption that shaped this work>
-- <any verification gap you hit, e.g. "could not run integration suite — no Docker">
+Describe the outcome of your review. If the commit needs corrections,
+include a `NEED: <problem> — <next action>` line. Keep the reason brief
+and omit credentials and raw output.
+
+Hatchery uses the Steward credential boundary to look up or create the PR.
+It builds the PR Summary from the validated spawn, extraction and pushed
+branch. Leave GitHub publication to that flow.
 
 ## Validation
-build ✅ · typecheck ✅ · test ✅ (N passed)
-```
 
-### Composing the Summary parentage breadcrumb
+State which checks ran and their outcomes. End with a plain-text receipt on
+its own line in the format `REVIEW <receipt ID> <status>`, using the ID from
+the current handoff. Choose one status.
 
-Walk the artifact headers (read the files; relative paths are repo-rooted):
-
-1. Open the **tasks/strike artifact** at the command's path. Its `**Source**:`
-   line names the **spec** file (and the user-story number). Read the slice's
-   `## Slice <n> … **Goal**:` for the goal text.
-2. Open that **spec** file. Its `**Input**:` line names the **RFC** and the
-   **milestone** (e.g. "… Milestone 1: Spawn"); its `**Source Feature Map**:`
-   line names the **feature** (e.g. "Feature 5: Spawn Output Extraction").
-3. Assemble: `RFC <id> → M<n> <milestone> → F<n> <feature> → <spec> → Slice <n>: <goal>`.
-
-If a link is genuinely absent (e.g. a `.strike.md` with no spec), include the
-breadcrumb you can build and skip the rest — do not fabricate ancestry.
-
-### Surfacing spec debt & uncertainty
-
-This is the highest-value section for steering — make it accurate.
-
-- Read the artifact's `## Specification Debt` table. List every row whose
-  `Status` is **`open`** or **`inherited`** as a one-liner:
-  `SD-NNN (open): <Description>`. Skip `resolved` rows.
-- Read the spec's `## Assumptions` section; surface any assumption that
-  materially shaped this slice's implementation.
-- Add any **verification gap or uncertainty you personally hit** while
-  reviewing/validating the diff (untested path, ambiguous requirement, a
-  decision you had to make).
-- If there is genuinely nothing outstanding, write exactly: `None outstanding.`
-
-### Validation
-
-One line summarizing the commands you ran and their outcomes — e.g.
-`build ✅ · typecheck ✅ · test ✅ (95 passed)`. State failures or skips plainly
-rather than implying everything passed.
-
-## Create the PR
-
-1. Read the published branch name (`git branch --show-current`). Hatchery
-   already pushed it; do not push it again.
-2. Create the PR against the **exact pushed branch** — do not rename it or add a
-   `feature/` prefix; downstream PR discovery tracks the branch by name. Always
-   pass that branch with `--head` so `gh` never offers to push or fork:
-   `gh pr create --head "<branch>" --title "<title>" --body "<body>"`.
-3. Report the PR URL on the **final line** of your reply as `PR: <url>`.
-4. If any step fails, escalate via
-   `NEED: <one-line summary> — <one-line next action>` instead of stopping
-   silently. Never end your turn after a push without either an opened PR or a
-   `NEED:` — a stranded steward requires manual recovery.
+- `passed` when the commit is approved and verification succeeded.
+- `unavailable` when the commit is approved and verification could not run.
+- `failed` when the commit needs corrections, including a failed check.

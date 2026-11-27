@@ -16,6 +16,7 @@ export interface SpawnRequest {
   readonly managerGroup?: string;
   readonly title?: string;
   readonly branch?: string;
+  readonly baseBranch?: string;
   readonly profile?: string;
   readonly taskType?: string;
   readonly taskName?: string;

@@ -98,6 +98,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       managerGroup: request.managerGroup,
       title: request.title,
       branch: request.branch,
+      baseBranch: request.baseBranch,
       taskType: request.taskType,
       taskName: request.taskName,
       sliceId: request.sliceId,

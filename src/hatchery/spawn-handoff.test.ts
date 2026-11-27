@@ -139,14 +139,15 @@ describe("spawn-handoff", () => {
   });
 
   it("asks the Steward to verify the published commit and escalate corrections", () => {
-    const prompt = buildManagerPrompt({ operatorPrompt: "Do the work." });
+    const prompt = buildManagerPrompt({ operatorPrompt: "Do the work.", reviewId: "review-id" });
     expect(prompt).toContain("Review the published commit");
     expect(prompt).toContain("every acceptance criterion");
     expect(prompt).toContain("`[ ]` to `[x]`");
     expect(prompt).toContain("NEED:");
     expect(prompt).toContain("Do not edit, commit, or push");
     expect(prompt).toContain("exact published branch");
-    expect(prompt).toContain("PR: <url>");
+    expect(prompt).toContain("Review receipt ID: review-id");
+    expect(prompt).toContain("REVIEW <receipt ID> <passed|unavailable|failed>");
   });
 
   it("validates selected backend auth without exposing secret values or paths", () => {

@@ -50,6 +50,9 @@ export function validateSpawnRequest(
 
   const repoPath = typeof body.repoPath === "string" ? body.repoPath.trim() : "";
   if (!repoPath) return { ok: false, error: "repoPath is required." };
+  if (body.baseBranch !== undefined && (typeof body.baseBranch !== "string" || !body.baseBranch.trim())) {
+    return { ok: false, error: "baseBranch must be a non-empty branch name." };
+  }
 
   // Validate the toolchain at the HTTP boundary against the same allow-list the
   // CLI/profile route use. Untrusted input reaches resolveToolchain() server-
@@ -76,6 +79,7 @@ export function validateSpawnRequest(
       managerGroup: body.managerGroup,
       title: body.title,
       branch: body.branch,
+      baseBranch: body.baseBranch,
       profile: body.profile,
       taskType: body.taskType,
       taskName: body.taskName,
