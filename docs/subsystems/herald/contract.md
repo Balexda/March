@@ -30,8 +30,11 @@ the verb's allowlist. The Tessera app and the login configured by
 CodeRabbit standing are still recorded. The PR snapshot includes `is_draft` and
 GitHub timestamps of raw CodeRabbit reviews and sampled March triggers, grouped
 by head. `copilot_review_times` carries the latest verified Copilot review timestamp per head for request eligibility and pacing. `reviews_complete: false` marks partial evidence from an unfinished
-review page walk. Herald refreshes older snapshots that lack review verdicts or
-draft status on the next observation.
+review page walk. The snapshot also carries `needs_steering`, true when the PR has the
+`march:needs-steering` label. It is read from the same `gh pr view` call, and a
+label change bumps `updatedAt`, so the change cursor sees it. Herald refreshes
+older snapshots that lack review verdicts, draft status or `needs_steering` on
+the next observation.
 
 A Legate `slice.stage.changed` event may include `handledFeedback` with a
 `kind` of `inline` or `conversation` and an array of string `commentIds`.

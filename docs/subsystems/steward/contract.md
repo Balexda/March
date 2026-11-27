@@ -74,7 +74,15 @@ The target worktree, target branch, spawn id, and slice id remain correlated for
 client in `src/castra/client.ts`. To create a PR, Hatchery sends the Steward the
 verified commit, pushed branch and a fresh review receipt ID. The Steward
 reviews the commit and reports `REVIEW <receipt ID> <passed|unavailable|failed>`
-on a separate line. The receipt carries verification status. Hatchery
+on a separate line. The receipt carries verification status. For a planning
+verb (`cut`, `render`, `mark`, `strike`, `ignite`) the Steward also checks
+whether the change gates a slice on an unresolved decision. Ordinary spec debt
+does not count. If it does, the Steward prints one `STEERING:` line per
+question (the question, its options and trade-offs, and the slices it blocks),
+reports `REVIEW <receipt ID> steering` and ends with a `NEED:` line. Hatchery
+opens the PR with the `march:needs-steering` label. Once the human answers, the
+Steward applies the decision to the spec or task file, pushes, and removes the
+label, which re-arms the merge. Hatchery
 publishes from validated handoff facts after an approving receipt and returns
 the typed GitHub outcome to the caller.
 

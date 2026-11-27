@@ -43,6 +43,7 @@ import {
   type PullRequestMetadata,
   type PullRequestPublication,
 } from "./pr-publisher.js";
+import { NEEDS_STEERING_LABEL, PLANNING_VERBS, type PlanningVerb } from "../shared/steering.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -949,8 +950,42 @@ function normalizeTrailingNewline(text: string): string {
   return text.slice(0, end) + "\n";
 }
 
+/**
+ * The planning verb (`cut`, `render`, …) a spawn ran, from the Smithy command in
+ * its operator prompt or, failing that, the slice id suffix. Undefined for code
+ * verbs (`forge`, `fix`) and unrecognised requests.
+ */
+export function planningVerbOf(operatorPrompt: string, sliceId?: string): PlanningVerb | undefined {
+  const command = /\bsmithy\.([a-z]+)\b/i.exec(operatorPrompt)?.[1]?.toLowerCase();
+  const verb = command ?? PLANNING_VERBS.find((v) => String(sliceId ?? "").toLowerCase().endsWith(`-${v}`));
+  return PLANNING_VERBS.find((v) => v === verb);
+}
+
+/** Steering guidance for a planning steward (launch-failure recovery plan, step 1). */
+function steeringGuidance(verb: PlanningVerb): string[] {
+  return [
+    `Steering check (this is a planning step: smithy.${verb}):`,
+    "Before you report, check whether the change gates any slice on an unresolved decision:",
+    "wording such as \"slice N must not be forged until SD-001 is resolved\", \"blocked until X is",
+    "decided\", or a slice that cannot be built until a human chooses between options.",
+    "- Ordinary specification debt is NOT a reason to escalate. Agents build through open debt;",
+    "  only an explicit gate on a decision the work cannot proceed without counts.",
+    "- If there is no such gate, report as usual.",
+    "- If there is a gate, do not report it as done. For each steering question print one line",
+    "  that begins with STEERING: and gives the question, its options with their trade-offs,",
+    "  and the slices it blocks. Then use REVIEW <receipt ID> steering as the receipt, and end",
+    `  with a NEED: line asking the human to decide. Hatchery opens the PR with the ${NEEDS_STEERING_LABEL}`,
+    "  label, and March will not auto-merge it while that label is set.",
+    "- When the human answers: apply the decision to the spec or task file (mark the debt row",
+    "  resolved and remove the gate), commit and push to the PR branch, remove the label with",
+    `  \`gh pr edit <number> --remove-label ${NEEDS_STEERING_LABEL}\`, and report the PR as done.`,
+    "",
+  ];
+}
+
 export function buildManagerPrompt(input: {
   readonly operatorPrompt: string;
+  readonly sliceId?: string;
   readonly patchPath?: string;
   readonly spawnOutputPath?: string;
   readonly metadataPath?: string;
@@ -973,6 +1008,7 @@ export function buildManagerPrompt(input: {
           "",
         ]
       : [];
+  const planningVerb = planningVerbOf(input.operatorPrompt, input.sliceId);
   return [
     "You are the March Hatchery management session for a completed spawn.",
     "",
@@ -993,15 +1029,28 @@ export function buildManagerPrompt(input: {
     "   changed from `[ ]` to `[x]` in the published commit.",
     "4. If corrections are needed, report NEED: <problem> — <next action>.",
     "   Leave the published commit and branch intact. Do not edit, commit, or push.",
+    ...(planningVerb ? ["", ...steeringGuidance(planningVerb)] : []),
     "5. Use the march-steward:steward-pr skill to report your review for the exact published branch.",
     "   Hatchery uses this result to open or reuse the PR. Do not call GitHub to publish it yourself.",
     ...(input.reviewId ? [
       `Review receipt ID: ${input.reviewId}`,
-      "On a separate line report REVIEW <receipt ID> <passed|unavailable|failed>.",
+      `On a separate line report REVIEW <receipt ID> <${planningVerb ? "passed|unavailable|failed|steering" : "passed|unavailable|failed"}>.`,
       "Use passed only for successful checks, unavailable if you approved but could not run checks,",
+      ...(planningVerb ? ["steering if the change gates a slice on an unresolved decision (see the steering check),"] : []),
       "and failed if corrections are needed. Include the receipt even when escalating via NEED:.",
     ] : []),
   ].join("\n");
+}
+
+/** The steward's `STEERING:` lines, deduplicated, in order. The prompt never
+ *  starts a line with the marker, so an echoed prompt contributes nothing. */
+export function steeringQuestionsFrom(output: string): string[] {
+  const questions: string[] = [];
+  for (const line of output.split("\n")) {
+    const question = /^STEERING:\s*(.+)$/.exec(line.trim())?.[1]?.trim();
+    if (question && !questions.includes(question)) questions.push(question);
+  }
+  return questions;
 }
 
 function publicationSummary(result: PullRequestPublication): string {
@@ -1028,7 +1077,7 @@ async function reviewAndPublish(input: {
   const { commit, repository, artifacts, handoff, dispatch } = input;
   const reviewId = crypto.randomUUID();
   const managerPrompt = buildManagerPrompt({
-    commit, operatorPrompt: input.prompt, reviewId,
+    commit, operatorPrompt: input.prompt, reviewId, sliceId: input.sliceId,
     patchPath: artifacts.patchPath,
     spawnOutputPath: artifacts.spawnOutputPath,
     metadataPath: artifacts.metadataPath,
@@ -1050,7 +1099,7 @@ async function reviewAndPublish(input: {
         return "review_failed";
       }
       const signal = AbortSignal.timeout(300_000);
-      const receipt = new RegExp(`^REVIEW ${reviewId} (passed|unavailable|failed)$`);
+      const receipt = new RegExp(`^REVIEW ${reviewId} (passed|unavailable|failed|steering)$`);
       try {
         while (!signal.aborted) {
           const output = await input.castra.sessionOutput(input.profile, input.sessionId, 100, signal);
@@ -1058,9 +1107,10 @@ async function reviewAndPublish(input: {
           for (const line of output.split("\n")) {
             const verification = receipt.exec(line.trim())?.[1];
             if (verification === "failed") return "review_failed";
-            if (verification === "passed" || verification === "unavailable") {
+            if (verification === "passed" || verification === "unavailable" || verification === "steering") {
               return buildPullRequestMetadata({
                 commit, backend: handoff.backend, touchedPaths: handoff.touchedPaths, verification,
+                ...(verification === "steering" && { steeringQuestions: steeringQuestionsFrom(output) }),
               });
             }
           }

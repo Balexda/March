@@ -145,7 +145,12 @@ different base yields `base_mismatch`, while an unresolved base yields
 branch) is treated as absent, so the repository default is used. Closed PRs do not block a fresh PR. A fresh PR requires a
 bounded review receipt from the Castra Steward. Hatchery uses validated spawn
 facts and receipt status for the body, and rechecks the exact open PR identity
-after an ambiguous creation response. The result reports PR failure even
+after an ambiguous creation response. A `steering` receipt (a planning change
+that gates a slice on an unresolved decision) publishes the PR with a
+"Steering required" section listing the Steward's `STEERING:` lines and then
+applies the `march:needs-steering` label, which holds Legate's auto-merge. A PR
+that could not be labelled is reported as `steering_label_failed`, never as
+success. The result reports PR failure even
 when the spawn job itself completes with a pushed commit. Git and PR phases
 are bounded and traced on the slice. [March vision](../../vision.md) ·
 [Operating philosophy](../../operating-philosophy.md).

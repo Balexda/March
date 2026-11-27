@@ -233,11 +233,12 @@ describe("slice pure helpers", () => {
       b: { stage: "pr-open", pr_blocker: "owes_review_threads" },
       c: { stage: "pr-in-fix", pr_blocker: "owes_comments" },
       d: { stage: "pr-open", pr_blocker: "ci_failing" },
+      g: { stage: "pr-open", pr_blocker: "needs_steering" },
       e: { stage: "pr-open", pr_blocker: "none" }, // all-clear → not a tracked blocker
       f: { stage: "pr-open" }, // unstamped → counts in no blocker series
     };
     const { prBlocker } = summarizeSlicesByStage(slices);
-    expect(prBlocker).toEqual({ conflicting: 1, owes_review_threads: 1, owes_comments: 1, ci_failing: 1 });
+    expect(prBlocker).toEqual({ conflicting: 1, owes_review_threads: 1, owes_comments: 1, ci_failing: 1, needs_steering: 1 });
   });
 
   it("mergeBlocker classifies the dominant blocker in babysit's dispatch precedence", () => {
@@ -259,6 +260,18 @@ describe("slice pure helpers", () => {
     ).toBe("none");
     expect(mergeBlocker({}, pr({}))).toBe("none");
     expect(mergeBlocker({}, {})).toBe("none"); // no observed PR
+    // The steering hold reports once babysit has nothing of its own to fix.
+    expect(mergeBlocker({}, pr({ needs_steering: true }))).toBe("needs_steering");
+    expect(mergeBlocker({}, pr({ needs_steering: true, checks: "FAIL" }))).toBe("ci_failing");
+    expect(mergeBlocker({}, pr({ needs_steering: false }))).toBe("none");
+  });
+
+  it("mergeReadiness counts a steering hold as waiting on a human, even under a relaxed cut policy", () => {
+    const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
+    const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean" };
+    const relaxed = { byTaskType: { cut: { approval: false } } };
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, needs_steering: true }, relaxed)).toBe("waiting-approval");
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, needs_steering: false }, relaxed)).toBe("ready");
   });
 
   it("mergeReadiness is a 3-way over the LIVE pr, honoring the per-task-type merge policy", () => {
@@ -349,6 +362,7 @@ describe("slice pure helpers", () => {
         owes_review_threads: 0,
         owes_comments: 0,
         ci_failing: 0,
+        needs_steering: 0,
       },
     });
   });
