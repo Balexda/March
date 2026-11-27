@@ -9,7 +9,7 @@
   "scripts": {
     "docs:contracts:check": "node scripts/docs-contracts/check.mjs",
     "docs:contracts:extract": "tsup src/contracts/autogen-command-cli.ts --format esm --out-dir .cache/docs-contracts-extract --clean --external typescript --silent && node .cache/docs-contracts-extract/autogen-command-cli.js",
-    "pretest": "tsup src/cli.ts --format esm --clean && npm run skills:generate",
+    "pretest": "npm run build",
     "test": "npm run test:l0 && npm run test:l1 && npm run test:l2-cassette && npm run test:l3-cassette",
     "test:vitest": "vitest run",
     "test:l0": "node scripts/run-layered-tests.mjs l0",
@@ -18,7 +18,7 @@
     "test:l3-cassette": "node scripts/run-layered-tests.mjs l3-cassette",
     "test:taxonomy": "node scripts/test-taxonomy.mjs",
     "skills:generate": "node scripts/generate-skills.mjs",
-    "build": "tsup src/cli.ts --format esm --clean && npm run skills:generate",
+    "build": "tsup src/cli.ts --format esm --clean && tsup src/modules/v0.ts --format esm --dts && npm run skills:generate",
     "build:spawn-claude-image": "docker build -t march-spawn-claude:latest -f docker/spawn-claude.Dockerfile docker",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
     "build:spawn-claude-jvm-image": "docker build -t march-spawn-claude-jvm:latest -f docker/spawn-claude-jvm.Dockerfile docker",
@@ -33,7 +33,8 @@
     "build:images": "npm run build:castra-image && npm run build:statio-image && npm run build:tessera-image && npm run build:hatchery-image && npm run build:brood-image && npm run build:herald-image && npm run build:legate-image",
     "deploy:local": "npm run build && npm run build:images && node dist/cli.js upgrade",
     "start": "node dist/cli.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:work-module-package": "npm run build && node scripts/test-work-module-package.mjs"
   },
   "repository": {
     "type": "git",
@@ -74,5 +75,11 @@
     "tsup": "^9.0.0",
     "typescript": "^6.0.3",
     "vitest": "^5.1.0"
+  },
+  "exports": {
+    "./modules/v0": {
+      "types": "./dist/v0.d.ts",
+      "import": "./dist/v0.js"
+    }
   }
 }

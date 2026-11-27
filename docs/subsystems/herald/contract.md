@@ -5,6 +5,10 @@
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
+The published `@balexda/march/modules/v0` authoring contract defines the producer
+and destination observe facets Herald calls. See the
+[work module authoring reference](../legate/contract.md#work-module-authoring).
+
 Herald observes each registered profile and appends changes to its event log.
 The profile checkout's local GitHub `origin` identifies the repository before
 Herald makes GitHub requests. Herald requests a repository-scoped Tessera

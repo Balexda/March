@@ -2,6 +2,44 @@
 
 Legate owns March's autonomous loop: it observes Smithy and service state, projects slice state, dispatches runnable work, babysits running workers and stewards, and records terminal outcomes. This contract documents the Legate-owned behavior that L2 tests and operators can assert without scraping terminal logs or re-authoring Herald, Hatchery, Brood, Castra, or Steward contracts.
 
+## Work module authoring
+
+In-tree and installed TypeScript authors import the same ESM subpath,
+`@balexda/march/modules/v0`. Set a module's `contractVersion` from
+`WORK_MODULE_CONTRACT_VERSION`. The contract version is independent of the
+March package version.
+
+| Role or facet | Authoring surface |
+|---------------|-------------------|
+| Producer observe | `ProducerObserve` discovers candidates from a bound profile and source observations. |
+| Producer act | `ProducerAct` prepares instructions or a handoff, registers responders by canonical kind and signal category, and can consume a landed report to propose follow-up feedback or labels. |
+| Destination observe | `DestinationObserve` reports the item's checks, comments and approvals for the bound destination. |
+| Destination act | `DestinationAct` evaluates the item, signals and scoped policy to propose landing or review, or returns a blocked decision with a diagnostic. |
+| Origin act | `OriginAct` proposes origin close-out from a successful landed report and can receive a correlated close-out result. |
+
+Herald calls observe facets and Legate calls act facets. Context carries scoped
+data and optional steward metadata. Act facets propose typed intents for core
+execution. See the [March vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
+
+`WorkItem` records a namespaced work kind, current and participating producers,
+origin, destination, entry stage and one origin close-out owner. Artifact and
+steward references are optional, so an existing Dependabot PR can enter at
+`land` with an artifact and without a steward. `resolveWorkKind` maps the bare
+Smithy verbs to their `smithy/` kinds. `createHandoffSuccessor` checks the
+predecessor and receiving producer declaration, then carries the origin,
+close-out owner and producer history into the successor.
+
+`SignalSet` carries both platform checks alongside user checks, review threads,
+conversation comments and approvals. `Intent` discriminates step-specific
+inputs. Module facets can request only their declared subset of steps.
+`LandedReport` correlates the item, destination and artifact. `CloseOutReport`
+correlates the item, origin and owner with a closed, already-completed or
+failed outcome. A failure includes a diagnostic.
+
+Run `npm run test:work-module-package` to type-check and exercise representative
+consumers from the checkout and a separate npm tarball installation.
+
 ## Public Interface
 
 <!-- BEGIN AUTOGEN -->
