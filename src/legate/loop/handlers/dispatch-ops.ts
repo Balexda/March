@@ -504,6 +504,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     slice: any, sliceId: string, errorText: string,
     integrationFailure?: Extract<PrIntegrationResult, { status: "failed" }>,
     agentFailureReason?: AgentFailureReason,
+    publicationPreserved = Boolean(integrationFailure?.commit || integrationFailure?.pullRequest),
   ) => {
     slice.stage = "escalated";
     // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
@@ -525,7 +526,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     if (!integrationFailure) {
       const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
       if (culled) actions.push(culled);
-    } else if (typeof attemptId === "string" && !integrationFailure.commit && !integrationFailure.pullRequest) {
+    } else if (typeof attemptId === "string" && !publicationPreserved) {
       const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, attemptId);
       if (culled) actions.push(culled);
     }
@@ -572,6 +573,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         if (!completion) continue;
         ({ job, outcome } = completion);
         if (outcome.status === "failed") {
+          const observed = outcome;
           const stored = await deps.integration.appendTransition({ type: "slice.integration.failed", sliceId, attemptId, outcome });
           // A retried append returns the event Herald kept from the first write.
           // Its outcome is the recorded one, so escalate with it.
@@ -583,8 +585,11 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
             attributes: { "march.failure_reason": outcome.failureReason },
           });
           slice.integration_outcome = outcome;
+          // The cleanup decision keeps the newest observation: a commit or PR
+          // seen after the first stored failure still protects its checkout.
           await escalate(
             slice, sliceId, outcome.failureReason + ": " + outcome.diagnostic, outcome, job?.error?.agentFailureReason,
+            Boolean(outcome.commit || outcome.pullRequest || observed.commit || observed.pullRequest),
           );
           continue;
         }

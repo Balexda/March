@@ -1298,6 +1298,8 @@ async function ensureResumeSteward(
   }, input.castra);
   updateSpawnRecordStewardSession(preserved.spawnId, manager.sessionId, input.homeDir);
   if (input.attempt) Object.assign(input.attempt.artifacts, { stewardSessionId: manager.sessionId });
+  // A refused registration leaves the new Steward untracked; stop it but keep
+  // the preserved checkout so a later attempt can still resume it.
   await registerStewardRelaunchWithBrood({
     spawnId: preserved.spawnId,
     stewardSessionId: manager.sessionId,
@@ -1307,7 +1309,13 @@ async function ensureResumeSteward(
     backend: input.backend,
     profile: input.profile,
     group: input.group,
-  }, { client: input.attempt?.client });
+  }, { client: input.attempt?.client }).catch(async (error: unknown) => {
+    await input.castra.removeSession({
+      profile: input.profile, sessionId: manager.sessionId, pruneWorktree: false, traceKey: input.traceKey,
+      signal: stewardOperationSignal(LAUNCH_RECONCILE_TIMEOUT_MS),
+    }).catch(() => undefined);
+    throw error;
+  });
   return manager.sessionId;
 }
 

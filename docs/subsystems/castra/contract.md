@@ -109,7 +109,8 @@ wait for it to finish. After a launch, Castra enables session `auto-mode` only w
 command's full timeout still fits in the launch budget; otherwise it skips it
 and logs a warning, and the launch still succeeds. If the caller closes the
 request before the launch returns, Castra removes the session it created
-(keeping the worktree) so an abandoned launch leaves no Steward behind.
+(keeping the worktree) so an abandoned launch leaves no Steward behind. The removal
+runs in a `castra.launch.abandoned_remove` span, errored when removal fails.
 
 Castra provisions the host steward's credential shims at serve startup.
 Each launch, including attachment to an existing worktree, passes an

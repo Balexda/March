@@ -494,6 +494,27 @@ describe("durable integration completion", () => {
     expect(cullStewardForSlice).not.toHaveBeenCalled();
   });
 
+  it("keeps the Steward when the stored failure lacks the commit a later observation carries", async () => {
+    const state: any = pending();
+    const observed = {
+      spawnId, status: "failed", failureReason: "push_failed", completedAt: beforeDeadline,
+      diagnostic: "The integration commit could not be pushed.", commit: result.commit,
+    } as const;
+    const stored = {
+      spawnId, status: "failed", failureReason: "timeout", completedAt: beforeDeadline,
+      diagnostic: "The integration attempt timed out.",
+    } as const;
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true }));
+    const integration = io({
+      confirmFailure: async () => ({ ...attempt, fenced: true, outcome: observed }),
+      appendTransition: vi.fn(async () => ({ type: "slice.integration.failed", sliceId: "s", attemptId: "attempt", outcome: stored })),
+    });
+    const getJob = async () => ({ status: "failed", integrationOutcome: observed });
+    await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob, cullStewardForSlice }));
+    expect(state.slices.s.integration_outcome).toEqual(stored);
+    expect(cullStewardForSlice).not.toHaveBeenCalled();
+  });
+
   it("leaves an expired dispatch pending when Brood is unavailable and records timeout after fencing", async () => {
     const state = pending();
     const confirmFailure = vi.fn()

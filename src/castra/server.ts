@@ -423,17 +423,25 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             "castra session launched",
           );
           if (abandoned) {
-            await adapter.remove({ profile: body.profile, sessionId: launched.sessionId, pruneWorktree: false })
-              .catch((err: unknown) => {
-                request.log.warn(
-                  { "castra.op": "launch", "castra.session_id": launched.sessionId, err: (err as Error).message },
-                  "could not remove abandoned castra session",
-                );
-              });
-            request.log.info(
-              { "castra.op": "launch", "castra.session_id": launched.sessionId, ...sliceAttr(sliceId) },
-              "removed castra session whose launch request was abandoned",
-            );
+            try {
+              await withCastraSpanAsync(
+                {
+                  op: "launch.abandoned_remove",
+                  traceKey: traceKeyFor(request),
+                  attributes: { "march.profile": body.profile, "castra.session_id": launched.sessionId, ...sliceAttr(sliceId) },
+                },
+                () => Promise.resolve(adapter.remove({ profile: body.profile, sessionId: launched.sessionId, pruneWorktree: false })),
+              );
+              request.log.info(
+                { "castra.op": "launch", "castra.session_id": launched.sessionId, ...sliceAttr(sliceId) },
+                "removed castra session whose launch request was abandoned",
+              );
+            } catch (err) {
+              request.log.warn(
+                { "castra.op": "launch", "castra.session_id": launched.sessionId, err: (err as Error).message, ...sliceAttr(sliceId) },
+                "could not remove abandoned castra session",
+              );
+            }
           }
           return launched;
         },

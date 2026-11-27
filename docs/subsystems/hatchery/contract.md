@@ -143,7 +143,8 @@ recorded extraction and pushes it again using the recorded Steward session.
 If that session is no longer live (for example a timed-out attempt removed
 it), Hatchery attaches a new Steward to the preserved checkout
 (`createBranch: false`), records it on the spawn record and in Brood, and
-uses it for review.
+uses it for review. If Brood refuses that registration, Hatchery stops the new
+Steward and keeps the checkout.
 A successful push records the branch as the checkout's upstream and binds PR
 publication to that same GitHub origin. Hatchery reuses an open PR only when
 both repositories, the exact source branch and the resolved base match. A

@@ -20,6 +20,7 @@ import { createCastraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import { traceIdForDispatch } from "../observability/trace-ids.js";
 import type { FastifyInstance } from "fastify";
+import pino from "pino";
 
 const SAMPLE: CastraSession = {
   sessionId: "sess-1",
@@ -274,6 +275,31 @@ describe("castra server", () => {
       await vi.waitFor(() => expect(remove).toHaveBeenCalledWith({
         profile: "march", sessionId: "sess-1", pruneWorktree: false,
       }));
+    });
+
+    it("POST /v1/sessions warns, not reports success, when removing an abandoned session fails", async () => {
+      let finishLaunch!: () => void;
+      const launch = vi.fn(() => new Promise<CastraSession>((resolve) => { finishLaunch = () => resolve(SAMPLE); }));
+      const remove = vi.fn(async () => { throw new Error("agent-deck remove failed"); });
+      const lines: string[] = [];
+      const stream = { write: (line: string) => { lines.push(line); } };
+      adapter = fakeAdapter({ launch, remove } as Partial<AgentDeckAdapter>);
+      app = buildServer({ adapter, logger: pino({ level: "info" }, stream) });
+      const address = await app.listen({ port: 0, host: "127.0.0.1" });
+      const controller = new AbortController();
+      const request = fetch(`${address}/v1/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ profile: "march", repoPath: "/repo", branch: "b", title: "t" }),
+        signal: controller.signal,
+      }).catch(() => undefined);
+      await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+      controller.abort();
+      await request;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      finishLaunch();
+      await vi.waitFor(() => expect(lines.join("")).toContain("could not remove abandoned castra session"));
+      expect(lines.join("")).not.toContain("removed castra session whose launch request was abandoned");
     });
 
     it("POST /v1/sessions keeps a session whose caller received the response", async () => {
