@@ -139,11 +139,11 @@ describe("requeue apply", () => {
         agentDeckSessionId: "dead-1",
         repoPath: "/repo",
         worktreePath: "/wt/s",
-        branch: "smithy/cut/s",
+        branch: "feature/smithy/cut/s",
       }),
     );
     expect(c.broodTeardown).toHaveBeenLastCalledWith("dead-1", expect.objectContaining({ force: true, reason: "operator-requeue" }));
-    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/cut/s", "s");
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "feature/smithy/cut/s", "s");
     expect(d.closePr).not.toHaveBeenCalled();
     expect(state.raw.slices.s).toBeUndefined();
     expect(state.perSlice.s).toBeUndefined();
@@ -172,7 +172,30 @@ describe("requeue apply", () => {
     const d = deps({ deleteRemoteBranch: vi.fn().mockResolvedValue(true) });
     const res = await apply(assess(state), ctx(), state, d);
     expect(d.closePr).toHaveBeenCalledWith("/repo", 7, expect.stringMatching(/by jb: off the rails/), "s");
-    expect(res.actions[0].detail).toMatch(/closed PR #7; deleted remote branch b/);
+    expect(res.actions[0].detail).toMatch(/closed PR #7; deleted remote branch feature\/b/);
+  });
+
+  it("failed spawn (no session, worktree or PR recorded): reclaims agent-deck's real feature/ branch + derived worktree", async () => {
+    // The branch_collision incident: the fold kept only the symbolic dispatch
+    // branch, so the old handler registered `smithy/forge/x` with no worktree and
+    // Brood "tore down" a branch that never existed — the orphan survived.
+    const state = loopState({
+      repoPath: "/home/u/Dev/March",
+      raw: { slices: { x: { stage: "escalated", branch: "smithy/forge/x" } } },
+      requeueRequests: [req("x")],
+    });
+    const c = ctx();
+    const d = deps();
+    const res = await apply(assess(state), c, state, d);
+    expect(c.broodRegister).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoPath: "/home/u/Dev/March",
+        worktreePath: "/home/u/Dev/WorkTrees/March/feature-smithy-forge-x",
+        branch: "feature/smithy/forge/x",
+      }),
+    );
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/home/u/Dev/March", "feature/smithy/forge/x", "x");
+    expect(res.actions[0]).toMatchObject({ action: "requeue-done" });
   });
 
   it("refusal clears the request and records it", async () => {
@@ -232,7 +255,7 @@ describe("requeue of an archived hold (#592)", () => {
     const res = await apply(decisions, c, state, d);
     expect(c.broodTeardown).not.toHaveBeenCalled();
     expect(d.closePr).not.toHaveBeenCalled();
-    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/forge/s", "s");
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "feature/smithy/forge/s", "s");
     expect(emitted(c)).toEqual([{ type: "slice.recovery.requested", sliceId: "s", rung: 3 }]);
     expect(state.raw.archived_slices.s).toBeUndefined();
     expect(res.actions[0]).toMatchObject({ action: "requeue-done", archived: true, terminal: "CLOSED" });
@@ -246,7 +269,7 @@ describe("requeue of an archived hold (#592)", () => {
     const c = ctx();
     const d = deps();
     await apply(assess(state), c, state, d);
-    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/forge/s", "s");
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "feature/smithy/forge/s", "s");
     expect(emitted(c)).toEqual([{ type: "slice.recovery.requested", sliceId: "s", rung: 3 }]);
   });
 

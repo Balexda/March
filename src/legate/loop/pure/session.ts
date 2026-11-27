@@ -5,6 +5,8 @@
  * pure and unit-testable.
  */
 
+import path from "node:path";
+
 export interface WorkerSummary {
   waiting: number;
   running: number;
@@ -106,6 +108,31 @@ export function addBranchVariants(branches: Set<string>, value: unknown): void {
   branches.add(normalized);
   if (normalized.startsWith("feature/")) branches.add(normalized.slice("feature/".length));
   else branches.add(`feature/${normalized}`);
+}
+
+/**
+ * The on-disk workspace agent-deck creates for a slice's manager session: the
+ * local branch is the dispatched bare branch under a `feature/` prefix
+ * (`smithy/forge/x` → `feature/smithy/forge/x`), and the worktree lives at
+ * `<repo-parent>/WorkTrees/<repo-name>/feature-<branch with / → ->`. Recorded
+ * facts win (`actual_branch` from the PR head, `worktree_path` from the
+ * session); the derivation covers a slice whose spawn failed before either was
+ * recorded — exactly the orphan a requeue/relaunch must still reach. Pure.
+ */
+export function managerWorkspace(
+  slice: any,
+  repoPath: string,
+): { bareBranch: string; featureBranch: string; branch: string; worktreePath: string } {
+  const rawBranch = typeof slice?.branch === "string" ? slice.branch : "";
+  const bareBranch = rawBranch.replace(/^feature\//, "");
+  const featureBranch = bareBranch ? "feature/" + bareBranch : "";
+  const actual = typeof slice?.actual_branch === "string" ? slice.actual_branch : "";
+  const recordedPath = typeof slice?.worktree_path === "string" ? slice.worktree_path : "";
+  const derivedPath =
+    bareBranch && repoPath
+      ? path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath), "feature-" + bareBranch.replace(/\//g, "-"))
+      : "";
+  return { bareBranch, featureBranch, branch: actual || featureBranch, worktreePath: recordedPath || derivedPath };
 }
 
 /** Does a PR's head branch fall within the expected branch set? Pure. */

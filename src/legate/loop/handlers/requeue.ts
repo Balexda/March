@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState, RequeueRequest } from ".
 import { emptyHandlerResult } from "../state/types.js";
 import { dropRecoveredSlice, dropSession } from "../state/mutations.js";
 import { releasableArchive } from "../pure/slice.js";
+import { managerWorkspace } from "../pure/session.js";
 
 /**
  * Operator REQUEUE (#588/#593): "throw this slice's output away and put the smithy
@@ -135,8 +136,12 @@ interface StepOutcome {
 /** Step 1: tear the incarnation down through Brood (exact path, #155). */
 async function teardownIncarnation(sliceId: string, slice: any, state: LoopState, ctx: HandlerContext): Promise<StepOutcome> {
   const sessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
-  const worktreePath = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
-  const branch = String(slice.actual_branch || slice.branch || "");
+  // The REAL on-disk names, not the symbolic dispatch branch: a spawn that failed
+  // before a PR/session was recorded leaves only `slice.branch` (`smithy/…`), but
+  // agent-deck created `feature/smithy/…` and its worktree. Registering the bare
+  // name made Brood "tear down" a branch that never existed and report success,
+  // leaving the orphan to collide with every re-dispatch.
+  const { worktreePath, branch } = managerWorkspace(slice, state.repoPath ?? "");
   const opts = { force: true, reason: "operator-requeue", traceKey: sliceId };
 
   if (sessionId) {
@@ -218,7 +223,9 @@ export async function apply(
     const releasing = d.action === "release-archived";
     const slice = releasing ? state.archived[d.sliceId] : state.slices[d.sliceId];
     const sessionId = !releasing && typeof slice.worker_session_id === "string" ? slice.worker_session_id : null;
-    const branch = String(slice.actual_branch || slice.branch || "");
+    // Pushed March branches carry the `feature/` prefix too (the PR head), so
+    // the bare dispatch name would miss them.
+    const { branch } = managerWorkspace(slice, state.repoPath ?? "");
     const notes: string[] = [];
     const archivedAttrs = releasing ? { archived: true, terminal: d.terminal } : {};
 
