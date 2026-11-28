@@ -157,6 +157,15 @@ facts and receipt status for the body, and rechecks the exact open PR identity
 after an ambiguous creation response. A managed job fails if PR publication
 fails, including when the pushed commit remains available for retry.
 
+A `steering` receipt (a planning change that gates a slice on an unresolved
+decision) publishes the PR as a draft with a "Steering required" section
+listing the Steward's `STEERING:` lines and then applies the
+`march:needs-steering` label, which holds Legate's auto-merge. The draft keeps
+the PR unmergeable before the label lands and if labelling fails. A reused
+draft without the label (a retry) is labelled before success is reported. A PR
+that could not be labelled is reported as `steering_label_failed`, never as
+success.
+
 Hatchery binds each attempt to the actual artifact-producing spawn and its
 absolute deadline in Brood before extracting a new patch or resuming
 publication. A retained job is returned when the caller repeats a POST with its

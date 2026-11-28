@@ -46,6 +46,19 @@ describe("reduce / fold", () => {
     expect(state.seq).toBe(4);
   });
 
+  it("carries the steering hold on the folded PR snapshot, and drops it when the label is removed", () => {
+    seq = 0;
+    const held = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 620, state: "OPEN", needs_steering: true } }),
+    ]);
+    expect(held.slices.s1.pr).toMatchObject({ number: 620, needs_steering: true });
+    const released = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 620, state: "OPEN", needs_steering: false } })],
+      held,
+    );
+    expect(released.slices.s1.pr).toMatchObject({ number: 620, needs_steering: false });
+  });
+
   it("tracks session presence (appear then disappear)", () => {
     seq = 0;
     const appeared = foldEvents([

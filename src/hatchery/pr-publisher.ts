@@ -5,6 +5,7 @@ import type { DispatchTrace } from "../observability/spawn-trace.js";
 import { TesseraClient, TesseraClientError } from "../tessera/client.js";
 import { fetchDuringStewardAttempt, stewardOperationSignal } from "./integration-deadline.js";
 import type { IntegrationCommit } from "./integration-publisher.js";
+import { NEEDS_STEERING_LABEL, NEEDS_STEERING_LABEL_SPEC } from "../shared/steering.js";
 
 export interface PullRequestRecord {
   readonly provider: "github";
@@ -19,7 +20,7 @@ export interface PullRequestRecord {
 }
 
 type FailureReason = "base_unresolved" | "base_mismatch" | "head_mismatch" | "unauthorized" | "forbidden" |
-  "network" | "timeout" | "publication_failed" | "review_failed" | "unsupported_origin";
+  "network" | "timeout" | "publication_failed" | "review_failed" | "unsupported_origin" | "steering_label_failed";
 
 export type PullRequestPublication =
   | { readonly status: "succeeded"; readonly pullRequest: PullRequestRecord }
@@ -37,6 +38,7 @@ const diagnostics: Record<FailureReason, string> = {
   publication_failed: "GitHub pull request publication failed.",
   review_failed: "The Steward review did not approve publication.",
   unsupported_origin: "The pushed origin is not a supported GitHub repository.",
+  steering_label_failed: `The pull request was opened but the ${NEEDS_STEERING_LABEL} label could not be applied.`,
 };
 
 export function pullRequestFailure(commit: IntegrationCommit, failureReason: FailureReason,
@@ -64,9 +66,17 @@ function failureReason(error: unknown): FailureReason {
 export interface PullRequestMetadata {
   readonly title: string;
   readonly body: string;
+  /** Labels applied right after the PR is created (GitHub's create call takes none). */
+  readonly labels?: readonly string[];
 }
 
-export type Verification = "passed" | "unavailable";
+/** `steering`: approved as written, but it gates a slice on a decision only a
+ *  human can make, so the PR opens with {@link NEEDS_STEERING_LABEL} and the
+ *  legate will not auto-merge it until the label is removed. */
+export type Verification = "passed" | "unavailable" | "steering";
+
+export const STEERING_QUESTION_LIMIT = 10;
+const STEERING_QUESTION_CHARS = 600;
 
 function clean(value: string): string {
   return value
@@ -85,8 +95,11 @@ export function buildPullRequestMetadata(input: {
   backend: string;
   touchedPaths: readonly string[];
   verification?: Verification;
+  /** The steward's `STEERING:` lines, for a `steering` verification. */
+  steeringQuestions?: readonly string[];
 }): PullRequestMetadata {
   const { commit, touchedPaths } = input;
+  const steering = input.verification === "steering";
   const branch = clean(commit.branch);
   const title = `Review spawn ${clean(commit.spawnId)}`.slice(0, PR_TITLE_LIMIT);
   const header = [
@@ -97,7 +110,22 @@ export function buildPullRequestMetadata(input: {
     `- Extraction: validated patch ${commit.patchSha256} affecting ${touchedPaths.length} path(s)`,
     "- Touched paths:",
   ].join("\n");
-  const footer = `\n\n## Validation\n${input.verification === "passed" ? "Steward verification passed." : "Verification results unavailable."}`;
+  const questions = (input.steeringQuestions ?? []).slice(0, STEERING_QUESTION_LIMIT).map((question) => {
+    const text = clean(question).trim();
+    return text.length > STEERING_QUESTION_CHARS ? text.slice(0, STEERING_QUESTION_CHARS - 1) + "…" : text;
+  }).filter(Boolean);
+  const steeringSection = steering
+    ? [
+      "",
+      "",
+      "## Steering required",
+      `This change gates work on a decision that is still open. March will not auto-merge it while the \`${NEEDS_STEERING_LABEL}\` label is set.`,
+      "Answer in the steward session: the steward applies the decision, removes the gate, and removes the label.",
+      ...(questions.length ? questions.map((question) => `- ${question}`) : ["- The steward did not list the questions; see its session."]),
+    ].join("\n")
+    : "";
+  const validation = input.verification === "passed" || steering ? "Steward verification passed." : "Verification results unavailable.";
+  const footer = `${steeringSection}\n\n## Validation\n${validation}`;
   if (header.length + footer.length + 64 > PR_BODY_LIMIT) throw new GitHubFailure("publication_failed");
   const pathLines: string[] = [];
   let remaining = PR_BODY_LIMIT - header.length - footer.length - 64;
@@ -111,7 +139,7 @@ export function buildPullRequestMetadata(input: {
   if (pathLines.length < touchedPaths.length) {
     pathLines.push(`\n  - ${touchedPaths.length - pathLines.length} more path(s) omitted`);
   }
-  return { title, body: header + pathLines.join("") + footer };
+  return { title, body: header + pathLines.join("") + footer, ...(steering && { labels: [NEEDS_STEERING_LABEL] }) };
 }
 
 interface GitHubPull {
@@ -119,6 +147,8 @@ interface GitHubPull {
   html_url?: string;
   state?: string;
   created_at?: string;
+  draft?: boolean;
+  labels?: Array<{ name?: string }>;
   head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null };
   base?: { ref?: string; repo?: { full_name?: string } | null };
 }
@@ -194,7 +224,7 @@ export async function openOrReusePullRequest(input: {
       throw new GitHubFailure(response.status >= 500 ? "network" : "publication_failed");
     }
 
-    type Matched = { record: PullRequestRecord; headSha?: string };
+    type Matched = { record: PullRequestRecord; headSha?: string; draft: boolean; labels: string[] };
     const match = (value: unknown): Matched | undefined => {
       const pr = value as GitHubPull | null;
       if (pr?.state !== "open" || pr.head?.ref !== commit.branch ||
@@ -204,7 +234,10 @@ export async function openOrReusePullRequest(input: {
         !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
         typeof pr.html_url !== "string" ||
         pr.html_url.toLowerCase() !== `https://github.com/${repository}/pull/${pr.number}`.toLowerCase()) return;
-      return { headSha: typeof pr.head.sha === "string" ? pr.head.sha.toLowerCase() : undefined, record: {
+      return { headSha: typeof pr.head.sha === "string" ? pr.head.sha.toLowerCase() : undefined,
+        draft: pr.draft === true,
+        labels: (Array.isArray(pr.labels) ? pr.labels : []).map((label) => String(label?.name ?? "")),
+        record: {
         provider: "github", repository, number: pr.number, url: pr.html_url, headBranch: commit.branch,
         baseBranch: pr.base.ref, state: "open", observedAt: new Date().toISOString(),
         ...(typeof pr.created_at === "string" && { createdAt: pr.created_at }),
@@ -251,18 +284,51 @@ export async function openOrReusePullRequest(input: {
       if (sameBase.length) return failed("head_mismatch", sameBase[0].record);
       if (records.length) return failed("base_mismatch", records[0].record);
     };
+    // The steering label is the merge gate's hold, so a PR that should carry it
+    // and does not is reported as a failed publication, never as a success.
+    const labelled = async (result: PullRequestPublication, labels: readonly string[]): Promise<PullRequestPublication> => {
+      if (result.status !== "succeeded" || labels.length === 0) return result;
+      // The failure is converted outside the phase so the rejected callback marks
+      // the `steward.pr.label` span errored.
+      try {
+        return await phase("steward.pr.label", async () => {
+          // Create the label with its colour on first use; it may already exist.
+          await request("/labels", { name: NEEDS_STEERING_LABEL, ...NEEDS_STEERING_LABEL_SPEC }).catch(() => undefined);
+          await request(`/issues/${result.pullRequest.number}/labels`, { labels });
+          return result;
+        });
+      } catch {
+        return failed("steering_label_failed", result.pullRequest);
+      }
+    };
     const reused = compare(existing);
-    if (reused) return reused;
+    if (reused) {
+      // Only a steering publication opens a draft on a Hatchery branch, so a
+      // reused draft without the label is a retry after `steering_label_failed`:
+      // finish labelling it rather than report it as published.
+      const prior = reused.status === "succeeded"
+        ? existing.find(({ record }) => record.number === reused.pullRequest.number) : undefined;
+      const unlabelledSteering = prior?.draft === true && !prior.labels.includes(NEEDS_STEERING_LABEL);
+      return unlabelledSteering ? labelled(reused, [NEEDS_STEERING_LABEL]) : reused;
+    }
 
     const metadata = typeof input.metadata === "function" ? await input.metadata() : input.metadata;
     if (typeof metadata === "string") return failed(metadata);
+    const { labels = [], ...pull } = metadata;
     if (typeof input.metadata === "function") {
       const concurrent = compare(await lookup());
-      if (concurrent) return concurrent;
+      if (concurrent) return labelled(concurrent, labels);
     }
+    let published: PullRequestPublication;
     try {
-      return await phase("steward.pr.create", async () => {
-        const created = match((await request("/pulls", { ...metadata, head, base })).value);
+      published = await phase("steward.pr.create", async () => {
+        // A steering PR opens as a draft. GitHub never reports a draft's merge
+        // state as clean, so the legate cannot merge it before the label lands,
+        // or at all if labelling fails. The steward marks it ready once the
+        // human has answered.
+        const created = match((await request("/pulls", {
+          ...pull, head, base, ...(labels.length > 0 && { draft: true }),
+        })).value);
         const result = created && compare([created]);
         if (result) return result;
         throw new GitHubFailure("publication_failed");
@@ -271,8 +337,9 @@ export async function openOrReusePullRequest(input: {
       // GitHub arbitrates concurrent creates. Reconcile the same exact identity
       // after a conflict or a response that may have been lost after creation.
       const recovered = await lookup().then(compare).catch(() => undefined);
-      return recovered ?? failed(failureReason(error));
+      published = recovered ?? failed(failureReason(error));
     }
+    return labelled(published, labels);
   } catch (error) {
     return failed(failureReason(error));
   }

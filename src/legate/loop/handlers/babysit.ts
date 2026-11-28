@@ -5,6 +5,7 @@ import type { ReviewObservation } from "../../../observe/sense-io.js";
 import { hashText } from "../pure/hash.js";
 import { approvalSatisfied, changesRequestedSatisfied, eligibleReviewer, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { awaitingSuccessfulIntegration, mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { NEEDS_STEERING_LABEL, prNeedsSteering } from "../../../shared/steering.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
   clearBackoff,
@@ -185,7 +186,8 @@ export type BabysitDecision =
   | { kind: "steward-awaiting-clear"; sliceId: string; sessionId: string }
   | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; attempt: number; notify: boolean }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
-  | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string };
+  | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string }
+  | { kind: "pr-steering-hold"; sliceId: string; sessionId: string; pr: any; key: string };
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -675,6 +677,19 @@ function evaluatePr(
     if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
       out.push({ kind: "pr-open-clear", sliceId, sessionId, pr });
     }
+    // Steering hold (launch-failure recovery plan, step 1): a planning PR that
+    // gates a slice on an unresolved decision carries the steering label until a
+    // human answers. Refuse to auto-merge it whatever the merge policy relaxes —
+    // this is the deterministic backstop that does not depend on the steward's
+    // self-report being classified as awaiting input. Removing the label (the
+    // steward does it after applying the answer) re-arms the gate below.
+    if (prNeedsSteering(pr)) {
+      const key = actionKey("pr-steering-hold", pr, String(pr.head_sha || ""));
+      if (!alreadyDispatched(slice, key)) {
+        out.push({ kind: "pr-steering-hold", sliceId, sessionId, pr, key });
+      }
+      return;
+    }
     // Apply the review policy for the verb after the CI, conflict, and thread checks.
     const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
     const approvalOk = approvalSatisfied(req, pr);
@@ -698,6 +713,10 @@ function evaluatePr(
           pr.merge_state_status,
           pr.human_approval_count ?? "",
           pr.changes_requested_count ?? "",
+          // The steering hold is part of the gate. Its release re-arms the merge
+          // even without a new push: the hold records its own key, so the next
+          // auto-merge key never matches a stale one.
+          String(pr.needs_steering ?? ""),
           verdicts ? hashText(JSON.stringify(verdicts)) : pr.coderabbit?.decision_at ?? "",
         ].join("|"),
       );
@@ -1126,6 +1145,13 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
+        res.mutated = true;
+        break;
+      case "pr-steering-hold":
+        // Recorded once per head: the span (legate.babysit, march.action =
+        // pr-steering-hold) and the needs_steering blocker gauge show the hold.
+        mark(slice, "pr-steering-hold", d.key, `holding PR #${d.pr.number}: ${NEEDS_STEERING_LABEL} is set — a human must answer its steering question before it merges`, ts);
+        res.actions.push({ action: "pr-steering-hold", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: `auto-merge held for a steering decision on PR #${d.pr.number}` });
         res.mutated = true;
         break;
       case "pr-auto-merge": {

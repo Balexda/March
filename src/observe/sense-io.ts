@@ -14,6 +14,7 @@ import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js"
 import { COPILOT_LOGIN, classifyReviewerComment, type ReviewerNotice, codeRabbitNoticeHead } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 import { normalizeBotLogin, selfBotLogin } from "../herald/profiles/merge-policy.js";
+import { labelsNeedSteering } from "../shared/steering.js";
 
 /**
  * Per-profile {@link StaleRecheckTracker}s for the rotating forced-recheck sweep.
@@ -691,7 +692,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const request = await ghPrArgs(
       slice,
       state,
-      "number,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt" + (github && discovery ? ",isCrossRepository" : ""),
+      "number,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt,labels" + (github && discovery ? ",isCrossRepository" : ""),
     );
     if (request.skipped) return request;
     const summary = JSON.parse(await gh(request.args, request.options, request.owner, slice.id));
@@ -714,6 +715,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       head_sha: graphql.headRefOid,
       merge_state_status: graphql.mergeStateStatus ? String(graphql.mergeStateStatus).toLowerCase() : null,
       title: summary.title,
+      // The steering hold (src/shared/steering.ts): read from the same
+      // `gh pr view` call, so it costs no extra GitHub request. Adding or removing
+      // a label bumps `updatedAt`, so the change cursor re-fetches on either edge.
+      needs_steering: labelsNeedSteering(summary.labels),
       review_decision: summary.reviewDecision,
       checks: checksSummary(summary.statusCheckRollup),
       failed_checks: failedChecks(summary.statusCheckRollup),

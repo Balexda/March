@@ -217,6 +217,33 @@ describe("summarizeReviews", () => {
 });
 
 describe("queryPrForBabysit", () => {
+  it("parses the steering label from the same gh pr view call into needs_steering", async () => {
+    const viewArgs: string[][] = [];
+    let labels: unknown = [{ name: "march:opened" }, { name: "march:needs-steering" }];
+    routeExec((_cmd, args) => {
+      if (args.includes("graphql")) {
+        return JSON.stringify({ data: { repository: { pullRequest: { headRefOid: "abc", mergeStateStatus: "CLEAN",
+          reviews: { nodes: [] }, reviewThreads: { nodes: [] } } } } });
+      }
+      if (args[0] === "pr" && args[1] === "view") viewArgs.push(args);
+      return JSON.stringify({ number: 620, url: "https://github.com/octo/march/pull/620", state: "OPEN",
+        mergeable: "MERGEABLE", headRefName: "feature/smithy/cut/x", title: "cut: x", author: { login: "me" },
+        statusCheckRollup: [], labels });
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const state = { repo: { path: "/repo", owner_with_name: "octo/march" } };
+
+    expect(await io.queryPrForBabysit({ pr: { number: 620 } }, state)).toMatchObject({ number: 620, needs_steering: true });
+    // One gh pr view per snapshot: labels ride the existing --json field list.
+    expect(viewArgs).toHaveLength(1);
+    expect(viewArgs[0][viewArgs[0].indexOf("--json") + 1].split(",")).toContain("labels");
+
+    labels = [{ name: "march:opened" }];
+    expect(await io.queryPrForBabysit({ pr: { number: 620 } }, state)).toMatchObject({ needs_steering: false });
+    labels = undefined;
+    expect(await io.queryPrForBabysit({ pr: { number: 620 } }, state)).toMatchObject({ needs_steering: false });
+  });
+
   it("assembles the babysit PR shape from gh pr view + review-thread graphql", async () => {
     routeExec((_cmd, args) => {
       if (args.includes("graphql")) {

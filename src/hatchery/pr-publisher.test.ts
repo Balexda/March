@@ -27,7 +27,10 @@ function api(options: {
   redirects?: string[];
   create?: () => Response | Promise<Response>;
   lookup?: () => Response;
+  /** Status for `POST /issues/:n/labels` (default 200). */
+  labelStatus?: number;
 } = {}) {
+  const labelled: { pr: number; labels: string[] }[] = [];
   const create = vi.fn(options.create ?? (() => Response.json(pull(1), { status: 201 })));
   const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const url = new URL(String(input));
@@ -43,6 +46,16 @@ function api(options: {
       } : undefined);
     }
     if (url.pathname === prefix) return Response.json({ default_branch: options.defaultBranch ?? "main" });
+    // The label exists already: creating it again is a 422 the publisher ignores.
+    if (url.pathname === prefix + "/labels") return new Response(null, { status: 422 });
+    const issueLabels = new RegExp(`^${prefix}/issues/(\\d+)/labels$`).exec(url.pathname);
+    if (issueLabels && init?.method === "POST") {
+      const status = options.labelStatus ?? 200;
+      if (status !== 200) return new Response(null, { status });
+      const { labels } = JSON.parse(String(init.body));
+      labelled.push({ pr: Number(issueLabels[1]), labels });
+      return Response.json(labels.map((name: string) => ({ name })));
+    }
     const branches = options.branches ?? ["main"];
     const branch = decodeURIComponent(url.pathname.slice((prefix + "/branches/").length));
     if (options.redirects?.includes(branch)) {
@@ -54,7 +67,7 @@ function api(options: {
   const token = vi.fn(async () => "isolated-test-token");
   const publish = (baseBranch?: string, review = vi.fn(async () => metadata)) =>
     openOrReusePullRequest({ repository, commit, baseBranch, metadata: review }, { token, fetch });
-  return { create, fetch, publish, token };
+  return { create, fetch, publish, token, labelled };
 }
 
 describe("PR metadata", () => {
@@ -75,6 +88,72 @@ describe("PR metadata", () => {
     expect(result.body).not.toContain(secret);
     expect(buildPullRequestMetadata({ commit, backend: "codex", touchedPaths: [], verification: "passed" }).body)
       .toContain("Steward verification passed.");
+  });
+});
+
+describe("Steward PR publication with a steering hold", () => {
+  const steering = buildPullRequestMetadata({
+    commit, backend: "codex", touchedPaths: ["specs/x.tasks.md"], verification: "steering",
+    steeringQuestions: ["SD-001: where do provider secrets live? Options: Tessera only / per-service. Blocks: slice 1"],
+  });
+
+  it("puts the questions in the body and asks for the steering label", () => {
+    expect(steering.labels).toEqual(["march:needs-steering"]);
+    expect(steering.body).toContain("## Steering required");
+    expect(steering.body).toContain("- SD-001: where do provider secrets live?");
+    expect(buildPullRequestMetadata({ commit, backend: "codex", touchedPaths: [], verification: "passed" }).labels)
+      .toBeUndefined();
+  });
+
+  it("opens the PR as a draft and labels it, without sending labels to the create call", async () => {
+    const upstream = api();
+    await expect(upstream.publish(undefined, vi.fn(async () => steering))).resolves.toMatchObject({
+      status: "succeeded", pullRequest: { number: 1 },
+    });
+    expect(upstream.labelled).toEqual([{ pr: 1, labels: ["march:needs-steering"] }]);
+    const create = upstream.fetch.mock.calls.find(([input, init]) =>
+      init?.method === "POST" && new URL(String(input)).pathname.endsWith("/pulls"));
+    const sent = JSON.parse(String(create?.[1]?.body));
+    expect(sent).not.toHaveProperty("labels");
+    // A draft is never mergeable, so the hold holds before (and without) the label.
+    expect(sent.draft).toBe(true);
+  });
+
+  it("opens an ordinary PR ready for review", async () => {
+    const upstream = api();
+    await upstream.publish();
+    const create = upstream.fetch.mock.calls.find(([input, init]) =>
+      init?.method === "POST" && new URL(String(input)).pathname.endsWith("/pulls"));
+    expect(JSON.parse(String(create?.[1]?.body))).not.toHaveProperty("draft");
+    expect(upstream.labelled).toEqual([]);
+  });
+
+  it("finishes labelling a reused draft left unlabelled by an earlier failure", async () => {
+    const upstream = api({ open: [{ ...pull(7), draft: true, labels: [] }] as any });
+    await expect(upstream.publish("main")).resolves.toMatchObject({ status: "succeeded", pullRequest: { number: 7 } });
+    expect(upstream.labelled).toEqual([{ pr: 7, labels: ["march:needs-steering"] }]);
+    expect(upstream.create).not.toHaveBeenCalled();
+
+    const failing = api({ open: [{ ...pull(7), draft: true, labels: [] }] as any, labelStatus: 403 });
+    await expect(failing.publish("main")).resolves.toMatchObject({
+      status: "failed", failureReason: "steering_label_failed", existingPullRequest: { number: 7 },
+    });
+  });
+
+  it("reuses a labelled draft or a ready PR without relabelling", async () => {
+    const labelledDraft = api({ open: [{ ...pull(7), draft: true, labels: [{ name: "march:needs-steering" }] }] as any });
+    await expect(labelledDraft.publish("main")).resolves.toMatchObject({ status: "succeeded" });
+    expect(labelledDraft.labelled).toEqual([]);
+    const ready = api({ open: [pull(7)] });
+    await expect(ready.publish("main")).resolves.toMatchObject({ status: "succeeded" });
+    expect(ready.labelled).toEqual([]);
+  });
+
+  it("reports a PR it could not label as a failed publication, not a success", async () => {
+    const upstream = api({ labelStatus: 403 });
+    await expect(upstream.publish(undefined, vi.fn(async () => steering))).resolves.toMatchObject({
+      status: "failed", failureReason: "steering_label_failed", existingPullRequest: { number: 1 },
+    });
   });
 });
 

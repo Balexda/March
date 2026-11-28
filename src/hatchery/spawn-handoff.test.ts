@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildManagerPrompt,
+  planningVerbOf,
+  steeringQuestionsFrom,
   buildSpawnCommitPrompt,
   createHatcherySpawnArtifacts,
   evaluateStewardHandoffEligibility,
@@ -148,6 +150,67 @@ describe("spawn-handoff", () => {
     expect(prompt).toContain("exact published branch");
     expect(prompt).toContain("Review receipt ID: review-id");
     expect(prompt).toContain("REVIEW <receipt ID> <passed|unavailable|failed>");
+  });
+
+  describe("steering check for planning stewards", () => {
+    const cutRequest = "Complete this Smithy workflow step and produce a git patch.\n\nSmithy command:\nsmithy.cut specs/tessera/spec.md 3";
+    const forgeRequest = "Complete this Smithy workflow step and produce a git patch.\n\nSmithy command:\nsmithy.forge specs/tessera/us3.tasks.md 1";
+
+    it("requires a cut steward to escalate a slice gate on an unresolved decision", () => {
+      const prompt = buildManagerPrompt({ operatorPrompt: cutRequest, reviewId: "review-id" });
+      expect(prompt).toContain("Steering check (this is a planning step: smithy.cut)");
+      expect(prompt).toContain("gates any slice on an unresolved decision");
+      expect(prompt).toContain("must not be forged until SD-001 is resolved");
+      expect(prompt).toContain("do not report it as done");
+      expect(prompt).toContain("begins with STEERING:");
+      expect(prompt).toContain("its options with their trade-offs");
+      expect(prompt).toContain("the slices it blocks");
+      expect(prompt).toContain("REVIEW <receipt ID> <passed|unavailable|failed|steering>");
+      expect(prompt).toContain("march:needs-steering");
+      // After the answer: apply it, remove the gate and the label.
+      expect(prompt).toContain("remove the gate");
+      expect(prompt).toContain("--remove-label march:needs-steering");
+      expect(prompt).toContain("`gh pr ready <number>`");
+      // Plain debt is explicitly not a reason to escalate.
+      expect(prompt).toContain("Ordinary specification debt is NOT a reason to escalate");
+      // No line of the prompt itself parses as a steering question.
+      expect(steeringQuestionsFrom(prompt)).toEqual([]);
+    });
+
+    it("leaves code verbs on the plain receipt", () => {
+      const prompt = buildManagerPrompt({ operatorPrompt: forgeRequest, reviewId: "review-id" });
+      expect(prompt).not.toContain("Steering check");
+      expect(prompt).toContain("REVIEW <receipt ID> <passed|unavailable|failed>.");
+    });
+
+    it("finds the planning verb from the command, else the slice id suffix", () => {
+      expect(planningVerbOf(cutRequest)).toBe("cut");
+      expect(planningVerbOf(forgeRequest, "x-cut")).toBeUndefined();
+      expect(planningVerbOf("Do the work.", "tessera-us3-cut")).toBe("cut");
+      expect(planningVerbOf("Do the work.", "tessera-us3-s1-forge")).toBeUndefined();
+    });
+
+    it("collects the steward's STEERING: lines, deduplicated", () => {
+      const output = ["noise", "  STEERING: SD-001 where do secrets live? Blocks: slice 1", "STEERING: SD-001 where do secrets live? Blocks: slice 1",
+        "STEERING:", "STEERING: SD-006 rotation owner? Blocks: slice 1"].join("\n");
+      expect(steeringQuestionsFrom(output)).toEqual([
+        "SD-001 where do secrets live? Blocks: slice 1", "SD-006 rotation owner? Blocks: slice 1",
+      ]);
+    });
+
+    it("ships the same rules in the steward-pr skill", () => {
+      const skill = fs.readFileSync(new URL("../templates/steward/skills/steward-pr/SKILL.md", import.meta.url), "utf8");
+      expect(skill).toContain("## Steering check (planning steps)");
+      expect(skill).toContain("gates any slice on");
+      expect(skill).toContain("an unresolved decision");
+      expect(skill).toContain("`STEERING:`");
+      expect(skill).toContain("`steering` receipt status");
+      expect(skill).toContain("`march:needs-steering`");
+      expect(skill).toContain("--remove-label march:needs-steering");
+      expect(skill).toContain("`gh pr ready <number>`");
+      expect(skill).toContain("Ordinary specification debt is not a reason to escalate.");
+      expect(skill).toContain("Never use it for ordinary spec debt.");
+    });
   });
 
   it("validates selected backend auth without exposing secret values or paths", () => {

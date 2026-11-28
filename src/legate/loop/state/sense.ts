@@ -512,6 +512,8 @@ export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined
   if (priorPr?.reviews_complete === false) return true;
   // Refresh stored snapshots from before Herald began recording reviewer verdicts.
   if (!Array.isArray(priorPr?.reviews) || typeof priorPr?.is_draft !== "boolean") return true;
+  // Refresh stored snapshots from before Herald began recording the steering hold.
+  if (typeof priorPr?.needs_steering !== "boolean") return true;
   // Activity since we last looked (comment / review / commit all bump updatedAt).
   if (live.updatedAt !== priorPr.updated_at) return true;
   // Lifecycle states whose changes updatedAt can miss (see the helpers above).

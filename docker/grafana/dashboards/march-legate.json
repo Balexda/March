@@ -2784,7 +2784,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "PR-bearing slices by dominant blocker the 3-way merge-readiness panel collapses away. conflicting = base-movement / silent-conflict (#597); owes_comments = non-thread reviewer comment (#294); owes_review_threads / ci_failing.",
+      "description": "PR-bearing slices by dominant blocker the 3-way merge-readiness panel collapses away. conflicting = base-movement / silent-conflict (#597); owes_comments = non-thread reviewer comment (#294); owes_review_threads / ci_failing; needs_steering = a planning PR held for a human steering decision (march:needs-steering label; never auto-merged while set).",
       "fieldConfig": {
         "defaults": {
           "color": {

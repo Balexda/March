@@ -9,6 +9,7 @@ import {
 import { isMarchBotComment } from "../../../observe/march-bot.js";
 import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { prNeedsSteering } from "../../../shared/steering.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
   backoffUntil,
@@ -765,7 +766,8 @@ export function isReadyToMerge(slice: any): boolean {
  *                             it now. Transient — a `ready` slice merges and
  *                             archives, so it does not linger.
  *   - `waiting-approval`    — blocked on a review gate (missing required
- *                             approval or an open changes-requested review).
+ *                             approval or an open changes-requested review), or
+ *                             held for a steering decision (`pr.needs_steering`).
  *                             Tracked as a metric.
  *   - `blocked-merge-state` — review gates cleared but GitHub won't merge yet
  *                             (`UNKNOWN`/`BEHIND`/`BLOCKED`/`DIRTY` — needs a rebase
@@ -798,6 +800,9 @@ export function mergeReadiness(
   if (src.mergeable === "CONFLICTING") return "not-ready";
   const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
   if (owed !== 0) return "not-ready";
+  // A steering hold waits on a human whatever the merge policy relaxes, so it
+  // reads as waiting on a review gate (a human), never as the system stalling.
+  if (prNeedsSteering(src)) return "waiting-approval";
   const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
   const approvalOk = approvalSatisfied(req, src);
   const crOk = changesRequestedSatisfied(req, src);
@@ -820,15 +825,16 @@ export function mergeReadiness(
  * duplicating it — the all-clear gate states (ready / waiting-approval /
  * blocked-merge-state) are reported by the 3-way gauge; this surfaces only the
  * not-ready blockers that the 3-way collapses into "not-ready" and so makes
- * invisible. `conflicting` (the base-movement / StorySpider #597 class) and
+ * invisible, plus `needs_steering` (a planning PR held until a human answers a
+ * steering question; src/shared/steering.ts). `conflicting` (the base-movement / StorySpider #597 class) and
  * `owes_comments` (the non-thread-comment / March #294 class) are otherwise
  * unobservable today. `none` = no active blocker here (all-clear, no observed PR,
  * or CI still PENDING — a healthy transient). Bounded label set.
  */
-export type PrBlocker = "none" | "conflicting" | "owes_review_threads" | "owes_comments" | "ci_failing";
+export type PrBlocker = "none" | "conflicting" | "owes_review_threads" | "owes_comments" | "ci_failing" | "needs_steering";
 
 /** The non-`none` {@link PrBlocker} values — the metric's pre-seeded label set. */
-export const PR_BLOCKER_REASONS = ["conflicting", "owes_review_threads", "owes_comments", "ci_failing"] as const;
+export const PR_BLOCKER_REASONS = ["conflicting", "owes_review_threads", "owes_comments", "ci_failing", "needs_steering"] as const;
 
 /** A conversation (non-thread) comment is outstanding when it carries no legate
  *  :eyes: ack yet and is not one of March's own `[march-bot]` replies (#374)
@@ -859,6 +865,10 @@ export function mergeBlocker(slice: any, pr: any): PrBlocker {
   // before a comment-fix), so a red-CI PR with an unacked comment is `ci_failing`.
   if (src.checks === "FAIL") return "ci_failing";
   if (owesCommentResponse(src)) return "owes_comments";
+  // The steering hold (src/shared/steering.ts) is checked at the merge gate, after
+  // the work babysit can do itself, so it reports last: a human must answer the
+  // PR's steering question before it can merge.
+  if (prNeedsSteering(src)) return "needs_steering";
   return "none";
 }
 
