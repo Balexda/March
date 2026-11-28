@@ -12,7 +12,8 @@
  * are profile-agnostic); what remains here is composition: build the per-profile
  * deps, run the coordinator, schedule the interval.
  */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1077,12 +1078,14 @@ async function cullStewardForSlice(
  * — no network, no gh — and only while a hold is waiting. Null on any failure,
  * which keeps the hold.
  */
-function readArtifactRevisions(repoPath: unknown, paths: readonly string[]): Record<string, string | null> | null {
+const execFileAsync = promisify(execFile);
+
+async function readArtifactRevisions(repoPath: unknown, paths: readonly string[]): Promise<Record<string, string | null> | null> {
   if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   if (paths.length === 0) return {};
   try {
-    const stdout = execFileSync("git", ["-c", "safe.directory=" + repoPath, ...lsTreeArgs("HEAD", paths)], {
-      cwd: repoPath, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, killSignal: "SIGKILL",
+    const { stdout } = await execFileAsync("git", ["-c", "safe.directory=" + repoPath, ...lsTreeArgs("HEAD", paths)], {
+      cwd: repoPath, encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL",
     });
     return Object.fromEntries(parseLsTreeBlobs(stdout, paths).map((a) => [a.path, a.blob]));
   } catch {

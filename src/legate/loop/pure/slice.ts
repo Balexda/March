@@ -529,7 +529,7 @@ function legacyRecoverableId(slices: Record<string, any>, item: any, ready: read
 
 /** The id of the recoverable escalation `item` owns: its own slice, else a
  *  pre-#599 one per {@link legacyRecoverableId}; null when there is none. */
-function recoveryTargetId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
+export function recoveryTargetId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
   const currentId = dispatchSliceId(item);
   return escalatedRecoverable(slices[currentId]) ? currentId : legacyRecoverableId(slices, item, ready);
 }
@@ -622,7 +622,8 @@ export function recoverableEscalations(
  *  - `held_operator` / `held_until_input_changes` / `held_adopt`: its own slice's
  *    launch failure needs a change (launch-failure recovery step 2): unpushed
  *    work in the way, an agent that declined until the plan changes, or an open
- *    PR to adopt. Not retried.
+ *    PR to adopt. Not retried. A decline re-armed by a plan change but cut by the
+ *    AIMD rate reads `recovery_backoff` instead.
  *  - `archived_merged` / `archived_closed` / `archived_other`: an archived slice
  *    with the same id, action key or branch holds it back.
  */
@@ -702,7 +703,9 @@ export function classifyReady(
     if (recoveryId && live.sliceId === recoveryId && !otherLiveBlocker(state, item, recoveryId)) {
       if (due.has(recoveryId)) return { ...base, decision: "recovery_due" as const, heldBy };
       const policy = launchRetryPolicy(slices[recoveryId]);
-      if (policy !== "auto") {
+      // A re-armed decline the AIMD rate cut waits for the rate, not a plan change.
+      const rearmedCut = policy === "until_input_changes" && rearmed.has(recoveryId);
+      if (policy !== "auto" && !rearmedCut) {
         const decision: DispatchDecisionKind = policy === "operator" ? "held_operator"
           : policy === "adopt" ? "held_adopt" : "held_until_input_changes";
         return { ...base, decision, heldBy };

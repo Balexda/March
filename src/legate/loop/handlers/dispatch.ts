@@ -8,6 +8,7 @@ import {
   dispatchableReady,
   launchRetryPolicy,
   recoverableEscalations,
+  recoveryTargetId,
 } from "../pure/slice.js";
 import { emitLoopSpan } from "../../../observability/loop-spans.js";
 import { parseMs } from "../pure/self-heal.js";
@@ -197,8 +198,11 @@ export async function rearmDeclinedHolds(state: LoopState, ctx: HandlerContext, 
   if (!deps.artifactRevisions) return rearmed;
   const slices = state.raw?.slices && typeof state.raw.slices === "object" ? state.raw.slices : {};
   const held: { sliceId: string; slice: any; paths: string[] }[] = [];
-  for (const item of state.smithy.ready ?? []) {
-    const sliceId = dispatchSliceId(item);
+  const ready = state.smithy.ready ?? [];
+  for (const item of ready) {
+    // The same target recovery uses: the item's id, or its pre-#599 id it owns.
+    const sliceId = recoveryTargetId(slices, item, ready);
+    if (!sliceId) continue;
     const slice = slices[sliceId];
     if (!slice || slice.stage !== "escalated" || slice.escalated_reason !== "hatchery_dispatch_failed") continue;
     if (launchRetryPolicy(slice) !== "until_input_changes") continue;

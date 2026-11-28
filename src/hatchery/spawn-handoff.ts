@@ -349,7 +349,10 @@ export interface ParkedSpawnRemovers {
  * are left alone. Returns the spawn ids removed. Never throws.
  */
 export function pruneParkedSpawns(
-  input: { readonly repoPath: string; readonly homeDir?: string; readonly sliceId: string; readonly failureClass: string },
+  input: {
+    readonly repoPath: string; readonly homeDir?: string; readonly profile: string;
+    readonly sliceId: string; readonly failureClass: string;
+  },
   removers: ParkedSpawnRemovers = {},
 ): string[] {
   const removeWorktree = removers.removeWorktree ?? removeSpawnWorktreeExact;
@@ -366,6 +369,9 @@ export function pruneParkedSpawns(
       const file = path.join(dir, name);
       try {
         const m = JSON.parse(fs.readFileSync(file, "utf-8"));
+        // Profiles share this directory and slice ids carry no repo identity, so
+        // only this repo + profile's own parks are pooled.
+        if (m?.repoPath !== input.repoPath || m?.profile !== input.profile) continue;
         if (m?.sliceId !== input.sliceId || m?.failureClass !== input.failureClass) continue;
         if (typeof m.spawnId !== "string") continue;
         entries.push({
@@ -388,9 +394,9 @@ export function pruneParkedSpawns(
         const result = removeWorktree(input.repoPath, {
           worktreePath: entry.parkedWorktreePath, branch: entry.parkedBranch,
         });
-        removeContainer(entry.spawnId);
-        removeImage(entry.spawnId);
         if (result.worktreeRemoved && result.branchDeleted) {
+          removeContainer(entry.spawnId);
+          removeImage(entry.spawnId);
           fs.rmSync(entry.file, { force: true });
           removed.push(entry.spawnId);
         }
@@ -2785,6 +2791,7 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
                 spawnId,
                 sliceId,
                 profile,
+                repoPath: input.repoPath,
                 stage,
                 failureClass,
                 parkedAt: new Date().toISOString(),
@@ -2807,7 +2814,7 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
               });
               // Repeated identical failures keep only the first and the latest
               // parked attempt per slice, not one per attempt.
-              const pruned = pruneParkedSpawns({ repoPath: input.repoPath, homeDir: input.homeDir, sliceId, failureClass });
+              const pruned = pruneParkedSpawns({ repoPath: input.repoPath, homeDir: input.homeDir, profile, sliceId, failureClass });
               parkSpan.setAttributes({ "march.park.pruned": pruned.length });
             });
           }

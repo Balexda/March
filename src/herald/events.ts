@@ -842,13 +842,13 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.escalated": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = "escalated";
+      // The failure describes THIS escalation; a new reason without one drops
+      // the previous escalation's class.
+      const failure = parseLaunchFailure(event.failure);
+      if (failure) slice.escalationFailure = failure;
       if (event.reason !== undefined) {
         slice.escalatedReason = event.reason;
-        // The failure describes THIS escalation; a new reason without one drops
-        // the previous escalation's class.
-        const failure = parseLaunchFailure(event.failure);
-        if (failure) slice.escalationFailure = failure;
-        else delete slice.escalationFailure;
+        if (!failure) delete slice.escalationFailure;
       }
       break;
     }

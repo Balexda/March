@@ -253,7 +253,8 @@ export function parseLsTreeBlobs(stdout: string, paths: readonly string[]): Decl
     const m = /^\d+ blob ([0-9a-f]{7,64})\t(.+)$/.exec(line);
     if (m) blobs.set(m[2], m[1]);
   }
-  return uniquePaths(paths).map((path) => ({ path, blob: blobs.get(path) ?? null }));
+  // ls-tree prints tree-entry names, so `./specs/x` is looked up as `specs/x`.
+  return uniquePaths(paths).map((path) => ({ path, blob: blobs.get(path.replace(/^(\.\/)+/, "")) ?? null }));
 }
 
 // ── Wire validation ─────────────────────────────────────────────────────────

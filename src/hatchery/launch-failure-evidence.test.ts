@@ -117,7 +117,7 @@ describe("parked spawn cap", () => {
       const worktree = path.join(parent, `x-parked-${spawnId}`);
       git(dir, "worktree", "add", "-q", "-b", branch, worktree);
       writeParkedSpawnManifest(home, {
-        spawnId, sliceId, failureClass: "agent_declined",
+        spawnId, sliceId, profile: "march", repoPath: dir, failureClass: "agent_declined",
         parkedAt: new Date(Date.UTC(2026, 10, 27, i)).toISOString(),
         parkedBranch: branch, parkedWorktreePath: worktree,
       });
@@ -127,13 +127,23 @@ describe("parked spawn cap", () => {
     const other = path.join(parent, "unrelated");
     git(dir, "worktree", "add", "-q", "-b", "feature/unrelated", other);
     writeParkedSpawnManifest(home, {
-      spawnId: "20261127-ffffff", sliceId, failureClass: "patch_apply_failed",
+      spawnId: "20261127-ffffff", sliceId, profile: "march", repoPath: dir, failureClass: "patch_apply_failed",
       parkedAt: "2026-11-27T02:30:00.000Z", parkedBranch: "feature/unrelated", parkedWorktreePath: other,
     });
 
+    // Another repo's parks of the same slice id and class share the directory and stay.
+    const foreign = path.join(parent, "foreign");
+    fs.mkdirSync(foreign);
+    for (let i = 0; i < 3; i++) {
+      writeParkedSpawnManifest(home, {
+        spawnId: `20261127-aaaaa${i}`, sliceId, profile: "other", repoPath: "/elsewhere", failureClass: "agent_declined",
+        parkedAt: new Date(Date.UTC(2026, 10, 27, i, 30)).toISOString(), parkedBranch: "x", parkedWorktreePath: foreign,
+      });
+    }
+
     const containers: string[] = [];
     const removed = pruneParkedSpawns(
-      { repoPath: dir, homeDir: home, sliceId, failureClass: "agent_declined" },
+      { repoPath: dir, homeDir: home, profile: "march", sliceId, failureClass: "agent_declined" },
       { removeContainer: (id) => containers.push(id), removeImage: () => {} },
     );
 
@@ -148,11 +158,13 @@ describe("parked spawn cap", () => {
       expect(git(dir, "branch", "--list", p.branch)).toBe("");
     }
     expect(fs.existsSync(other)).toBe(true);
+    expect(fs.existsSync(foreign)).toBe(true);
     const manifests = fs.readdirSync(parkedManifestDir(home)).sort();
-    expect(manifests).toEqual([parked[0].spawnId, parked[4].spawnId, "20261127-ffffff"].map((id) => id + ".json").sort());
+    expect(manifests).toEqual([parked[0].spawnId, parked[4].spawnId, "20261127-ffffff",
+      "20261127-aaaaa0", "20261127-aaaaa1", "20261127-aaaaa2"].map((id) => id + ".json").sort());
 
     // Idempotent: a second sweep has nothing left to remove.
-    expect(pruneParkedSpawns({ repoPath: dir, homeDir: home, sliceId, failureClass: "agent_declined" },
+    expect(pruneParkedSpawns({ repoPath: dir, homeDir: home, profile: "march", sliceId, failureClass: "agent_declined" },
       { removeContainer: () => {}, removeImage: () => {} })).toEqual([]);
   });
 });

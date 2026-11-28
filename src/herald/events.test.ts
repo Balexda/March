@@ -760,6 +760,11 @@ describe("slice.escalated launch-failure class (launch-failure recovery step 2)"
     expect(state.slices.s1).toMatchObject({ stage: "escalated", escalatedReason: "hatchery_dispatch_failed", escalationFailure: failure });
   });
 
+  it("keeps a failure supplied without a reason", () => {
+    const state = foldEvents([ev({ type: "slice.escalated", sliceId: "s1", failure })]);
+    expect(state.slices.s1!.escalationFailure).toEqual(failure);
+  });
+
   it("keeps folding pre-change escalations that carry no failure", () => {
     const state = foldEvents([ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" })]);
     expect(state.slices.s1!.escalatedReason).toBe("hatchery_dispatch_failed");

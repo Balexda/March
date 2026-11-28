@@ -97,4 +97,11 @@ describe("parseLsTreeBlobs", () => {
       { path: "specs/a.spec.md", blob: null },
     ]);
   });
+
+  it("a ./-prefixed path resolves to the same blob, keeping the caller's spelling", () => {
+    const out = "100644 blob 1111111111111111111111111111111111111111\tspecs/a.tasks.md\n";
+    expect(parseLsTreeBlobs(out, ["./specs/a.tasks.md"])).toEqual([
+      { path: "./specs/a.tasks.md", blob: "1111111111111111111111111111111111111111" },
+    ]);
+  });
 });

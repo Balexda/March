@@ -531,6 +531,12 @@ async function resolveIntegrationCompletion(
   if (observed && !observed.outcome) return undefined;
 
   const confirmed = await integration.confirmFailure(sliceId, attemptId);
+  // Hatchery records the failed outcome before its rollback finishes and only then
+  // reports the launch-failure class on the job. Settle once the job is terminal
+  // (or gone, or past the deadline) so the class, and its hold, is not lost.
+  if (confirmed.outcome?.status === "failed" && !expired && (job?.status === "pending" || job?.status === "running")) {
+    return undefined;
+  }
   if (confirmed.outcome) return { job, outcome: confirmed.outcome };
   if (!confirmed.fenced) return undefined;
   const jobFailure = jobFailed && (confirmed.spawnId === null || confirmed.spawnId === candidate.spawnId)
