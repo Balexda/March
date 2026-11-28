@@ -76,8 +76,10 @@ container reflects whether its registry status is `running`.
 
 `GET /sessions/:id` returns one `BroodReadView` with the complete persisted
 `SessionRecord` nested at `record`, or `404` with
-`{ "error": "No session with id \"<id>\"." }`. It accepts `reconcile=true|false`;
-unlike the list route, reconciliation defaults to **on**. The view carries the
+`{ "error": "No session with id \"<id>\"." }`. It accepts `reconcile=true|false`
+(surrounding whitespace is trimmed; an empty value uses the default); any other
+value, or a repeated parameter, returns `400` with `{ "error": string }`. Unlike
+the list route, reconciliation defaults to **on**. The view carries the
 same derived fields as list views (`age`, `needsAttention`, `disposed`,
 `containerLive`, `reconciled`) and is derived by the same function. A reconciled
 inspect observes only the row's tracked container (no observation is needed for

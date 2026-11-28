@@ -7,8 +7,15 @@ import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SpanStatusCode } from "@opentelemetry/api";
-import type { Span } from "@opentelemetry/sdk-trace-base";
+import { createNoopMeter, SpanStatusCode } from "@opentelemetry/api";
+import { createNoopLogger } from "@opentelemetry/api-logs";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+  type ReadableSpan,
+  type Span,
+} from "@opentelemetry/sdk-trace-base";
 import { CastraClient } from "../../castra/client.js";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { classifyRequestLog, deriveBroodReadView, registerRoutes } from "./routes.js";
@@ -77,6 +84,37 @@ function stubObserver(
           live[id] ?? { present: false, running: false },
         ]),
       );
+    },
+  };
+}
+
+/**
+ * Enables telemetry and captures finished spans in memory. All three handle
+ * getters are redirected away from the real OTLP providers, so those providers
+ * never receive data: `dispose()` shuts them down with nothing to export and
+ * the test never contacts a collector (a `@ci` test must not call a live
+ * backend).
+ */
+function captureSpans(): {
+  finished(): ReadableSpan[];
+  dispose(): Promise<void>;
+} {
+  // Unroutable endpoint: proves nothing depends on a collector being up.
+  const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://127.0.0.1:9" });
+  const exporter = new InMemorySpanExporter();
+  const provider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  });
+  vi.spyOn(otel, "getTracer").mockReturnValue(provider.getTracer("test"));
+  vi.spyOn(otel, "getMeter").mockReturnValue(createNoopMeter());
+  vi.spyOn(otel, "getLogger").mockReturnValue(createNoopLogger());
+  return {
+    finished: () => exporter.getFinishedSpans(),
+    async dispose() {
+      vi.restoreAllMocks();
+      await provider.shutdown();
+      await otel.shutdown();
+      initOtel({});
     },
   };
 }
@@ -314,6 +352,26 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(observer.calls).toEqual([]);
   });
 
+  it("GET /sessions/:id rejects an invalid or repeated reconcile value with 400", async () => {
+    const observer = stubObserver({ c1: { present: true, running: true } });
+    const { app } = await buildApp(undefined, undefined, { containerObserver: observer });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", status: "running", containerId: "c1" },
+    });
+
+    for (const [url, error] of [
+      ["/sessions/s1?reconcile=garbage", "reconcile must be true or false."],
+      ["/sessions/s1?reconcile=true&reconcile=false", "reconcile must be supplied at most once."],
+    ] as const) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error });
+    }
+    expect(observer.calls).toEqual([]);
+  });
+
   it("GET /sessions/:id treats missing container facts as a completed no-op reconciliation", async () => {
     const observer = stubObserver({});
     const { app } = await buildApp(undefined, undefined, { containerObserver: observer });
@@ -366,17 +424,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
   });
 
   it("GET /sessions/:id degrades liveness failures and emits an errored span", async () => {
-    const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
-    const created: Span[] = [];
-    const tracer = getActiveOtel().getTracer();
-    const real = tracer.startSpan.bind(tracer);
-    vi.spyOn(tracer, "startSpan").mockImplementation(
-      (...args: Parameters<typeof real>) => {
-        const span = real(...args) as Span;
-        created.push(span);
-        return span;
-      },
-    );
+    const telemetry = captureSpans();
     try {
       const { app } = await buildApp(undefined, undefined, {
         containerObserver: {
@@ -410,7 +458,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         containerLive: true,
         reconciled: false,
       });
-      const span = created.find((s) => s.name === "brood.inspect.reconcile");
+      const span = telemetry.finished().find((s) => s.name === "brood.inspect.reconcile");
       expect(span).toBeDefined();
       expect(span!.spanContext().traceId).toBe(traceId);
       expect(span!.parentSpanContext?.spanId).toBe(spanId);
@@ -422,13 +470,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         "march.brood.reconcile_error": "docker unavailable",
       });
     } finally {
-      vi.restoreAllMocks();
-      // initOtel({}) only swaps in the no-op handle, so also dispose the real
-      // providers (and the metric reader's export interval). Repo convention:
-      // don't await shutdown(); its OTLP flush blocks past the test timeout
-      // when no collector runs (CI). shutdown() swallows flush failures.
-      void otel.shutdown();
-      initOtel({});
+      await telemetry.dispose();
     }
   });
 
@@ -1137,17 +1179,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
   });
 
   it("POST /sessions emits a brood.register span nested under the inbound traceparent", async () => {
-    const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
-    const created: Span[] = [];
-    const tracer = getActiveOtel().getTracer();
-    const real = tracer.startSpan.bind(tracer);
-    vi.spyOn(tracer, "startSpan").mockImplementation(
-      (...args: Parameters<typeof real>) => {
-        const span = real(...args) as Span;
-        created.push(span);
-        return span;
-      },
-    );
+    const telemetry = captureSpans();
     try {
       const { app } = await buildApp();
       const traceId = "0af7651916cd43dd8448eb211c80319c";
@@ -1160,7 +1192,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       });
       expect(res.statusCode).toBe(201);
 
-      const span = created.find((s) => s.name === "brood.register");
+      const span = telemetry.finished().find((s) => s.name === "brood.register");
       expect(span).toBeDefined();
       // Nests under the caller's trace (issue #233 acceptance criterion).
       expect(span!.spanContext().traceId).toBe(traceId);
@@ -1172,13 +1204,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         "march.worktree.path": "/wt/s1",
       });
     } finally {
-      vi.restoreAllMocks();
-      // initOtel({}) only swaps in the no-op handle, so also dispose the real
-      // providers (and the metric reader's export interval). Repo convention:
-      // don't await shutdown(); its OTLP flush blocks past the test timeout
-      // when no collector runs (CI). shutdown() swallows flush failures.
-      void otel.shutdown();
-      initOtel({});
+      await telemetry.dispose();
     }
   });
 

@@ -299,16 +299,6 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function queryBoolean(
-  value: string | string[] | undefined,
-  defaultValue: boolean,
-): boolean {
-  const raw = (Array.isArray(value) ? value[0] : value)?.trim();
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  return defaultValue;
-}
-
 /** First inbound W3C `traceparent` header value, if any (dedup array form). */
 function inboundTraceparent(
   headers: Record<string, string | string[] | undefined>,
@@ -498,9 +488,18 @@ export async function registerRoutes(
       reply.code(404);
       return { error: `No session with id "${id}".` };
     }
-    const query = (request.query ?? {}) as Record<string, string | string[] | undefined>;
-    const reconcile = queryBoolean(query.reconcile, true);
-    if (!reconcile) return deriveBroodReadView(record, {});
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    // Padded values (`?reconcile= false `) are trimmed; anything else that is
+    // not exactly true/false, or a repeated parameter, is rejected.
+    const reconcile = readBooleanQuery(
+      typeof query.reconcile === "string" ? query.reconcile.trim() : query.reconcile,
+      "reconcile",
+    );
+    if (!reconcile.ok) {
+      reply.code(400);
+      return { error: reconcile.error };
+    }
+    if (reconcile.value === false) return deriveBroodReadView(record, {});
     // Inspect reconciliation is on by default and degrades rather than fails:
     // an unreachable liveness source still returns the registry record, marked
     // `reconciled: false`, with an errored span recording why.
