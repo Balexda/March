@@ -458,6 +458,31 @@ describe("durable integration completion", () => {
     expect(state.slices.s.stage).toBe("escalated");
   });
 
+  it("holds an integration failure whose job reports a class that needs a change (step 2)", async () => {
+    const state: any = pending();
+    const integration = io();
+    const emitTransition = vi.fn();
+    const failure = {
+      class: "branch_collision", retry: "operator", reason: "branch_collision",
+      evidence: { branch: "feature/x", commits: ["ada24ade" + "0".repeat(32)], commitCount: 1, touchedFileCount: 13 },
+    };
+    const outcome = {
+      spawnId, status: "failed", failureReason: "extraction_rejected", completedAt: beforeDeadline,
+      diagnostic: "Spawn output did not yield an eligible patch.",
+    };
+    const getJob = async () => ({ status: "failed", integrationOutcome: outcome, error: { message: "collided", failure } });
+    const out = await completePendingHatcheryDispatches(state, beforeDeadline, deps({ integration, getJob, emitTransition }));
+    expect(state.slices.s).toMatchObject({ stage: "escalated", launch_failure: failure });
+    // Durable: the class rides on slice.escalated.
+    expect(emitTransition).toHaveBeenCalledWith({ type: "slice.escalated", sliceId: "s", reason: "hatchery_dispatch_failed", failure });
+    // Held, so no backoff window is scheduled and the operator is told at once.
+    expect(state.dispatch_recovery_backoff_until?.s).toBeUndefined();
+    expect(out.notifications).toEqual([expect.objectContaining({
+      sliceId: "s", detail: expect.stringMatching(/holds 1 unpushed commit\(s\) \(ada24ade\) touching 13 file/),
+    })]);
+    expect(out.failures).toEqual([expect.objectContaining({ failure_class: "branch_collision", retry_policy: "operator" })]);
+  });
+
   it("escalates with the outcome Herald kept when a retried failure append returns the first write", async () => {
     const state: any = pending();
     const stored = {

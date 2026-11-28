@@ -4,6 +4,7 @@ import { threadCommentIds } from "./handlers/babysit.js";
 import type { LoopSnapshot } from "./runtime.js";
 import { releasableArchive } from "./pure/slice.js";
 import { buildInfo } from "../../shared/build-info.js";
+import { parseLaunchFailure, type LaunchFailure } from "../../hatchery/launch-failure.js";
 
 /**
  * HTTP API for the profile-agnostic Legate service, built on Fastify. The
@@ -335,6 +336,15 @@ export interface EscalationEntry {
   detail: string | null;
   /** When it entered the escalation (best-effort: escalation stamp or last action). */
   escalated_at: string | null;
+  /**
+   * The structured launch failure behind a `hatchery_dispatch_failed`
+   * escalation (launch-failure recovery step 2): its bounded `class`, the
+   * `retry` policy the loop follows (`auto` / `adopt` / `operator` /
+   * `until_input_changes`), and the evidence (unpushed commits, the agent's
+   * message, the declined artifact blobs). Folded, so it survives a restart.
+   * Null when the escalation carries none.
+   */
+  failure: LaunchFailure | null;
 }
 
 /** Extract the escalated slices from a profile's working state (pure; testable) —
@@ -356,6 +366,7 @@ export function escalationsForWorkingState(workingState: any): EscalationEntry[]
       worktree_path: s.worktree_path ?? null,
       detail: typeof s.last_action_note === "string" ? s.last_action_note : null,
       escalated_at: s.steward_awaiting_input_at ?? s.steward_stuck_at ?? s.last_action ?? null,
+      failure: parseLaunchFailure(s.launch_failure) ?? null,
     });
   }
   return out;

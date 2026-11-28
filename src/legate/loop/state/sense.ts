@@ -316,6 +316,9 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       // recoverable escalation from a terminal one after a cold start.
       slice.escalated_reason = s.escalatedReason;
     }
+    // The launch-failure class (step 2) is folded too, so a hold that needs a
+    // change (unpushed work, a declined agent) is still a hold after a restart.
+    if (s.escalationFailure && s.stage === "escalated") slice.launch_failure = s.escalationFailure;
     // Carry the graduated-recovery ladder rung (#412) so the rung driver (PR2)
     // resumes the walk at the right rung after a cold-start rebuild rather than
     // restarting it from zero.

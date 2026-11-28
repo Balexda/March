@@ -2,6 +2,7 @@ import type { PrIntegrationFailure, PrIntegrationResult } from "../../brood/serv
 import type { AgentFailureReason } from "../../observability/agent-output.js";
 import type { PublicationFailure } from "../integration-publisher.js";
 import type { HatcherySpawnResult, PatchApplicationResult } from "../spawn-handoff.js";
+import type { LaunchFailure } from "../launch-failure.js";
 
 /**
  * Wire shape for a spawn request. Mirrors {@link HatcherySpawnOptions} but with
@@ -27,6 +28,8 @@ export interface SpawnRequest {
   readonly stewardDeadline?: string;
   /** Per-profile worker toolchain override (issue #287); `auto`/undefined → detect. */
   readonly toolchain?: string;
+  /** Repo-relative plan artifacts (task file, parent spec) this dispatch builds from. */
+  readonly artifactPaths?: readonly string[];
 }
 
 export type JobStatus = "pending" | "running" | "succeeded" | "failed";
@@ -36,6 +39,12 @@ export interface JobError {
   readonly agentFailureReason?: Exclude<AgentFailureReason, "none">;
   readonly application?: PatchApplicationResult;
   readonly publication?: PublicationFailure;
+  /**
+   * The structured failure class, retry policy, and bounded evidence. Present on
+   * every failed job; the legate's retry decision follows `failure.retry`
+   * instead of matching on `message`.
+   */
+  readonly failure?: LaunchFailure;
 }
 
 /** A spawn job tracked by the service. `id` is a server UUID, distinct from the inner spawnId. */
@@ -53,7 +62,7 @@ export interface JobRecord {
 /** Message posted from the spawn worker thread back to the service. */
 export type SpawnWorkerMessage =
   | { readonly ok: true; readonly result: HatcherySpawnResult }
-  | { readonly ok: false; readonly error: string; readonly integrationOutcome?: PrIntegrationFailure; readonly agentFailureReason?: JobError["agentFailureReason"]; readonly application?: PatchApplicationResult; readonly publication?: PublicationFailure };
+  | { readonly ok: false; readonly error: string; readonly integrationOutcome?: PrIntegrationFailure; readonly agentFailureReason?: JobError["agentFailureReason"]; readonly application?: PatchApplicationResult; readonly publication?: PublicationFailure; readonly launchFailure?: LaunchFailure };
 
 /** workerData passed into the spawn worker thread. */
 export interface SpawnWorkerData {

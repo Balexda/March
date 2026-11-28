@@ -101,7 +101,9 @@ grouping.
 | `legate.operator.<action>` | Legate loop | An operator lever on the Legate API (#593): `recover`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`. Carries `march.operator` and `march.operator.action`. A child of the slice trace for slice levers, a root for the profile levers. Errored on refusal. Respond and requeue keep `legate.respond` / `legate.requeue.request` and add `march.operator` |
 | `legate.operator-merge` | Legate loop | The tick's execution of an accepted merge-now request (#593): the squash-merge, or a refusal/failed merge (errored, with `march.error` and `march.failure_stage` = `precondition`, `read` or `merge`). `legate.operator.merge` records only the API's acceptance |
 | `legate.pr-label` | Legate loop | Owned PR label reconciliation (`march:opened` / `march:needs-human`, `pr-label-added` / `pr-label-removed`). Nested on the slice's trace when the PR is slice-linked, else a per-loop trace; errored on `pr-label-failed`. Kill switch `MARCH_LEGATE_PR_LABELS=0` |
-| `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
+| `hatchery.spawn` | orchestrator | `runHatcherySpawn`. A failed spawn carries `march.failure_class` and `march.retry_policy` (the launch-failure class the legate's retry follows: `auto`, `adopt`, `operator`, `until_input_changes`) |
+| `legate.dispatch.held` | Legate loop | errored child span on the slice trace when a launch failure is held, not retried (`march.failure_class`, `march.retry_policy`): a diverged-branch collision waiting for the operator, an agent that declined, or an open PR to adopt |
+| `legate.dispatch.rearm` | Legate loop | an `agent_declined` hold re-armed because its task file or parent spec changed on the default branch; the next span is the single re-dispatch |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
 | `steward.apply` | orchestrator | Steward patch application with `march.patch.*` diff stats and a bounded failure code |
@@ -243,7 +245,7 @@ never the concrete path.
 |---|---|---|
 | `march.hatchery.requests` (counter) | `march_hatchery_requests_total` | HTTP requests by `{route, method, outcome}` (`outcome` = `success` for 2xx/3xx, else `error`) |
 | `march.hatchery.request.duration` (histogram, `s`) | `march_hatchery_request_duration_seconds_{bucket,count,sum}` | HTTP request latency |
-| `march.hatchery.dispatches` (counter) | `march_hatchery_dispatches_total` | spawn dispatch jobs by `{backend, task_type, profile, outcome, reason}` (`outcome` = `success`/`failure`; `reason` = the low-cardinality failure code — a Hatchery GitHub code such as `tessera:unconfigured`, or `worker_exit`/`patch_apply_failed`/`commit_failed`/`push_failed`/`branch_collision`/`castra_error`/`docker_error`/`timeout`/`other` — and `none` on success) |
+| `march.hatchery.dispatches` (counter) | `march_hatchery_dispatches_total` | spawn dispatch jobs by `{backend, task_type, profile, outcome, reason}` (`outcome` = `success`/`failure`; `reason` = the low-cardinality failure code — a Hatchery GitHub code such as `tessera:unconfigured`, or `worker_exit`/`patch_apply_failed`/`commit_failed`/`push_failed`/`branch_collision`/`agent_declined`/`castra_error`/`docker_error`/`timeout`/`other` — and `none` on success; a failure whose throw site knew its launch-failure class reports that class's code) |
 | `march.hatchery.ready` (gauge, no unit) | `march_hatchery_ready` | `1`/`0` per readiness `{check}` = `docker`/`castra`/`github` (docker/castra as of the last `/readyz`, which the legate polls every tick; github read live) |
 | `march.hatchery.spawn.consecutive_failures` (gauge, no unit) | `march_hatchery_spawn_consecutive_failures` | finished spawn jobs that failed in a row since the last success (`/readyz` goes `degraded` at 2, `down` at 5) |
 | `march.hatchery.active_spawns` (up/down) | `march_hatchery_active_spawns` | spawn jobs currently executing |
@@ -357,7 +359,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks the loop would dispatch this tick (ready − in-flight; #219) |
 | `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
 | `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
-| `march.legate.dispatch.items` (gauge) | `march_legate_dispatch_items` | dependency-free plan items by dispatch `decision` (#592): `dispatch`, `spawn_cap`, `paused`, `in_flight`, `recovery_due`, `recovery_backoff`, `archived_merged`, `archived_closed`, `archived_other`; the per-item rows are on the legate's `GET /queue` |
+| `march.legate.dispatch.items` (gauge) | `march_legate_dispatch_items` | dependency-free plan items by dispatch `decision` (#592): `dispatch`, `spawn_cap`, `paused`, `in_flight`, `recovery_due`, `recovery_backoff`, `held_operator`, `held_until_input_changes`, `held_adopt` (a launch failure that needs a change, not retried), `archived_merged`, `archived_closed`, `archived_other`; the per-item rows are on the legate's `GET /queue` |
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
 | `march.legate.slices` (gauge) | `march_legate_slices` | non-archived slices by lifecycle `stage` (#220) |
 | `march.legate.slices.ready_to_merge` (gauge) | `march_legate_slices_ready_to_merge` | `pr-open` slices clean+mergeable, no threads owed (#220) |
@@ -636,6 +638,7 @@ a leg whose span is **absent**, **errored**, or carries the **wrong attributes**
 | `hatchery.spawn` / `spawn.*` errored or absent | the container/image/patch step failed before the agent ran |
 | `steward.apply` errored | the recorded checkout could not be authorized or the staged patch could not be verified. Read the bounded `march.patch.reject` code on the span or in the trace-correlated `steward_apply_failed` log |
 | `spawn.self_heal` with `march.self_heal.verdict = unsafe:*` | a `manager.launch` branch collision was left in place (open PR / diverged) and escalated; `safe:*` means it was auto-removed and the next dispatch re-creates it cleanly (#243) |
+| `legate.dispatch.held` and no later `hatchery.spawn` | the launch failure needs a change, so the loop stopped retrying on purpose. `GET /escalations` carries the class and evidence (unpushed commit SHAs, the agent's message, the declined artifact blobs) |
 | `steward.send` / `castra.send` errored or absent | the prompt never reached the steward (e.g. Castra rejected it) |
 | `herald.pr.opened` present but **no** `herald.pr.merged` | Herald never observed the merge-ready state — cross-check the PR on GitHub to tell a real not-ready from an observation gap |
 | the trace simply **can't** answer "where did it stall" | that silence is itself the bug — see below |

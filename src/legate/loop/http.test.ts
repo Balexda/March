@@ -228,6 +228,7 @@ describe("escalationsForWorkingState (pure)", () => {
         worktree_path: "/wt/x",
         detail: 'Steward is parked on an interactive prompt awaiting your selection: "How should I resolve …?".',
         escalated_at: "2026-06-14T08:00:00.000Z",
+        failure: null,
       },
     ]);
   });

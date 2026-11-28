@@ -2,6 +2,7 @@ import { BroodClient } from "../brood/service/client.js";
 import type { PrIntegrationResult } from "../brood/service/types.js";
 import type { AgentFailureReason } from "../observability/agent-output.js";
 import type { PublicationFailure } from "./integration-publisher.js";
+import type { LaunchFailure } from "./launch-failure.js";
 import type { PatchApplicationResult } from "./spawn-handoff.js";
 import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import type { DispatchTrace } from "../observability/spawn-trace.js";
@@ -31,6 +32,13 @@ export interface IntegrationErrorDetails {
 
 export class IntegrationOutcomeError extends Error {
   details: IntegrationErrorDetails = {};
+  /**
+   * The launch-failure class behind this outcome, when Hatchery knew one (e.g. a
+   * diverged-branch collision or an agent that declined). The Brood outcome's
+   * `failureReason` stays the integration vocabulary; the job record reports
+   * this class so the legate's retry follows it.
+   */
+  launchFailure?: LaunchFailure;
 
   constructor(readonly outcome: FailedOutcome, readonly agentFailureReason?: Exclude<AgentFailureReason, "none">) {
     super(outcome.diagnostic);

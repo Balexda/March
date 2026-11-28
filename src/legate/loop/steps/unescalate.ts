@@ -35,6 +35,7 @@ export function unescalate(slice: any, stage: string, ts: string, note: string):
   const changed = slice.stage !== stage;
   slice.stage = stage;
   slice.escalated_reason = undefined;
+  slice.launch_failure = undefined;
   delete slice.steward_awaiting_input_at;
   delete slice.steward_stuck_at;
   delete slice.steward_stuck_head_sha;

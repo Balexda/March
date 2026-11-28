@@ -1830,7 +1830,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Why each dependency-free plan row did or did not dispatch last tick (#592). archived_closed/archived_merged rows are held by an archived slice; release a closed hold with `march legate requeue <heldBy> --profile <p>`; a merged hold also needs `--release-merged`, and only when the merged PR did not do this row's work (see `march legate queue`).",
+      "description": "Why each dependency-free plan row did or did not dispatch last tick (#592). held_operator / held_until_input_changes / held_adopt rows are launch failures that need a change and are not retried (unpushed work in the way, an agent that declined until the plan changes, an open PR to adopt); the class and evidence are on `GET /escalations`. archived_closed/archived_merged rows are held by an archived slice; release a closed hold with `march legate requeue <heldBy> --profile <p>`; a merged hold also needs `--release-merged`, and only when the merged PR did not do this row's work (see `march legate queue`).",
       "fieldConfig": {
         "defaults": {
           "color": {

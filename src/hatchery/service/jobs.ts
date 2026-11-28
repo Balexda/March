@@ -13,6 +13,13 @@ import { DISPATCH_REASON_NONE, dispatchReasonCode } from "../dispatch-reason.js"
 import { SpawnWindow } from "./readiness.js";
 import { StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
 import type { JobRecord, SpawnRequest } from "./types.js";
+import {
+  classForAgentFailure,
+  DEFAULT_RETRY_POLICY,
+  launchFailureFromReason,
+  launchFailureOf,
+  type LaunchFailure,
+} from "../launch-failure.js";
 
 /** Executes one spawn request. Default runs in a worker; tests inject a fake. */
 export type SpawnExecutor = (
@@ -27,6 +34,25 @@ export interface JobLogger {
 
 const DEFAULT_TERMINAL_TTL_MS = 60 * 60 * 1000; // 1h
 const DEFAULT_REAPER_INTERVAL_MS = 5 * 60 * 1000; // 5m
+
+/**
+ * The structured failure a failed job reports. A throw site that knew the class
+ * (a collision verdict, an agent that declined) attached it to the error; any
+ * other failure is classified from its bounded reason code: the integration
+ * `failureReason`, the agent failure reason, else `dispatchReasonCode`.
+ */
+export function jobFailure(err: unknown): LaunchFailure {
+  const structured = launchFailureOf(err);
+  if (structured) return structured;
+  if (err instanceof IntegrationOutcomeError) {
+    if (err.agentFailureReason) {
+      const cls = classForAgentFailure(err.agentFailureReason);
+      return { class: cls, retry: DEFAULT_RETRY_POLICY[cls], reason: err.outcome.failureReason };
+    }
+    return launchFailureFromReason(err.outcome.failureReason);
+  }
+  return launchFailureFromReason(dispatchReasonCode(err));
+}
 
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -166,16 +192,24 @@ export class JobStore {
       }
     } catch (err) {
       if (err instanceof IntegrationOutcomeError) record.integrationOutcome = err.outcome;
+      const failure = jobFailure(err);
       record.error = {
         message: errorMessage(err),
         ...(err instanceof IntegrationOutcomeError && err.agentFailureReason && { agentFailureReason: err.agentFailureReason }),
         ...(err instanceof IntegrationOutcomeError ? err.details : {}),
         ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
         ...(err instanceof StewardApplyError ? { application: err.application } : {}),
+        failure,
       };
       record.status = "failed";
-      this.logger?.error({ ...fields, err: errorMessage(err) }, "spawn job failed");
-      const reason = err instanceof IntegrationOutcomeError ? err.outcome.failureReason : dispatchReasonCode(err);
+      this.logger?.error(
+        { ...fields, err: errorMessage(err), failure_class: failure.class, retry_policy: failure.retry },
+        "spawn job failed",
+      );
+      // A structured class from the throw site names the failure precisely
+      // (`agent_declined`, `branch_collision`); otherwise keep today's code.
+      const reason = launchFailureOf(err)?.reason
+        ?? (err instanceof IntegrationOutcomeError ? err.outcome.failureReason : dispatchReasonCode(err));
       this.recordDispatch(request, "failure", reason);
       this.spawnWindow.record(false, reason);
     } finally {

@@ -1,7 +1,16 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
-import { classifyReady, dispatchableReady, recoverableEscalations } from "../pure/slice.js";
+import {
+  classifyReady,
+  declinedArtifactPaths,
+  declinedInputChanged,
+  dispatchableReady,
+  launchRetryPolicy,
+  recoverableEscalations,
+  recoveryTargetId,
+} from "../pure/slice.js";
+import { emitLoopSpan } from "../../../observability/loop-spans.js";
 import { parseMs } from "../pure/self-heal.js";
 import { isHardDownReason, parseAgentFailureReason } from "../spawn-breaker.js";
 
@@ -55,6 +64,14 @@ export interface DispatchDeps {
   recoverDispatch: (state: any, ts: string, item: any, sliceId: string, attempt: number) => Promise<LaunchResult>;
   /** Fire a legate-judgement request (idempotent by requestKey). */
   requestJudgement: (input: { ts: string; slice: any; sliceId: string; requestKey: string; reason: string; detail: string }) => Promise<any | null>;
+  /**
+   * Blob ids of repo-relative plan artifacts on the plan checkout's default
+   * branch (Herald keeps it synced), in ONE read; `null` per path that does not
+   * exist. Called only while an `agent_declined` hold is waiting, once per tick
+   * for all of them, so the git call count stays flat. Absent → holds never
+   * re-arm on their own (an operator requeue still does).
+   */
+  artifactRevisions?: (paths: readonly string[]) => Promise<Record<string, string | null> | null>;
 }
 
 /**
@@ -65,7 +82,7 @@ export interface DispatchDeps {
  * {@link dispatchableReady} (`pure/slice.ts`) so the "dispatchable now" metric
  * (#219) reports the same set this handler launches.
  */
-export function assess(state: LoopState): DispatchDecision[] {
+export function assess(state: LoopState, rearmed: ReadonlySet<string> = new Set()): DispatchDecision[] {
   if (!state.smithy.ok) return [];
   const decisions: DispatchDecision[] = dispatchableReady(state.raw, state.smithy.ready).map((item) => ({
     kind: "dispatch" as const,
@@ -75,7 +92,7 @@ export function assess(state: LoopState): DispatchDecision[] {
   // #211/#460: items wedged behind a recoverable escalation. No hard cap — paced
   // by exponential backoff + the AIMD rate inside recoverableEscalations, gated on
   // this tick's clock so a cooling-down slice is held back.
-  for (const r of recoverableEscalations(state.raw, state.smithy.ready, parseMs(state.ts))) {
+  for (const r of recoverableEscalations(state.raw, state.smithy.ready, parseMs(state.ts), rearmed)) {
     decisions.push({ kind: "recover", sliceId: r.sliceId, item: r.item, attempt: r.attempt });
   }
   return decisions;
@@ -117,16 +134,19 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   //    never starved by fresh-frontier pressure. The cap never alters the #289/#290
   //    dispatchable METRIC — `assess` still reports the true frontier.
   const budget = ctx.spawnBudget;
+  // Step 2: an `agent_declined` hold re-arms once its plan changed on the default
+  // branch. One read for every waiting hold, only while one is waiting.
+  const rearmed = state.smithy.ok ? await rearmDeclinedHolds(state, ctx, deps) : new Set<string>();
   // #592: publish WHY each ready item did or didn't dispatch, classified with the
   // same matchers assess() uses at the same moment (after completion).
-  const rows = state.smithy.ok ? classifyReady(state.raw, state.smithy.ready, parseMs(state.ts)) : null;
+  const rows = state.smithy.ok ? classifyReady(state.raw, state.smithy.ready, parseMs(state.ts), rearmed) : null;
   if (rows) res.dispatchDecisions = rows;
   // Paused (#593): nothing launches or re-dispatches, so report those rows as
   // paused. Archive, in-flight and backoff reasons still hold and are kept.
   if (rows && state.dispatchPaused) {
     for (const row of rows) if (row.decision === "dispatch" || row.decision === "recovery_due") row.decision = "paused";
   }
-  for (const decision of state.dispatchPaused ? [] : assess(state)) {
+  for (const decision of state.dispatchPaused ? [] : assess(state, rearmed)) {
     let reserved = false;
     if (decision.kind === "dispatch" && budget) {
       if (budget.remaining <= 0) {
@@ -163,6 +183,59 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   if (hardDown > 0) res.hardDownFailures = hardDown;
 
   return res;
+}
+
+/**
+ * Which `agent_declined` holds re-arm this tick: the ready items whose own slice
+ * is held `until_input_changes` and whose task file or parent spec now has a
+ * different blob on the default branch than the one it was declined at. A hold
+ * that recorded no blobs (Hatchery could not read them) takes the current blobs
+ * as its baseline — durably, via an updated `slice.escalated` — and re-arms on
+ * the next change. A failed read re-arms nothing (the hold stays).
+ */
+export async function rearmDeclinedHolds(state: LoopState, ctx: HandlerContext, deps: DispatchDeps): Promise<Set<string>> {
+  const rearmed = new Set<string>();
+  if (!deps.artifactRevisions) return rearmed;
+  const slices = state.raw?.slices && typeof state.raw.slices === "object" ? state.raw.slices : {};
+  const held: { sliceId: string; slice: any; paths: string[] }[] = [];
+  const ready = state.smithy.ready ?? [];
+  for (const item of ready) {
+    // The same target recovery uses: the item's id, or its pre-#599 id it owns.
+    const sliceId = recoveryTargetId(slices, item, ready);
+    if (!sliceId) continue;
+    const slice = slices[sliceId];
+    if (!slice || slice.stage !== "escalated" || slice.escalated_reason !== "hatchery_dispatch_failed") continue;
+    if (launchRetryPolicy(slice) !== "until_input_changes") continue;
+    const paths = declinedArtifactPaths(slice, item);
+    if (paths.length) held.push({ sliceId, slice, paths });
+  }
+  if (held.length === 0) return rearmed;
+  let revisions: Record<string, string | null> | null = null;
+  try {
+    revisions = await deps.artifactRevisions([...new Set(held.flatMap((h) => h.paths))]);
+  } catch {
+    revisions = null;
+  }
+  if (!revisions) return rearmed;
+  for (const { sliceId, slice, paths } of held) {
+    const failure = slice.launch_failure;
+    const recorded = failure?.evidence?.artifacts;
+    if (!Array.isArray(recorded) || recorded.length === 0) {
+      const artifacts = paths.map((path) => ({ path, blob: revisions[path] ?? null }));
+      slice.launch_failure = { ...failure, evidence: { ...(failure?.evidence ?? {}), artifacts } };
+      ctx.emitTransition?.({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed", failure: slice.launch_failure });
+      continue;
+    }
+    if (declinedInputChanged(slice, revisions)) {
+      rearmed.add(sliceId);
+      ctx.log("[" + ctx.ts + "] dispatch " + sliceId + ": plan changed since the agent declined; re-dispatching once");
+      emitLoopSpan({
+        name: "legate.dispatch.rearm", traceKey: sliceId, root: false,
+        attributes: { "march.failure_class": "agent_declined", "march.retry_policy": "until_input_changes" },
+      });
+    }
+  }
+  return rearmed;
 }
 
 async function fireNotifications(

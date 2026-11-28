@@ -52,7 +52,7 @@ import {
   removeSpawnImage,
   writeSpawnDockerfile,
 } from "../spawn/snapshot-build.js";
-import { generateSpawnId, parkSpawnWorktree, removeSpawnWorktree } from "../brood/worktree.js";
+import { generateSpawnId, parkSpawnWorktree, removeSpawnWorktree, removeSpawnWorktreeExact } from "../brood/worktree.js";
 import {
   readSpawnRecordExtractionResult,
   loadSpawnRecord,
@@ -103,6 +103,17 @@ import {
 import { registerStewardLaunchWithBrood, registerStewardRelaunchWithBrood } from "./service/brood-registration.js";
 import type { PrIntegrationResult } from "../brood/service/types.js";
 import { IntegrationAttempt, IntegrationOutcomeError } from "./integration-outcome.js";
+import {
+  classForAgentFailure,
+  DEFAULT_RETRY_POLICY,
+  isAgentDeclined,
+  launchFailureFromReason,
+  launchFailureOf,
+  type CarriesLaunchFailure,
+  type LaunchFailure,
+} from "./launch-failure.js";
+import { agentDeclinedFailure, collisionFailure } from "./launch-failure-evidence.js";
+import { dispatchReasonCode } from "./dispatch-reason.js";
 import { attemptDeadlineSignal, stewardDeadlineExpired, stewardOperationSignal, stewardTimeRemaining, withStewardDeadline } from "./integration-deadline.js";
 import { BroodWorkspaceReclaimingError } from "../brood/service/client.js";
 import { publishStewardAttachedToHerald } from "./service/herald-registration.js";
@@ -113,10 +124,14 @@ export {
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
 
-export class HatcherySpawnError extends Error {
-  constructor(message: string) {
+export class HatcherySpawnError extends Error implements CarriesLaunchFailure {
+  /** The structured failure class + evidence the legate's retry policy follows. */
+  launchFailure?: LaunchFailure;
+
+  constructor(message: string, launchFailure?: LaunchFailure) {
     super(message);
     this.name = "HatcherySpawnError";
+    if (launchFailure) this.launchFailure = launchFailure;
   }
 }
 
@@ -152,6 +167,13 @@ export interface HatcherySpawnOptions {
    * image to `f(agent, toolchain)` so non-node repos can build in-container.
    */
   readonly toolchain?: string;
+  /**
+   * Repo-relative plan artifacts this dispatch builds from (the slice's task
+   * file and its parent spec). When the agent declines (exit 3, no commit),
+   * Hatchery records each one's blob id at the snapshot base so the legate can
+   * re-dispatch once the plan changes (`agent_declined`).
+   */
+  readonly artifactPaths?: readonly string[];
 }
 
 export interface AgentDeckManagerSession {
@@ -291,6 +313,103 @@ export function writeParkedSpawnManifest(homeDir: string = os.homedir(), manifes
   }
 }
 
+/** The failure class a parked spawn is grouped under for the per-slice cap. */
+export function parkedFailureClass(err: unknown): string {
+  const structured = launchFailureOf(err);
+  if (structured) return structured.class;
+  if (err instanceof IntegrationOutcomeError) return launchFailureFromReason(err.outcome.failureReason).class;
+  return launchFailureFromReason(dispatchReasonCode(err)).class;
+}
+
+interface ParkedManifestEntry {
+  readonly file: string;
+  readonly spawnId: string;
+  readonly parkedAt: string;
+  readonly parkedBranch?: string;
+  readonly parkedWorktreePath?: string;
+}
+
+/** Removers {@link pruneParkedSpawns} uses; injectable so tests run without docker. */
+export interface ParkedSpawnRemovers {
+  readonly removeWorktree?: (repoPath: string, target: { worktreePath?: string; branch?: string }) => {
+    worktreeRemoved: boolean; branchDeleted: boolean;
+  };
+  readonly removeContainer?: (spawnId: string) => void;
+  readonly removeImage?: (spawnId: string) => void;
+}
+
+/**
+ * Cap the parked attempts per slice: of the parked spawns for `sliceId` with the
+ * same `failureClass`, keep the FIRST (the original evidence) and the LATEST
+ * (the current evidence) and remove the rest. Each removal goes by EXACT path —
+ * the parked worktree and parked branch the manifest names, then the kept
+ * container + image by spawn id — never a blanket prune (#155). A manifest is
+ * deleted only once its worktree and branch are gone, so a failed removal stays
+ * tracked. Manifests without a `failureClass` (parked before the cap existed)
+ * are left alone. Returns the spawn ids removed. Never throws.
+ */
+export function pruneParkedSpawns(
+  input: {
+    readonly repoPath: string; readonly homeDir?: string; readonly profile: string;
+    readonly sliceId: string; readonly failureClass: string;
+  },
+  removers: ParkedSpawnRemovers = {},
+): string[] {
+  const removeWorktree = removers.removeWorktree ?? removeSpawnWorktreeExact;
+  const removeContainer = removers.removeContainer ?? removeSpawnContainer;
+  const removeImage = removers.removeImage ?? removeSpawnImage;
+  const removed: string[] = [];
+  try {
+    if (!input.sliceId) return removed;
+    const dir = parkedManifestDir(input.homeDir);
+    if (!fs.existsSync(dir)) return removed;
+    const entries: ParkedManifestEntry[] = [];
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(dir, name);
+      try {
+        const m = JSON.parse(fs.readFileSync(file, "utf-8"));
+        // Profiles share this directory and slice ids carry no repo identity, so
+        // only this repo + profile's own parks are pooled.
+        if (m?.repoPath !== input.repoPath || m?.profile !== input.profile) continue;
+        if (m?.sliceId !== input.sliceId || m?.failureClass !== input.failureClass) continue;
+        if (typeof m.spawnId !== "string") continue;
+        entries.push({
+          file, spawnId: m.spawnId,
+          parkedAt: typeof m.parkedAt === "string" ? m.parkedAt : "",
+          // Only what the park actually moved aside is the parked copy; a failed
+          // move/rename left the canonical names in place, which this never touches.
+          parkedBranch: typeof m.parkedBranch === "string" && m.branchRenamed !== false ? m.parkedBranch : undefined,
+          parkedWorktreePath: typeof m.parkedWorktreePath === "string" && m.worktreeMoved !== false
+            ? m.parkedWorktreePath : undefined,
+        });
+      } catch {
+        // An unreadable manifest is left alone.
+      }
+    }
+    if (entries.length <= 2) return removed;
+    entries.sort((a, b) => a.parkedAt.localeCompare(b.parkedAt) || a.spawnId.localeCompare(b.spawnId));
+    for (const entry of entries.slice(1, -1)) {
+      try {
+        const result = removeWorktree(input.repoPath, {
+          worktreePath: entry.parkedWorktreePath, branch: entry.parkedBranch,
+        });
+        if (result.worktreeRemoved && result.branchDeleted) {
+          removeContainer(entry.spawnId);
+          removeImage(entry.spawnId);
+          fs.rmSync(entry.file, { force: true });
+          removed.push(entry.spawnId);
+        }
+      } catch {
+        // Keep the manifest; the next park retries.
+      }
+    }
+  } catch {
+    // Parking hygiene must never fail the rollback.
+  }
+  return removed;
+}
+
 /**
  * Does this error look like agent-deck/git refusing because the dispatch branch
  * already exists? The `manager.launch` failure surfaces as
@@ -309,6 +428,8 @@ export interface SelfHealResult {
   readonly verdict: BranchSafetyVerdict;
   /** True when the orphan was a safe ref and removal was performed. */
   readonly removed: boolean;
+  /** Exact worktree path git records for the orphan branch, when one exists. */
+  readonly worktreePath?: string;
 }
 
 /**
@@ -385,7 +506,7 @@ async function selfHealManagerLaunchCollision(input: {
         "march.self_heal.removed": removed,
       },
     });
-    return { orphanBranch, verdict, removed };
+    return { orphanBranch, verdict, removed, ...(worktreePath && { worktreePath }) };
   });
 }
 
@@ -2301,9 +2422,11 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
       });
       recordAgentFailure({ backend: input.backend.name, profile, reason: agentFailureReason });
       dispatch.setAttributes({ "march.agent_failure_reason": agentFailureReason });
+      const agentClass = classForAgentFailure(agentFailureReason);
       throw new HatcherySpawnError(
         `Spawn ${spawnId} agent failure (exit ${waitResult.exitCode}); manager prompt was not sent. ` +
           `[agent_failure_reason=${agentFailureReason}] Logs: ${artifacts.spawnOutputPath}`,
+        { class: agentClass, retry: DEFAULT_RETRY_POLICY[agentClass], reason: agentClass },
       );
     }
 
@@ -2319,8 +2442,15 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
         managerPrompt,
         metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
       });
+      // Exit 3 with a clean tree is the scaffold's "real no-op": the agent read
+      // its task and chose not to change anything. Re-running it unchanged only
+      // repeats the decision, so it is held until the plan changes.
+      const failure: LaunchFailure = isAgentDeclined(waitResult.exitCode, logs)
+        ? agentDeclinedFailure({ logs, worktreePath: manager.worktreePath, artifactPaths: input.artifactPaths })
+        : { class: "worker_exit", retry: "auto", reason: "worker_exit" };
       throw new HatcherySpawnError(
         `Spawn ${spawnId} exited ${waitResult.exitCode}; manager prompt was not sent. Logs: ${artifacts.spawnOutputPath}`,
+        failure,
       );
     }
 
@@ -2656,11 +2786,15 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
                 branch: integrationBranch,
                 worktreePath: mgr.worktreePath,
               });
+              const failureClass = parkedFailureClass(err);
               const manifestPath = writeParkedSpawnManifest(input.homeDir, {
                 spawnId,
                 sliceId,
                 profile,
+                repoPath: input.repoPath,
                 stage,
+                failureClass,
+                parkedAt: new Date().toISOString(),
                 error: (err as Error).message,
                 containerId: containerId ?? null,
                 originalBranch: orphanManagerBranch(branch),
@@ -2678,6 +2812,10 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
                 "march.park.parked_worktree": parked.parkedWorktreePath,
                 "march.park.manifest": manifestPath ?? "",
               });
+              // Repeated identical failures keep only the first and the latest
+              // parked attempt per slice, not one per attempt.
+              const pruned = pruneParkedSpawns({ repoPath: input.repoPath, homeDir: input.homeDir, profile, sliceId, failureClass });
+              parkSpan.setAttributes({ "march.park.pruned": pruned.length });
             });
           }
           await removeAgentDeckManager(
@@ -2721,10 +2859,28 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
         dispatch,
       });
     }
+    // The structured class the legate's retry policy follows. A collision is
+    // classified from the self-heal's verdict (carried, not re-derived); every
+    // other failure keeps the class its throw site attached.
+    const launchFailure: LaunchFailure | undefined = selfHeal
+      ? collisionFailure({
+          repoPath: input.repoPath,
+          branch: selfHeal.orphanBranch,
+          verdict: selfHeal.verdict,
+          worktreePath: selfHeal.worktreePath,
+        })
+      : launchFailureOf(err);
+    if (launchFailure) {
+      dispatch.setAttributes({
+        "march.failure_class": launchFailure.class,
+        "march.retry_policy": launchFailure.retry,
+      });
+    }
     if (!terminalError && selfHeal?.verdict.kind === "unsafe") {
       throw new HatcherySpawnError(
         `${(err as Error).message}\n\nOrphan branch ${selfHeal.orphanBranch} was NOT auto-removed: ` +
           `${describeVerdict(selfHeal.verdict)}. Operator must reconcile before this slice can re-dispatch.`,
+        launchFailure,
       );
     }
 
@@ -2732,8 +2888,10 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
       const outcomeError = agentFailureReason !== "none"
         ? new IntegrationOutcomeError(terminalError.outcome, agentFailureReason).withDetails(terminalError.details)
         : terminalError;
+      if (launchFailure) outcomeError.launchFailure = launchFailure;
       throw withErrorDetails(outcomeError, err);
     }
+    if (launchFailure && err && typeof err === "object") (err as CarriesLaunchFailure).launchFailure = launchFailure;
     if (
       err instanceof SnapshotError ||
       err instanceof BuildError ||
@@ -2745,7 +2903,7 @@ async function executeHatcherySpawn(input: HatcherySpawnOptions): Promise<Hatche
     ) {
       throw err;
     }
-    throw new HatcherySpawnError((err as Error).message);
+    throw new HatcherySpawnError((err as Error).message, launchFailure);
   } finally {
     // Outcome is the real HANDOFF result, not the container exit code: a 0 exit
     // followed by a failed patch-apply / steward-send is a FAILED spawn (issue

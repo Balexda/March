@@ -29,6 +29,20 @@ async function buildApp(
 }
 
 describe("validateEvent", () => {
+  it("accepts a slice.escalated launch-failure class and stores only its bounded copy (step 2)", () => {
+    const body = {
+      type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed",
+      failure: { class: "agent_declined", retry: "until_input_changes", reason: "agent_declined", evidence: { stderr: "x", agentMessage: "Blocked." } },
+    };
+    const res = validateEvent(body);
+    expect(res.ok).toBe(true);
+    expect(res.ok && (res.input as any).failure).toEqual({
+      class: "agent_declined", retry: "until_input_changes", reason: "agent_declined", evidence: { agentMessage: "Blocked." },
+    });
+    expect(validateEvent({ ...body, failure: { class: "nope", retry: "auto" } }).ok).toBe(false);
+    expect(validateEvent({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }).ok).toBe(true);
+  });
+
   it("validates integration attempt identity, deadline and terminal failure", () => {
     const launch = { type: "slice.dispatched", sliceId: "s1", attemptId: "attempt-1" };
     expect(validateEvent(launch).ok).toBe(false);

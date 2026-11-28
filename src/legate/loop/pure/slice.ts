@@ -11,6 +11,7 @@ import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { prNeedsSteering } from "../../../shared/steering.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
+import { LAUNCH_RETRY_POLICIES, type LaunchRetryPolicy } from "../../../hatchery/launch-failure.js";
 import {
   backoffUntil,
   clearBackoff,
@@ -441,6 +442,45 @@ export function recoveryBudgetExhausted(state: any, sliceId: string): boolean {
   return retryAttempts(state, DISPATCH_RECOVERY_DOMAIN, sliceId) >= DISPATCH_RECOVERY_LIMIT;
 }
 
+/**
+ * The retry policy the slice's launch failure carries (launch-failure recovery
+ * step 2), or `auto` when it carries none — an escalation from before the class
+ * existed, or a failure Hatchery never classified, keeps today's backoff
+ * (fail-open for retry).
+ */
+export function launchRetryPolicy(slice: any): LaunchRetryPolicy {
+  const retry = slice?.launch_failure?.retry;
+  return typeof retry === "string" && (LAUNCH_RETRY_POLICIES as readonly string[]).includes(retry)
+    ? retry as LaunchRetryPolicy
+    : "auto";
+}
+
+/**
+ * The repo-relative plan artifacts an `agent_declined` hold watches: the paths
+ * its evidence recorded, else the item's task file and parent spec.
+ */
+export function declinedArtifactPaths(slice: any, item: any): string[] {
+  const recorded = slice?.launch_failure?.evidence?.artifacts;
+  if (Array.isArray(recorded) && recorded.length > 0) {
+    return recorded.map((a: any) => a?.path).filter((p: unknown): p is string => typeof p === "string" && p.length > 0);
+  }
+  return [item?.path, item?.parent_path].filter((p: unknown): p is string => typeof p === "string" && p.length > 0);
+}
+
+/**
+ * Pure: has an `agent_declined` slice's input changed since the decline? True
+ * when any watched artifact's current blob (`revisions`, read from the default
+ * branch) differs from the blob it was declined at. A hold with no recorded
+ * blobs cannot tell, so it stays held (the caller records a baseline first). An
+ * artifact missing from `revisions` is unknown and never re-arms on its own.
+ */
+export function declinedInputChanged(slice: any, revisions: Readonly<Record<string, string | null>>): boolean {
+  const recorded = slice?.launch_failure?.evidence?.artifacts;
+  if (!Array.isArray(recorded) || recorded.length === 0) return false;
+  return recorded.some((a: any) =>
+    typeof a?.path === "string" && Object.hasOwn(revisions, a.path) && revisions[a.path] !== (a.blob ?? null));
+}
+
 /** True when a slice is escalated for a reason the loop is allowed to auto-recover. */
 export function escalatedRecoverable(slice: any): boolean {
   if (!slice || typeof slice !== "object") return false;
@@ -489,7 +529,7 @@ function legacyRecoverableId(slices: Record<string, any>, item: any, ready: read
 
 /** The id of the recoverable escalation `item` owns: its own slice, else a
  *  pre-#599 one per {@link legacyRecoverableId}; null when there is none. */
-function recoveryTargetId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
+export function recoveryTargetId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
   const currentId = dispatchSliceId(item);
   return escalatedRecoverable(slices[currentId]) ? currentId : legacyRecoverableId(slices, item, ready);
 }
@@ -527,7 +567,12 @@ export interface RecoverableEscalation {
  * `nowMs` is the tick epoch-ms; pass NaN (or omit) to disable the backoff gate
  * (unit tests / a non-date tick → every recoverable slice is eligible).
  */
-export function recoverableEscalations(state: any, ready: readonly any[] | undefined, nowMs = NaN): RecoverableEscalation[] {
+export function recoverableEscalations(
+  state: any,
+  ready: readonly any[] | undefined,
+  nowMs = NaN,
+  rearmed: ReadonlySet<string> = new Set(),
+): RecoverableEscalation[] {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const candidates: { item: any; sliceId: string; attempt: number; until: number }[] = [];
   for (const item of ready ?? []) {
@@ -536,6 +581,16 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
     if (!sliceId) continue;
     if (alreadyArchivedSlice(state, item, currentId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
+    // Retry follows the launch-failure class (step 2): a failure that needs a
+    // change waits for it. `until_input_changes` re-dispatches once, without
+    // backoff, the tick its plan changed (`rearmed`); `operator`/`adopt` never
+    // auto re-dispatch (an operator requeue / adopt-from-fold resolves them).
+    const policy = launchRetryPolicy(slices[sliceId]);
+    if (policy === "until_input_changes" && rearmed.has(sliceId)) {
+      candidates.push({ item, sliceId, attempt: retryAttempts(state, DISPATCH_RECOVERY_DOMAIN, sliceId) + 1, until: 0 });
+      continue;
+    }
+    if (policy !== "auto") continue;
     // The pacer's "it's time" gate: the callback fires only once the slice is past
     // its backoff window (a candidate still cooling down is skipped).
     whenDue(state, DISPATCH_RECOVERY_DOMAIN, sliceId, nowMs, (attempt, until) => {
@@ -564,6 +619,11 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
  *  - `in_flight`: a live slice already covers it.
  *  - `recovery_due` / `recovery_backoff`: its own slice is a recoverable
  *    escalation, re-dispatched this tick or cooling down / rate-limited.
+ *  - `held_operator` / `held_until_input_changes` / `held_adopt`: its own slice's
+ *    launch failure needs a change (launch-failure recovery step 2): unpushed
+ *    work in the way, an agent that declined until the plan changes, or an open
+ *    PR to adopt. Not retried. A decline re-armed by a plan change but cut by the
+ *    AIMD rate reads `recovery_backoff` instead.
  *  - `archived_merged` / `archived_closed` / `archived_other`: an archived slice
  *    with the same id, action key or branch holds it back.
  */
@@ -574,6 +634,9 @@ export const DISPATCH_DECISIONS = [
   "in_flight",
   "recovery_due",
   "recovery_backoff",
+  "held_operator",
+  "held_until_input_changes",
+  "held_adopt",
   "archived_merged",
   "archived_closed",
   "archived_other",
@@ -607,9 +670,14 @@ export interface DispatchDecisionRow {
  * produced here — the dispatch handler marks it when the shared budget runs out.
  * `nowMs` gates recovery backoff exactly as {@link recoverableEscalations} does.
  */
-export function classifyReady(state: any, ready: readonly any[] | undefined, nowMs = NaN): DispatchDecisionRow[] {
+export function classifyReady(
+  state: any,
+  ready: readonly any[] | undefined,
+  nowMs = NaN,
+  rearmed: ReadonlySet<string> = new Set(),
+): DispatchDecisionRow[] {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
-  const due = new Set(recoverableEscalations(state, ready, nowMs).map((r) => r.sliceId));
+  const due = new Set(recoverableEscalations(state, ready, nowMs, rearmed).map((r) => r.sliceId));
   return (ready ?? []).map((item) => {
     const sliceId = dispatchSliceId(item);
     const base = {
@@ -634,6 +702,14 @@ export function classifyReady(state: any, ready: readonly any[] | undefined, now
     const recoveryId = recoveryTargetId(slices, item, ready);
     if (recoveryId && live.sliceId === recoveryId && !otherLiveBlocker(state, item, recoveryId)) {
       if (due.has(recoveryId)) return { ...base, decision: "recovery_due" as const, heldBy };
+      const policy = launchRetryPolicy(slices[recoveryId]);
+      // A re-armed decline the AIMD rate cut waits for the rate, not a plan change.
+      const rearmedCut = policy === "until_input_changes" && rearmed.has(recoveryId);
+      if (policy !== "auto" && !rearmedCut) {
+        const decision: DispatchDecisionKind = policy === "operator" ? "held_operator"
+          : policy === "adopt" ? "held_adopt" : "held_until_input_changes";
+        return { ...base, decision, heldBy };
+      }
       // Not due: cooling down (retryAt known) or cut by this tick's AIMD rate.
       const retryAt = coolingDown(state, DISPATCH_RECOVERY_DOMAIN, recoveryId, nowMs)
         ? new Date(backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, recoveryId)).toISOString()
