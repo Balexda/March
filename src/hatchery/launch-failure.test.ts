@@ -91,7 +91,7 @@ describe("parseLaunchFailure", () => {
 
 describe("parseLsTreeBlobs", () => {
   it("reports each path's blob, null when absent", () => {
-    const out = "100644 blob 1111111111111111111111111111111111111111\tspecs/a.tasks.md\n";
+    const out = "100644 blob 1111111111111111111111111111111111111111\tspecs/a.tasks.md\0";
     expect(parseLsTreeBlobs(out, ["specs/a.tasks.md", "specs/a.spec.md"])).toEqual([
       { path: "specs/a.tasks.md", blob: "1111111111111111111111111111111111111111" },
       { path: "specs/a.spec.md", blob: null },
@@ -99,9 +99,16 @@ describe("parseLsTreeBlobs", () => {
   });
 
   it("a ./-prefixed path resolves to the same blob, keeping the caller's spelling", () => {
-    const out = "100644 blob 1111111111111111111111111111111111111111\tspecs/a.tasks.md\n";
+    const out = "100644 blob 1111111111111111111111111111111111111111\tspecs/a.tasks.md\0";
     expect(parseLsTreeBlobs(out, ["./specs/a.tasks.md"])).toEqual([
       { path: "./specs/a.tasks.md", blob: "1111111111111111111111111111111111111111" },
+    ]);
+  });
+
+  it("matches a name git would quote without -z (non-ASCII)", () => {
+    const out = "100644 blob 2222222222222222222222222222222222222222\tspecs/café.tasks.md\0";
+    expect(parseLsTreeBlobs(out, ["specs/café.tasks.md"])).toEqual([
+      { path: "specs/café.tasks.md", blob: "2222222222222222222222222222222222222222" },
     ]);
   });
 });

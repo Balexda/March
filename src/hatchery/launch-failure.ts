@@ -243,14 +243,16 @@ function uniquePaths(paths: readonly string[]): string[] {
  * an absent artifact never fails the whole read (unlike `rev-parse`).
  */
 export function lsTreeArgs(rev: string, paths: readonly string[]): string[] {
-  return ["ls-tree", "--full-tree", rev, "--", ...uniquePaths(paths)];
+  // -z: NUL-terminated records with verbatim names, so a quoted-on-output path
+  // (non-ASCII, `"`, `\`) still matches the requested spelling.
+  return ["ls-tree", "-z", "--full-tree", rev, "--", ...uniquePaths(paths)];
 }
 
 /** Parse {@link lsTreeArgs} output into one entry per path (`blob: null` = absent). */
 export function parseLsTreeBlobs(stdout: string, paths: readonly string[]): DeclinedArtifact[] {
   const blobs = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    const m = /^\d+ blob ([0-9a-f]{7,64})\t(.+)$/.exec(line);
+  for (const record of stdout.split("\0")) {
+    const m = /^\s*\d+ blob ([0-9a-f]{7,64})\t([\s\S]+)$/.exec(record);
     if (m) blobs.set(m[2], m[1]);
   }
   // ls-tree prints tree-entry names, so `./specs/x` is looked up as `specs/x`.
