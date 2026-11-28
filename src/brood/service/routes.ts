@@ -488,7 +488,43 @@ export async function registerRoutes(
       reply.code(404);
       return { error: `No session with id "${id}".` };
     }
-    return record;
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    // Padded values (`?reconcile= false `) are trimmed; anything else that is
+    // not exactly true/false, or a repeated parameter, is rejected.
+    const reconcile = readBooleanQuery(
+      typeof query.reconcile === "string" ? query.reconcile.trim() : query.reconcile,
+      "reconcile",
+    );
+    if (!reconcile.ok) {
+      reply.code(400);
+      return { error: reconcile.error };
+    }
+    if (reconcile.value === false) return deriveBroodReadView(record, {});
+    // Inspect reconciliation is on by default and degrades rather than fails:
+    // an unreachable liveness source still returns the registry record, marked
+    // `reconciled: false`, with an errored span recording why.
+    const observer = opts.containerObserver ?? dockerContainerObserver();
+    try {
+      const observed = await observer.observe(
+        record.containerId ? [record.containerId] : [],
+      );
+      return deriveBroodReadView(record, { observed });
+    } catch (err) {
+      const span = startBroodSpan({
+        name: "brood.inspect.reconcile",
+        key: id,
+        traceparent: inboundTraceparent(request.headers),
+        attributes: {
+          "march.session.id": id,
+          "march.session.kind": record.kind,
+          "march.brood.reconciled": false,
+          "march.brood.reconcile_error":
+            err instanceof Error ? err.message : String(err),
+        },
+      });
+      span.end({ error: true });
+      return deriveBroodReadView(record, {});
+    }
   });
 
   app.get("/sessions/:id/extraction-readiness", async (request, reply) => {
