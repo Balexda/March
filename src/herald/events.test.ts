@@ -745,3 +745,32 @@ describe("operator relaunch fold (#593)", () => {
     expect(kept.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
   });
 });
+
+describe("slice.escalated launch-failure class (launch-failure recovery step 2)", () => {
+  const failure = {
+    class: "branch_collision", retry: "operator", reason: "branch_collision",
+    evidence: { branch: "feature/x", commits: ["ada24ade" + "0".repeat(32)], commitCount: 1, touchedFileCount: 13 },
+  };
+
+  it("folds the class and evidence so a restart keeps the hold", () => {
+    const state = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", jobId: "j1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed", failure }),
+    ]);
+    expect(state.slices.s1).toMatchObject({ stage: "escalated", escalatedReason: "hatchery_dispatch_failed", escalationFailure: failure });
+  });
+
+  it("keeps folding pre-change escalations that carry no failure", () => {
+    const state = foldEvents([ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" })]);
+    expect(state.slices.s1!.escalatedReason).toBe("hatchery_dispatch_failed");
+    expect(state.slices.s1!.escalationFailure).toBeUndefined();
+  });
+
+  it("drops the class on a fresh dispatch, a recovery request, a new reason, or leaving escalated", () => {
+    const held = () => [ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed", failure })];
+    expect(foldEvents([...held(), ev({ type: "slice.dispatched", sliceId: "s1", jobId: "j2" })]).slices.s1!.escalationFailure).toBeUndefined();
+    expect(foldEvents([...held(), ev({ type: "slice.recovery.requested", sliceId: "s1" })]).slices.s1!.escalationFailure).toBeUndefined();
+    expect(foldEvents([...held(), ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" })]).slices.s1!.escalationFailure).toBeUndefined();
+    expect(foldEvents([...held(), ev({ type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" })]).slices.s1!.escalationFailure).toBeUndefined();
+  });
+});

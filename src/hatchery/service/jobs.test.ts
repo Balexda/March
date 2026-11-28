@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { errorMessage, JobStore, type JobLogger } from "./jobs.js";
-import type { HatcherySpawnResult } from "../spawn-handoff.js";
+import { HatcherySpawnError, type HatcherySpawnResult } from "../spawn-handoff.js";
 import { IntegrationOutcomeError } from "../integration-outcome.js";
 import type { SpawnRequest } from "./types.js";
 
@@ -94,6 +94,47 @@ describe("JobStore", () => {
     await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
     expect(store.get(record.id)?.error?.application).toEqual(application);
     expect(store.get(record.id)?.integrationOutcome).toEqual(outcome);
+  });
+
+  it("carries the structured failure a throw site attached (launch-failure step 2)", async () => {
+    const failure = {
+      class: "agent_declined" as const, retry: "until_input_changes" as const, reason: "agent_declined",
+      evidence: { agentMessage: "Slice 1 is blocked until SD-001 is resolved." },
+    };
+    const store = new JobStore({
+      executor: async () => { throw new HatcherySpawnError("Spawn 1 exited 3; manager prompt was not sent.", failure); },
+    });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
+    expect(store.get(record.id)?.error).toMatchObject({ message: expect.stringContaining("exited 3"), failure });
+  });
+
+  it("keeps the class on an integration outcome that hid it behind extraction_rejected", async () => {
+    const outcome = {
+      spawnId: "spawn-1", status: "failed" as const, failureReason: "extraction_rejected" as const,
+      diagnostic: "Spawn output did not yield an eligible patch.", completedAt: "2026-11-27T12:00:00.000Z",
+    };
+    const failure = {
+      class: "branch_collision" as const, retry: "operator" as const, reason: "branch_collision",
+      evidence: { branch: "feature/x", commits: ["ada24ade" + "0".repeat(32)], commitCount: 1, touchedFileCount: 13 },
+    };
+    const store = new JobStore({
+      executor: async () => {
+        const err = new IntegrationOutcomeError(outcome);
+        err.launchFailure = failure;
+        throw err;
+      },
+    });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
+    expect(store.get(record.id)?.error?.failure).toEqual(failure);
+  });
+
+  it("classifies an unstructured failure from its bounded reason code (fail-open auto)", async () => {
+    const store = new JobStore({ executor: async () => { throw new Error("Castra session launch failed: boom"); } });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
+    expect(store.get(record.id)?.error?.failure).toEqual({ class: "castra_error", retry: "auto", reason: "castra_error" });
   });
 
   it("logs profile/task_type/slice_id on the spawn-start record", async () => {

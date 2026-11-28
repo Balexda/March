@@ -59,6 +59,13 @@ durable failure or fences an attempt without an outcome. When the attempt
 matches the current dispatch, the fold stores `integrationFailure`
 and moves the slice to `escalated` with reason `hatchery_dispatch_failed`.
 The failure has a null spawn ID when no spawn was linked or reported.
+A `slice.escalated` transition may carry a `failure` (the Hatchery launch-failure
+`{ class, retry, reason, evidence? }`, see the Hatchery contract). `POST /events`
+rejects an unknown class or retry policy and stores only the bounded evidence
+fields. The fold keeps it as the slice's `escalationFailure`. An escalation with a
+reason but no failure clears it, as do a fresh `slice.dispatched`, a
+`slice.recovery.requested`, and a `slice.stage.changed` to any stage other than
+`escalated`. Events without `failure` fold as before.
 A new attempt clears the prior fallback. When `MARCH_LEGATE_OPERATOR_TOKEN`
 is set, this failure transition requires the bearer token.
 

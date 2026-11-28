@@ -93,6 +93,7 @@ Spawn request body:
 | `attemptId` | string | No | Dispatch attempt ID and Hatchery job ID. Supply it with `stewardDeadline`. |
 | `stewardDeadline` | ISO UTC timestamp string | No | Absolute integration deadline. Supply it with `attemptId`. It also aborts the Castra Steward session launch. If Castra creates the session after the deadline, Hatchery stops it and records `timeout`. |
 | `toolchain` | string | No | Toolchain selection. `auto` or absent lets Hatchery detect the stack; explicit values must be in Hatchery's allow-list. |
+| `artifactPaths` | string[] | No | Up to 8 repo-relative plan artifacts (the slice's task file and parent spec). When the agent declines, `error.failure.evidence.artifacts` carries each one's blob id at the snapshot base. |
 
 ### `GET /spawns/:id`
 
@@ -126,6 +127,7 @@ Job record response:
 | `error.agentFailureReason` | string | Validated agent failure category when available. |
 | `error.publication` | object | Bounded `commit_failed`, `push_failed`, or `timeout` with the spawn ID, recorded branch, patch digest, and local commit when available. |
 | `error.message` | string | Present when execution fails. |
+| `error.failure` | `LaunchFailure` | Present on every failed job: `{ class, retry, reason, evidence? }` (`src/hatchery/launch-failure.ts`). `class` is a bounded launch-failure class (`castra_error`, `docker_error`, `timeout`, `worker_exit`, `tessera_unreachable`, `rate_limit`, `patch_apply_failed`, `patch_conflict`, `extraction_rejected`, `commit_failed`, `push_failed`, `pr_failed`, `persistence`, `missing_lifecycle`, `branch_collision`, `agent_declined`, `auth`, `other`). `retry` is the policy the legate follows: `auto` (backoff), `adopt` (an open PR owns the branch), `operator` (unpushed work in the way), or `until_input_changes` (the agent declined). `evidence` is bounded and never holds raw subprocess output: the colliding `branch`, its `worktreePath` and `verdict`, up to 10 unpushed `commits` with `commitCount` and `touchedFileCount`, open `prNumbers`, the agent's last message (`agentMessage`, at most 2,000 characters, token-shaped strings redacted), the snapshot `baseCommit`, and each plan `artifacts` entry's blob id at that commit. A failure that also carries an `integrationOutcome` keeps the class its throw site knew, so a diverged collision is not reported only as `extraction_rejected`. |
 | `error.application` | object | Present when the Steward apply path fails. Includes `spawnId`, `status: "failed"`, `touchedPaths`, and a bounded `diagnostic` code. `error.application` and `error.publication` stay present when the failure also carries an `integrationOutcome`, including across the worker thread boundary. |
 
 Hatchery binds publication to the Brood-recorded linked checkout. It checks the
@@ -183,7 +185,9 @@ restarts or evicts its job. [March vision](../../vision.md) ·
 - The service accepts a spawn request only after `prompt`, `backend`, and `repoPath` are present and usable by the HTTP boundary.
 - `POST /spawns` creates an in-memory job and returns before the spawn worker reaches a terminal state.
 - Job status is one of `pending`, `running`, `succeeded`, or `failed`.
-- A successful job record exposes `result`; a failed job record exposes `error.message`.
+- A successful job record exposes `result`; a failed job record exposes `error.message` and `error.failure`.
+- A worker that exits 3 with the scaffold's "worker produced no commit and the worktree is clean" marker is `agent_declined` (`until_input_changes`); any other non-zero exit is `worker_exit` (`auto`). A `manager.launch` collision is classified from the self-heal verdict: unsafe `open-pr` → `adopt`, unsafe `diverged` → `operator`, anything else → `auto`.
+- With `MARCH_HATCHERY_PARK_FAILED` set, the parked manifest records `failureClass` and `parkedAt`. Of a slice's parked spawns with the same class, only the first and the latest are kept; the rest are removed by the exact parked worktree path and branch the manifest names, with their kept container and image (never a blanket prune). Manifests without a `failureClass` are left alone.
 - Terminal job records may be evicted after the service's retention window, after which lookup is treated as an unknown job id.
 - `/readyz` is the dependency gate for useful service work; `/healthz` is only a basic process-health route. The container healthcheck uses `/healthz`, so a credential outage never restart-loops Hatchery.
 
@@ -196,6 +200,7 @@ restarts or evicts its job. [March vision](../../vision.md) ·
 | Unknown backend | `POST /spawns` | `400` with `{ "error": string }` | The backend name is not registered; the message includes supported backend names. |
 | Missing repo path | `POST /spawns` | `400` with `{ "error": string }` | The body has no non-empty string `repoPath`. |
 | Invalid toolchain | `POST /spawns` | `400` with `{ "error": string }` | A provided `toolchain` is not one of Hatchery's allowed selections. |
+| Invalid artifact paths | `POST /spawns` | `400` with `{ "error": string }` | `artifactPaths` is not an array of at most 8 non-empty repo-relative paths (absolute paths and `..` segments are rejected). |
 | Unknown job id | `GET /spawns/:id` | `404` with `{ "error": string }` | No retained job record exists for the requested id. |
 | Readiness down | `GET /readyz` | `503` with the readiness body, `state: "down"`, `ready: false` | Docker or Castra is unavailable, Tessera cannot give Hatchery a GitHub credential, or the last 5 or more spawns failed. `reasons` names each cause. |
 

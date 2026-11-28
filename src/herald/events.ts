@@ -16,6 +16,7 @@
  */
 
 import type { PrIntegrationResult } from "../brood/service/types.js";
+import { parseLaunchFailure, type LaunchFailure } from "../hatchery/launch-failure.js";
 
 /** Operator slice levers that leave a durable request in the fold (#593). */
 export type OperatorSliceAction = "merge" | "relaunch";
@@ -189,8 +190,12 @@ export type EventBody =
       /** The operator relaunch request this relaunch settled (#593); absent for automatic relaunches. */
       requestSeq?: number;
     }
-  /** The slice was escalated for legate judgement. */
-  | { type: "slice.escalated"; sliceId: string; reason?: string }
+  /** The slice was escalated for legate judgement. `failure` (launch-failure
+   *  recovery step 2) is the structured Hatchery launch-failure class, retry
+   *  policy, and bounded evidence for a `hatchery_dispatch_failed` escalation —
+   *  folded so a restart keeps the hold instead of re-dispatching. Optional:
+   *  events from before it existed fold as before. */
+  | { type: "slice.escalated"; sliceId: string; reason?: string; failure?: LaunchFailure }
   /**
    * A steward SELF-REPORT of its own state (push, not scrape): the steward's hook
    * fires when it parks, reads its last message chunk, and POSTs here. `classified`
@@ -413,6 +418,11 @@ export interface SliceState extends SliceActionKey {
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
+  /** The structured launch failure behind a `hatchery_dispatch_failed`
+   *  escalation, from `slice.escalated.failure`. Cleared by a fresh dispatch, a
+   *  recovery request, a stage change out of `escalated`, or an escalation for a
+   *  different reason. */
+  escalationFailure?: LaunchFailure;
   /** The steward's latest SELF-REPORT (#steward-self-report): its own classified
    *  state + a one-line summary, pushed via its hook (not scraped). The legate acts
    *  on `status` off the fold (e.g. `awaiting_input` → escalate). */
@@ -694,6 +704,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
         if (!slice.integrationFailure) {
           slice.stage = "hatchery-pending";
           delete slice.escalatedReason;
+          delete slice.escalationFailure;
         }
       }
       if (event.branch !== undefined) slice.branch = event.branch;
@@ -740,6 +751,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       if (event.spawnId !== undefined) slice.spawnId = event.spawnId;
       slice.stage = event.stage;
+      if (event.stage !== "escalated") delete slice.escalationFailure;
       // A merge (operator-requested or the auto-merge gate) settles any pending
       // operator merge request (#593).
       if (event.stage === "merged") delete slice.mergeRequested;
@@ -793,6 +805,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
         const slice = sliceOf(state, event.sliceId);
         slice.recoveryRung = event.rung ?? 0;
         delete slice.escalatedReason;
+        delete slice.escalationFailure;
       }
       for (const key of Object.keys(state.retries)) {
         if (key === event.sliceId || key.endsWith(":" + event.sliceId)) delete state.retries[key];
@@ -829,7 +842,14 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.escalated": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = "escalated";
-      if (event.reason !== undefined) slice.escalatedReason = event.reason;
+      if (event.reason !== undefined) {
+        slice.escalatedReason = event.reason;
+        // The failure describes THIS escalation; a new reason without one drops
+        // the previous escalation's class.
+        const failure = parseLaunchFailure(event.failure);
+        if (failure) slice.escalationFailure = failure;
+        else delete slice.escalationFailure;
+      }
       break;
     }
     case "slice.steward.report": {

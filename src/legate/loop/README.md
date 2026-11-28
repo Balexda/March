@@ -192,6 +192,12 @@ fresh-launch path (`recoverDispatch` → `launchDispatch`), gated two ways:
   `transient_retry_counts` keyed `dispatch-recovery:<sliceId>`). After the limit
   the slice falls back to the operator-only escalation, so a genuinely-terminal
   failure can't loop.
+- the **launch-failure class** (launch-failure recovery step 2): Hatchery reports
+  `error.failure = {class, retry, evidence}` on the job and the legate folds it onto
+  `slice.escalated`. Only `retry: auto` keeps the backoff; `operator` (unpushed work
+  in the way) and `adopt` (an open PR) are never re-dispatched, and
+  `until_input_changes` (`agent_declined`) re-dispatches once when the task file or
+  parent spec changes on the default branch (`rearmDeclinedHolds`).
 
 The recoverable class is selected by the pure `recoverableEscalations`
 (`pure/slice.ts`), disjoint from `dispatchableReady` (an escalated slice reads as
@@ -228,7 +234,7 @@ handler — the `slice.recovery.requested` (operator) and the ensuing fresh
 |---------------|---------|
 | `GET /healthz` | liveness + `build` stamp (service, version, describe, commit, built_at, started_at; unset values are `null`) |
 | `GET /status` | latest heartbeat snapshot (last tick, queue, workers, counts) plus the same `build` stamp; `?profile=` for one profile |
-| `GET /escalations` | escalated slices needing an operator (reason, PR, session, worktree); `?profile=` for one profile |
+| `GET /escalations` | escalated slices needing an operator (reason, PR, session, worktree, and the launch `failure` class/retry/evidence); `?profile=` for one profile |
 | `POST /escalations/:sliceId/respond` | answer (`message`) or acknowledge (`ack:true`) a `steward_awaiting_input` escalation on a live steward |
 | `POST /slices/:sliceId/requeue` | discard the slice's attempt (session, worktree, branch; open PR only with `closePr:true`) and re-dispatch it fresh — works on dead sessions and pending questions ([#588](https://github.com/Balexda/March/issues/588)); 202 + the [`requeue`](./handlers/requeue.ts) handler acts next tick |
 

@@ -47,6 +47,49 @@ import {
   increaseDispatchRecoveryRate,
 } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
+import {
+  isHeldPolicy,
+  launchFailureFromReason,
+  parseLaunchFailure,
+  type LaunchFailure,
+} from "../../../hatchery/launch-failure.js";
+
+/**
+ * The structured launch failure a failed job reports (`job.error.failure`), else
+ * one derived from the integration `failureReason` — never from the message
+ * text. Undefined when neither is available (an older Hatchery on the job-only
+ * path), which keeps today's auto-retry.
+ */
+export function failureOfJob(job: any, integrationFailure?: Extract<PrIntegrationResult, { status: "failed" }>): LaunchFailure | undefined {
+  const reported = parseLaunchFailure(job?.error?.failure);
+  if (reported) return reported;
+  return integrationFailure ? launchFailureFromReason(integrationFailure.failureReason) : undefined;
+}
+
+/** One line naming why a held launch failure is not retried, with its evidence. */
+export function describeHeldFailure(failure: LaunchFailure): string {
+  const e = failure.evidence ?? {};
+  switch (failure.retry) {
+    case "operator": {
+      const commits = e.commits?.length ? " (" + e.commits.map((c) => c.slice(0, 8)).join(", ")
+        + (e.commitCount && e.commitCount > e.commits.length ? ", …" : "") + ")" : "";
+      return "Branch " + (e.branch ?? "?") + " holds " + (e.commitCount ?? e.commits?.length ?? "unknown")
+        + " unpushed commit(s)" + commits + " touching " + (e.touchedFileCount ?? "?") + " file(s)"
+        + (e.worktreePath ? " in " + e.worktreePath : "")
+        + ". The loop will not retry; an operator must keep or discard that work (requeue) before this slice can dispatch.";
+    }
+    case "until_input_changes":
+      return "The agent declined to build this slice" + (e.agentMessage ? ": " + e.agentMessage : ".")
+        + "\n\nThe loop will not retry until the task file or its parent spec changes on the default branch"
+        + (e.artifacts?.length ? " (" + e.artifacts.map((a) => a.path).join(", ") + ")" : "")
+        + "; it then dispatches once.";
+    case "adopt":
+      return "An open PR (" + (e.prNumbers?.map((n) => "#" + n).join(", ") || "?") + ") already owns branch "
+        + (e.branch ?? "?") + "; the loop adopts it instead of spawning again.";
+    default:
+      return "";
+  }
+}
 
 /**
  * Self-heal bookkeeping for a FAILED (re-)dispatch (#460): schedule the slice's
@@ -110,10 +153,12 @@ async function adoptOpenPrOnCollision(
   sliceId: string,
   errorText: string,
   deps: DispatchIoDeps,
+  failure?: LaunchFailure,
 ): Promise<any | null> {
   // Only a "branch already exists" collision is an adopt candidate; everything
-  // else escalates as before.
-  if (!/already exists/i.test(errorText)) return null;
+  // else escalates as before. A structured class decides when one is present.
+  const collision = failure ? failure.class === "branch_collision" : /already exists/i.test(errorText);
+  if (!collision) return null;
   const slice = state.slices?.[sliceId];
   if (!slice || typeof slice !== "object") return null;
 
@@ -130,6 +175,7 @@ async function adoptOpenPrOnCollision(
   // Clear any escalation residue — adoption resolves the situation cleanly, so the
   // slice must not read as operator-only.
   slice.escalated_reason = undefined;
+  slice.launch_failure = undefined;
   slice.last_action = ts;
   slice.last_action_note = "Adopted existing open PR #" + number + " on branch-collision (#173)";
   // Record the stage transition in the fold (#255). No `slice.pr.changed` re-emit:
@@ -150,6 +196,12 @@ async function adoptOpenPrOnCollision(
     sessionId: slice.worker_session_id || null,
     detail: "adopted existing open PR #" + number + " from branch-collision",
   };
+}
+
+/** The repo-relative plan artifacts an item builds from: its file and parent spec. */
+export function dispatchArtifactPaths(item: any): string[] {
+  return [...new Set([item?.path, item?.parent_path].filter((p: unknown): p is string =>
+    typeof p === "string" && p.length > 0 && !p.startsWith("/") && !p.split("/").includes("..")))];
 }
 
 /** Raised before the spawn request leaves Legate, so Hatchery never saw it. */
@@ -199,6 +251,9 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
     // Use the caller's slice id so the spawn, the in-memory slice, and the emitted
     // transitions all correlate under one id (single source of truth).
     sliceId,
+    // The plan artifacts the slice builds from, so a declined spawn reports the
+    // blob it declined at (launch-failure recovery step 2).
+    ...(dispatchArtifactPaths(item).length > 0 && { artifactPaths: dispatchArtifactPaths(item) }),
     ...attempt,
   };
   const created = await deps.postSpawn(spawnRequest);
@@ -233,9 +288,11 @@ async function cullOrphanedSteward(
   ts: string,
   deps: DispatchIoDeps,
   attemptId?: string,
+  failure?: LaunchFailure,
 ): Promise<any | null> {
   if (!deps.cullStewardForSlice) return null;
   if (/already exists/i.test(errorText)) return null;
+  if (failure?.class === "branch_collision") return null;
   try {
     const res = attemptId === undefined
       ? await deps.cullStewardForSlice(sliceId, branch)
@@ -351,6 +408,7 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       existing.escalated_reason = "hatchery_dispatch_failed";
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
+      existing.launch_failure = undefined;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
       // #460: same self-heal bookkeeping as the async drain — back off + decrease R.
       recordDispatchRecoveryFailure(state, sliceId, ts);
@@ -505,6 +563,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     integrationFailure?: Extract<PrIntegrationResult, { status: "failed" }>,
     agentFailureReason?: AgentFailureReason,
     publicationPreserved = Boolean(integrationFailure?.commit || integrationFailure?.pullRequest),
+    failure?: LaunchFailure,
   ) => {
     slice.stage = "escalated";
     // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
@@ -512,11 +571,29 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     slice.escalated_reason = "hatchery_dispatch_failed";
     slice.last_action = ts;
     slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
-    if (!integrationFailure) deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
-    // #460: schedule this slice's next exponential-backoff window + AIMD-decrease
-    // the recovery rate, so the loop keeps re-dispatching indefinitely but ever
-    // further apart and without stampeding after a burst.
-    recordDispatchRecoveryFailure(state, sliceId, ts);
+    // Step 2: the structured class decides the retry. It rides on the folded
+    // `slice.escalated` so a restart keeps the hold (no retry storm).
+    slice.launch_failure = failure;
+    if (!integrationFailure || failure) {
+      deps.emitTransition({
+        type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed", ...(failure && { failure }),
+      });
+    }
+    const held = isHeldPolicy(failure?.retry);
+    if (held && failure) {
+      // A failure that needs a change is not retried, so it neither schedules a
+      // backoff nor slows other slices' recovery (it is not an outage).
+      emitLoopSpan({
+        name: "legate.dispatch.held", traceKey: sliceId, root: false, error: true,
+        attributes: { "march.failure_class": failure.class, "march.retry_policy": failure.retry },
+      });
+      deps.log("[" + ts + "] dispatch " + sliceId + ": held (" + failure.class + ", " + failure.retry + ") — not retried");
+    } else {
+      // #460: schedule this slice's next exponential-backoff window + AIMD-decrease
+      // the recovery rate, so the loop keeps re-dispatching indefinitely but ever
+      // further apart and without stampeding after a burst.
+      recordDispatchRecoveryFailure(state, sliceId, ts);
+    }
     // The spawn failed before reaching a useful steward; cull the session it may
     // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
     // rollback can't reach) so it does not leak or hold a budget slot.
@@ -524,10 +601,10 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // before a commit or PR exists, so a preserved publication stays resumable.
     const attemptId = slice.hatchery?.attempt_id;
     if (!integrationFailure) {
-      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
+      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, undefined, failure);
       if (culled) actions.push(culled);
     } else if (typeof attemptId === "string" && !publicationPreserved) {
-      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, attemptId);
+      const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps, attemptId, failure);
       if (culled) actions.push(culled);
     }
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
@@ -535,7 +612,22 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
       slice_id: sliceId, command: commandLine, error: errorText,
       ...(integrationFailure && { failure_reason: integrationFailure.failureReason }),
       ...(agentFailureReason && { agent_failure_reason: agentFailureReason }),
+      ...(failure && { failure_class: failure.class, retry_policy: failure.retry }),
     });
+    if (held && failure) {
+      // Held: tell the operator now, once per distinct failure — there is no
+      // retry budget to wait out.
+      notifications.push({
+        slice, sliceId,
+        requestKey: "hatchery-held:" + sliceId + ":" + failure.class + ":"
+          + hashText(JSON.stringify(failure.evidence ?? {})).slice(0, 12),
+        reason: "hatchery_dispatch_failed",
+        detail: "Hatchery dispatch for " + commandLine + " failed (" + failure.class + ") and is held, not retried.\n\n"
+          + describeHeldFailure(failure) + "\n\nError:\n" + errorText.trim(),
+      });
+      mutated = true;
+      return;
+    }
     // Only escalate to the operator once auto-recovery is out of budget. Within
     // budget the loop re-dispatches this slice itself (#211) on this same tick, so
     // a judgement request here fires before recovery runs and would prompt the
@@ -587,9 +679,20 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
           slice.integration_outcome = outcome;
           // The cleanup decision keeps the newest observation: a commit or PR
           // seen after the first stored failure still protects its checkout.
+          const failure = failureOfJob(job, outcome);
+          // An open-PR collision is adopted from the fold, never re-spawned.
+          if (failure?.retry === "adopt") {
+            const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, "", deps, failure);
+            if (adopted) {
+              actions.push(adopted);
+              mutated = true;
+              continue;
+            }
+          }
           await escalate(
             slice, sliceId, outcome.failureReason + ": " + outcome.diagnostic, outcome, job?.error?.agentFailureReason,
             Boolean(outcome.commit || outcome.pullRequest || observed.commit || observed.pullRequest),
+            failure,
           );
           continue;
         }
@@ -630,13 +733,14 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         // slice's open PR is an adopt, not an escalate. The async service model
         // surfaces the collision here (the spawn runs after POST /spawns' 202), so
         // the same forge-truth check that guards the launch path guards this one.
-        const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps);
+        const failure = job.status === "failed" ? failureOfJob(job) : undefined;
+        const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps, failure);
         if (adopted) {
           actions.push(adopted);
           mutated = true;
           continue;
         }
-        await escalate(slice, sliceId, errorText);
+        await escalate(slice, sliceId, errorText, undefined, undefined, undefined, failure);
         continue;
       }
     }

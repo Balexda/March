@@ -12,6 +12,7 @@
  * are profile-agnostic); what remains here is composition: build the per-profile
  * deps, run the coordinator, schedule the interval.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +73,7 @@ import {
 // Legate-judgement requests (#144): event build + dedup + doorbell, behind
 // injected I/O; runtime supplies the concrete sinks.
 import { requestJudgement } from "./judgement.js";
+import { lsTreeArgs, parseLsTreeBlobs } from "../../hatchery/launch-failure.js";
 // Loop domain → OTel payload mapping (#144): action events → spans/logs, and the
 // heartbeat record → the loop-metrics activity. The OTel SDK wiring lives behind.
 import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan, recordActionEventMetrics } from "./loop-telemetry.js";
@@ -1069,6 +1071,25 @@ async function cullStewardForSlice(
   return { culled: true, sessionId: matches[0].sessionId };
 }
 
+/**
+ * Blob ids of plan artifacts on the plan checkout's `HEAD` (the default branch
+ * Herald keeps synced), for the `agent_declined` re-arm. One local `git ls-tree`
+ * — no network, no gh — and only while a hold is waiting. Null on any failure,
+ * which keeps the hold.
+ */
+function readArtifactRevisions(repoPath: unknown, paths: readonly string[]): Record<string, string | null> | null {
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  if (paths.length === 0) return {};
+  try {
+    const stdout = execFileSync("git", ["-c", "safe.directory=" + repoPath, ...lsTreeArgs("HEAD", paths)], {
+      cwd: repoPath, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, killSignal: "SIGKILL",
+    });
+    return Object.fromEntries(parseLsTreeBlobs(stdout, paths).map((a) => [a.path, a.blob]));
+  } catch {
+    return null;
+  }
+}
+
 // Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
 function dispatchIoDeps(meta: any): DispatchIoDeps {
   const hatcheryUrl = resolveHatcheryUrl(env);
@@ -1175,6 +1196,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     recoverDispatch: (rawState: any, ts: string, item: any, sliceId: string, attempt: number) =>
       recoverDispatch(rawState, ts, item, sliceId, attempt, ioDeps),
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
+    artifactRevisions: async (paths: readonly string[]) => readArtifactRevisions(meta.repo?.path, paths),
   };
 
   const sense = async () => {

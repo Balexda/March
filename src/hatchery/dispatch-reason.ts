@@ -41,6 +41,8 @@ function knownGitHubCode(code: string): string | undefined {
 
 const FIXED: ReadonlyArray<readonly [RegExp, string]> = [
   [/spawn worker exited/i, "worker_exit"],
+  // The worker scaffold's "real no-op" (`src/spawn/backends.ts`): exit 3, no commit.
+  [/worker produced no commit|Spawn \S+ exited 3;/i, "agent_declined"],
   [/already exists in index|corrupt patch|patch does not apply|git apply/i, "patch_apply_failed"],
   [/branch .*already exists|already exists.*branch|already checked out/i, "branch_collision"],
   [/Steward publication failed \(commit_failed\)/i, "commit_failed"],

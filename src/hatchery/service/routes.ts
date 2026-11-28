@@ -77,6 +77,17 @@ export function validateSpawnRequest(
     toolchain = body.toolchain;
   }
 
+  let artifactPaths: string[] | undefined;
+  if (body.artifactPaths !== undefined && body.artifactPaths !== null) {
+    const paths = body.artifactPaths as unknown;
+    if (!Array.isArray(paths) || paths.length > 8 ||
+        !paths.every((p) => typeof p === "string" && p.length > 0 && p.length <= 1024 &&
+          !p.startsWith("/") && !p.split("/").includes(".."))) {
+      return { ok: false, error: "artifactPaths must be up to 8 repo-relative paths." };
+    }
+    artifactPaths = [...paths] as string[];
+  }
+
   return {
     ok: true,
     request: {
@@ -94,6 +105,7 @@ export function validateSpawnRequest(
       sliceId: body.sliceId,
       ...(body.attemptId && { attemptId: body.attemptId, stewardDeadline: body.stewardDeadline }),
       toolchain,
+      ...(artifactPaths && { artifactPaths }),
     },
   };
 }

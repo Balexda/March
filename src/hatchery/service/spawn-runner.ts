@@ -4,7 +4,8 @@ import { Worker, parentPort } from "node:worker_threads";
 import { getBackend } from "../../spawn/backends.js";
 import { initOtel } from "../../observability/otel.js";
 import { startDispatchSpan } from "../../observability/spawn-trace.js";
-import { runHatcherySpawn, StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
+import { HatcherySpawnError, runHatcherySpawn, StewardApplyError, type HatcherySpawnResult } from "../spawn-handoff.js";
+import { launchFailureOf, parseLaunchFailure } from "../launch-failure.js";
 import type {
   SpawnRequest,
   SpawnWorkerData,
@@ -49,6 +50,8 @@ export function runSpawnInWorker(
         return;
       }
       const failure = workerIntegrationError(request.stewardDeadline);
+      const carried = launchFailureOf(error);
+      if (carried) failure.launchFailure = carried;
       const dispatch = startDispatchSpan({
         traceKey: request.sliceId?.trim() || request.attemptId,
         rootName: "hatchery.spawn.worker_failure",
@@ -73,17 +76,27 @@ export function runSpawnInWorker(
     };
     worker.once("message", (message: SpawnWorkerMessage) => {
       settle(() => {
-        if (message.ok) resolve(message.result);
-        else if (message.integrationOutcome) {
-          reject(new IntegrationOutcomeError(message.integrationOutcome, message.agentFailureReason).withDetails({
+        if (message.ok) {
+          resolve(message.result);
+          return;
+        }
+        // The structured class crosses the thread boundary as data; re-attach it
+        // to whichever error the service sees so the job record reports it.
+        const launchFailure = parseLaunchFailure(message.launchFailure);
+        const carry = <E extends Error>(e: E): E => {
+          if (launchFailure) (e as E & { launchFailure?: unknown }).launchFailure = launchFailure;
+          return e;
+        };
+        if (message.integrationOutcome) {
+          reject(carry(new IntegrationOutcomeError(message.integrationOutcome, message.agentFailureReason).withDetails({
             ...(message.application && { application: message.application }),
             ...(message.publication && { publication: message.publication }),
-          }));
+          })));
         }
-        else if (request.stewardDeadline) fail(new Error(message.error));
-        else if (message.application) reject(new StewardApplyError(message.application, false));
-        else if (message.publication) reject(new IntegrationPublicationError(message.publication));
-        else reject(new Error(message.error));
+        else if (request.stewardDeadline) fail(carry(new Error(message.error)));
+        else if (message.application) reject(carry(new StewardApplyError(message.application, false)));
+        else if (message.publication) reject(carry(new IntegrationPublicationError(message.publication)));
+        else reject(new HatcherySpawnError(message.error, launchFailure));
       });
     });
     worker.once("error", (err) => settle(() => fail(err)));
@@ -129,6 +142,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       attemptId: request.attemptId,
       stewardDeadline: request.stewardDeadline,
       toolchain: request.toolchain,
+      artifactPaths: request.artifactPaths,
     });
     message = { ok: true, result };
   } catch (err) {
@@ -139,6 +153,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       ...(err instanceof IntegrationOutcomeError ? err.details : {}),
       ...(err instanceof IntegrationPublicationError ? { publication: err.publication } : {}),
       ...(err instanceof StewardApplyError ? { application: err.application } : {}),
+      ...(launchFailureOf(err) ? { launchFailure: launchFailureOf(err) } : {}),
     };
   } finally {
     await otel.shutdown();

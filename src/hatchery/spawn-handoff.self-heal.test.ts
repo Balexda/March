@@ -162,6 +162,29 @@ describe("runHatcherySpawn manager.launch orphan-branch self-heal (#243)", () =>
     expect(removeSpawnWorktreeSpy).not.toHaveBeenCalled();
   });
 
+  it("classifies a diverged collision as branch_collision held for the operator (step 2)", async () => {
+    classifyVerdict.value = { kind: "unsafe", reason: "diverged" };
+    const err: any = await run(makeHome()).catch((e) => e);
+    expect(err.launchFailure).toMatchObject({
+      class: "branch_collision",
+      retry: "operator",
+      evidence: { branch: "feature/smithy/mark/m1-f6", verdict: "unsafe:diverged", worktreePath: "/wt/orphan" },
+    });
+  });
+
+  it("classifies an open-PR collision as adopt, carrying the PR number (step 2)", async () => {
+    classifyVerdict.value = { kind: "unsafe", reason: "open-pr", detail: "#7" };
+    const err: any = await run(makeHome()).catch((e) => e);
+    expect(err.launchFailure).toMatchObject({
+      class: "branch_collision", retry: "adopt", evidence: { prNumbers: [7] },
+    });
+  });
+
+  it("classifies a safe orphan it removed as an auto-retry collision (step 2)", async () => {
+    const err: any = await run(makeHome()).catch((e) => e);
+    expect(err.launchFailure).toMatchObject({ class: "branch_collision", retry: "auto" });
+  });
+
   it("re-throws the original error (no escalation) when the branch is already gone", async () => {
     classifyVerdict.value = { kind: "absent" };
     const home = makeHome();

@@ -83,6 +83,7 @@ export async function apply(
     // later cold-start rebuild see a consistent slice.
     slice.pr = pr;
     slice.escalated_reason = undefined;
+    slice.launch_failure = undefined;
     slice.last_action = ts;
     slice.last_action_note = "Adopted PR #" + pr.number + " from Herald observation on escalated branch (#173)";
     const sessionId = slice.worker_session_id || undefined;

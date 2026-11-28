@@ -14,6 +14,7 @@ import {
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import { BroodClient } from "../../brood/service/client.js";
 import { parseIntegrationOutcome } from "../../brood/service/integration.js";
+import { parseLaunchFailure } from "../../hatchery/launch-failure.js";
 import { selfBotLogin } from "../profiles/merge-policy.js";
 import { reviewWaitMs } from "../profiles/review-config.js";
 import type { ProfileStore } from "../profiles/store.js";
@@ -231,6 +232,15 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
       }
       body.outcome = outcome;
     }
+  }
+  // A launch-failure class on an escalation (step 2) must be a known class and
+  // policy with bounded evidence; normalize it so only the bounded copy is stored.
+  if (type === "slice.escalated" && body.failure !== undefined) {
+    const failure = parseLaunchFailure(body.failure);
+    if (!failure) {
+      return { ok: false, error: 'event "slice.escalated" failure must be a known launch-failure class and retry policy.' };
+    }
+    body.failure = failure;
   }
   // Transition events carry the steward sessionId so Herald's fold learns the
   // slice→session link PR discovery is gated on (#210). It is optional, but when
