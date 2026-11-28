@@ -423,9 +423,11 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       });
     } finally {
       vi.restoreAllMocks();
-      // initOtel({}) only swaps in the no-op handle; dispose the real
-      // providers (and the metric reader's export interval) first.
-      await otel.shutdown();
+      // initOtel({}) only swaps in the no-op handle, so also dispose the real
+      // providers (and the metric reader's export interval). Repo convention:
+      // don't await shutdown(); its OTLP flush blocks past the test timeout
+      // when no collector runs (CI). shutdown() swallows flush failures.
+      void otel.shutdown();
       initOtel({});
     }
   });
@@ -1171,9 +1173,11 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       });
     } finally {
       vi.restoreAllMocks();
-      // initOtel({}) only swaps in the no-op handle; dispose the real
-      // providers (and the metric reader's export interval) first.
-      await otel.shutdown();
+      // initOtel({}) only swaps in the no-op handle, so also dispose the real
+      // providers (and the metric reader's export interval). Repo convention:
+      // don't await shutdown(); its OTLP flush blocks past the test timeout
+      // when no collector runs (CI). shutdown() swallows flush failures.
+      void otel.shutdown();
       initOtel({});
     }
   });
